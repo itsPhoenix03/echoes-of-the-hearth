@@ -13,8 +13,18 @@
     #msg { position: fixed; top: 8px; left: 50%; transform: translateX(-50%); color: #ffd97a;
            background: rgba(0,0,0,.65); padding: 6px 14px; border-radius: 6px; font-size: 15px;
            z-index: 11; display: none; max-width: 60vw; text-align: center; }
-    #inv { position: fixed; bottom: 8px; left: 50%; transform: translateX(-50%); z-index: 10;
-           display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; max-width: 90vw; }
+    .modal { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 14;
+             background: rgba(10,15,20,.95); border: 1px solid #57a; border-radius: 10px;
+             padding: 18px 22px; max-width: 640px; max-height: 75vh; overflow-y: auto;
+             color: #fff; font-size: 14px; display: none; box-shadow: 0 8px 40px rgba(0,0,0,.6); }
+    .modal h3 { margin: 0 0 10px; color: #ffd97a; }
+    .modal .hint { color: #889; font-size: 12px; }
+    #inv { display: flex; gap: 6px; flex-wrap: wrap; max-width: 600px; }
+    #quickbar { position: fixed; bottom: 8px; left: 50%; transform: translateX(-50%); z-index: 10;
+                display: flex; gap: 6px; }
+    kbd { background: #2a3a4a; border: 1px solid #57a; border-radius: 4px; padding: 1px 7px;
+          font-family: monospace; font-size: 12px; }
+    #helpModal td { border: none; padding: 3px 12px 3px 0; vertical-align: top; }
     .slot { color: #fff; background: rgba(0,0,0,.6); padding: 5px 9px; border-radius: 6px; font-size: 13px;
             border: 1px solid #333; white-space: nowrap; }
     .slot.place { cursor: pointer; border-color: #6a5; }
@@ -24,9 +34,9 @@
     .slot.tool.eq { border-color: #ffd97a; background: rgba(80,70,20,.85); box-shadow: 0 0 6px rgba(255,217,122,.4); }
     .slot.use { cursor: pointer; border-color: #4aa; }
     .slot.use:hover { background: rgba(30,60,60,.85); }
-    #craftBtn { position: fixed; bottom: 8px; right: 8px; z-index: 10; background: #2a3a4a; color: #fff;
-                border: 1px solid #57a; border-radius: 6px; padding: 8px 14px; font-family: monospace;
-                font-size: 14px; cursor: pointer; }
+    #btns { position: fixed; bottom: 8px; right: 8px; z-index: 10; display: flex; gap: 6px; }
+    #btns button { background: #2a3a4a; color: #fff; border: 1px solid #57a; border-radius: 6px;
+                   padding: 8px 14px; font-family: monospace; font-size: 14px; cursor: pointer; }
     #craftPanel { position: fixed; bottom: 52px; right: 8px; width: 300px; max-height: 60vh; overflow-y: auto;
                   background: rgba(10,15,20,.92); color: #fff; border: 1px solid #57a; border-radius: 8px;
                   padding: 12px; font-size: 13px; z-index: 12; display: none; }
@@ -43,10 +53,39 @@
   <div id="hud"></div>
   <div id="objective"></div>
   <div id="msg"></div>
-  <div id="inv"></div>
-  <button id="craftBtn">Craft [C]</button>
+  <div id="quickbar"></div>
+  <div id="btns">
+    <button id="invBtn">Bag [I]</button>
+    <button id="craftBtn">Craft [C]</button>
+    <button id="helpBtn">? [H]</button>
+  </div>
   <div id="craftPanel"></div>
-  <div id="help">WASD move · SPACE jump · F attack · E gather/dig/use · C craft · 1-5 equip · T torch (in mine) · M mute · walk into water with a boat to sail · click 🔨 item then a tile to build · R rotate wall · stack walls/shelters by clicking</div>
+  <div id="invModal" class="modal">
+    <h3>🎒 Inventory <span class="hint">(I or ESC to close · click a 🔨 item to place it)</span></h3>
+    <div id="inv"></div>
+  </div>
+  <div id="helpModal" class="modal">
+    <h3>❓ How to play <span class="hint">(H or ESC to close)</span></h3>
+    <table>
+      <tr><td><kbd>W A S D</kbd> / arrows</td><td>Move (mud slows you; cliffs need jumping; falls hurt)</td></tr>
+      <tr><td><kbd>SPACE</kbd></td><td>Jump — clears 2-level ledges</td></tr>
+      <tr><td><kbd>F</kbd></td><td>Attack monsters / animals · demolish structures (half refund)</td></tr>
+      <tr><td><kbd>E</kbd></td><td>Gather · read notes · enter/exit mines · dig (underground) · awaken monoliths · collect water at shores</td></tr>
+      <tr><td><kbd>C</kbd></td><td>Crafting menu (needs the right station nearby)</td></tr>
+      <tr><td><kbd>I</kbd></td><td>Inventory bag</td></tr>
+      <tr><td><kbd>1–5</kbd></td><td>Equip axe / pickaxe / stone pickaxe / sword / iron sword</td></tr>
+      <tr><td><kbd>T</kbd></td><td>Place a torch (inside mines)</td></tr>
+      <tr><td><kbd>R</kbd></td><td>Rotate wall while placing</td></tr>
+      <tr><td><kbd>M</kbd></td><td>Mute sound</td></tr>
+      <tr><td><kbd>F9</kbd></td><td>Dev kit (only if server runs in dev mode)</td></tr>
+    </table>
+    <p><b>Survival:</b> eat (hunt + cook at campfire) and drink (E at water, click 💧) or you'll starve.
+    Campfires heal you, set your respawn, and shield wooden buildings from night Blight Storms.
+    Deserts need a Heat Cloak, snow needs a Fur Cloak. Shelter beside structures in sandstorms; reach a campfire in blizzards.</p>
+    <p><b>Building:</b> open the bag, click a 🔨 item, then click a tile. Click an existing wall/shelter to stack it higher. Walls block monsters; brutes smash them.</p>
+    <p><b>Boats:</b> craft one, then walk into the sea. Icebergs destroy wooden boats — a Starmetal-reinforced hull smashes through.</p>
+    <p><b>Goal:</b> follow the hidden notes 📜 across five distant islands, awaken all 4 Monoliths with forged Cores, build the World Engine at the Core Void, survive the final assault.</p>
+  </div>
   <script type="module" src="/src/main.ts"></script>
 </body>
 </html>

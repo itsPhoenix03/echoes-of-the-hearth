@@ -9,7 +9,7 @@ export const TILE_KEYS = ['grass', 'sand', 'snow', 'mud', 'water', 'blight'];
 // Four far-flung islands (Woods, Dunes, Spire, Marsh) + the Core island, separated by open ocean
 // wider than a screen — you cannot see one island from another.
 export const ISLES = [[80, 80], [240, 80], [80, 240], [240, 240]];
-export const ISLE_R = 40;
+export const ISLE_R = 56;
 export const MONOLITHS = ISLES;
 export const CORE = [160, 160];
 
@@ -44,9 +44,16 @@ export function genWorld(seed) {
       }
       tiles[i] = t;
       // icebergs ring the entire Frozen Spire — lethal to wooden hulls
-      if (t === T.WATER && Math.hypot(x - ISLES[2][0], y - ISLES[2][1]) < 72 && sct(x / 2 + 900, y / 2 + 900) > 0.72)
+      if (t === T.WATER && Math.hypot(x - ISLES[2][0], y - ISLES[2][1]) < 95 && sct(x / 2 + 900, y / 2 + 900) > 0.72)
         bergs.add(i);
-      elev[i] = t === T.WATER ? 0 : 1 + (el > 0.15 ? 1 : 0) + (el > 0.52 ? 1 : 0);
+      // more relief: gentler thresholds + ridged noise carves mountain chains and cliffs
+      if (t === T.WATER) elev[i] = 0;
+      else {
+        let e = 1 + (el > 0.05 ? 1 : 0) + (el > 0.42 ? 1 : 0);
+        const ridge = 1 - Math.abs(elevN(x / 13 + 40, y / 13 + 40));
+        if (ridge > 0.82 && e < 3) e++;
+        elev[i] = e;
+      }
       if (t === T.BLIGHT) elev[i] = 1;
       const vm = sct(x / 5 + 250, y / 5 + 250);
       veins[i] = vm > 0.68 ? 1 : vm < -0.74 ? 2 : 0;

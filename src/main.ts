@@ -43,6 +43,8 @@ class Hearth extends Phaser.Scene {
   snowFx!: Phaser.GameObjects.Particles.ParticleEmitter;
   sandFx!: Phaser.GameObjects.Particles.ParticleEmitter;
   sandOverlay!: Phaser.GameObjects.Rectangle;
+  blizFx!: Phaser.GameObjects.Particles.ParticleEmitter;
+  blizOverlay!: Phaser.GameObjects.Rectangle;
   offX = (SIZE - 1) * TW / 2;
   me!: Rig; px = 40; py = 40; hp = 10; hunger = 10; thirst = 10;
   inv: any = emptyInv(); tools = new Set<string>(); gear = new Set<string>(); equipped: string | null = null;
@@ -64,6 +66,9 @@ class Hearth extends Phaser.Scene {
   torchSpr = new Map<number, Phaser.GameObjects.Image>();
   darkRT!: Phaser.GameObjects.RenderTexture;
   notes: { x: number; y: number; text: string }[] = [];
+  shelterAnchor = -1; shelterLvl = 1;
+  intFloor: Phaser.GameObjects.Image[] = [];
+  furnSpr = new Map<number, Phaser.GameObjects.Image>();
   keys!: any;
   nightRect!: Phaser.GameObjects.Rectangle;
   ghost: Phaser.GameObjects.Sprite | null = null; placing: string | null = null; placeDir = 0;
@@ -108,6 +113,8 @@ class Hearth extends Phaser.Scene {
     this.load.svg('iceberg', '/sprites/iceberg.svg', { width: 44, height: 42 });
     this.load.svg('torch', '/sprites/torch.svg', { width: 16, height: 34 });
     this.load.svg('note', '/sprites/note.svg', { width: 26, height: 30 });
+    this.load.svg('chest', '/sprites/chest.svg', { width: 44, height: 38 });
+    this.load.svg('bed', '/sprites/bed.svg', { width: 52, height: 36 });
     this.load.svg('deer', '/sprites/animal.svg', { width: 36, height: 30 });
     this.load.svg('lizard', '/sprites/lizard.svg', { width: 36, height: 22 });
     this.load.svg('fox', '/sprites/fox.svg', { width: 34, height: 26 });
@@ -181,7 +188,8 @@ class Hearth extends Phaser.Scene {
     const g = this.add.graphics();
     g.fillStyle(0x9ac7ff); g.fillRect(0, 0, 2, 12); g.generateTexture('fx-rain', 2, 12); g.clear();
     g.fillStyle(0xffffff); g.fillCircle(3, 3, 3); g.generateTexture('fx-snow', 6, 6); g.clear();
-    g.fillStyle(0xd8b060); g.fillRect(0, 0, 12, 2); g.generateTexture('fx-sand', 12, 2); g.destroy();
+    g.fillStyle(0xd8b060); g.fillRect(0, 0, 12, 2); g.generateTexture('fx-sand', 12, 2); g.clear();
+    g.fillStyle(0xffffff); g.fillRect(0, 0, 10, 2.5); g.generateTexture('fx-bliz', 10, 3); g.destroy();
     this.rainFx = this.add.particles(0, 0, 'fx-rain', {
       x: { min: 0, max: 2200 }, y: -20, speedY: { min: 600, max: 800 }, speedX: { min: -60, max: -120 },
       lifespan: 1800, quantity: 8, alpha: { min: 0.4, max: 0.8 }, emitting: false
@@ -195,6 +203,14 @@ class Hearth extends Phaser.Scene {
       lifespan: 3000, quantity: 6, alpha: { min: 0.3, max: 0.7 }, emitting: false
     }).setScrollFactor(0).setDepth(999995);
     this.sandOverlay = this.add.rectangle(0, 0, 4000, 3000, 0xcc8833)
+      .setOrigin(0).setScrollFactor(0).setDepth(999994).setAlpha(0);
+    // blizzard: hard diagonal snow driven by wind + white-out haze
+    this.blizFx = this.add.particles(0, 0, 'fx-bliz', {
+      x: { min: -100, max: 2600 }, y: { min: -150, max: 1300 }, speedX: { min: -650, max: -450 }, speedY: { min: 120, max: 220 },
+      lifespan: 3200, quantity: 10, alpha: { min: 0.5, max: 0.95 }, scale: { min: 0.6, max: 1.2 },
+      rotate: 17, emitting: false
+    }).setScrollFactor(0).setDepth(999995);
+    this.blizOverlay = this.add.rectangle(0, 0, 4000, 3000, 0xdce8f5)
       .setOrigin(0).setScrollFactor(0).setDepth(999994).setAlpha(0);
   }
 
@@ -301,10 +317,28 @@ class Hearth extends Phaser.Scene {
     }
   }
 
+  addFurn(i: number, kind: string) {
+    if (this.furnSpr.has(i)) return;
+    const p = this.iso(i % SIZE, (i / SIZE) | 0);
+    const s = this.add.image(p.x, p.y + 28, kind).setOrigin(0.5, 0.9).setDepth(p.y + 28).setVisible(this.z === 2);
+    this.furnSpr.set(i, s);
+  }
+
   setZ(z: number) {
     if (this.z === z) return;
     this.z = z;
-    const surfA = z === 1 ? 0.15 : 1;
+    const surfA = z !== 0 ? 0.15 : 1;
+    // shelter interior floor
+    this.intFloor.forEach((s) => s.destroy());
+    this.intFloor = [];
+    if (z === 2 && this.shelterAnchor >= 0) {
+      const ax = this.shelterAnchor % SIZE, ay = (this.shelterAnchor / SIZE) | 0, r = this.shelterLvl;
+      for (let dy = -r; dy <= r; dy++)
+        for (let dx = -r; dx <= r; dx++) {
+          const p = this.iso(ax + dx, ay + dy);
+          this.intFloor.push(this.add.image(p.x, p.y, 'cavefloor').setOrigin(0.5, 0).setTint(0xb8865a).setDepth(-0.4));
+        }
+    }
     for (const rt of this.chunks.values()) rt.setAlpha(surfA);
     for (const s of this.nodeSpr.values()) s.setAlpha(surfA);
     for (const e of this.structSpr.values()) { e.spr.setAlpha(surfA); e.extra.forEach((s) => s.setAlpha(surfA)); e.glow?.setAlpha(z === 1 ? 0.03 : 0.13); }
@@ -315,6 +349,7 @@ class Hearth extends Phaser.Scene {
     for (const s of this.ugRock.values()) s.setVisible(z === 1);
     for (const s of this.ugOre.values()) s.setVisible(z === 1);
     for (const s of this.torchSpr.values()) s.setVisible(z === 1);
+    for (const s of this.furnSpr.values()) s.setVisible(z === 2);
     for (const s of this.bergSpr.values()) s.setAlpha(surfA);
     for (const o of this.others.values()) o.rig.setVisible(o.z === z);
     this.send({ t: 'pos', x: +this.px.toFixed(2), y: +this.py.toFixed(2), z });
@@ -344,7 +379,8 @@ class Hearth extends Phaser.Scene {
     const wp = this.cameras.main.getWorldPoint(ptr.x, ptr.y);
     const { x, y } = this.unIso(wp.x, wp.y);
     if (x < 0 || y < 0 || x >= SIZE || y >= SIZE) return;
-    this.send({ t: 'build', i: y * SIZE + x, kind: this.placing, dir: this.placeDir });
+    if (this.z === 2) this.send({ t: 'furn', i: y * SIZE + x, kind: this.placing });
+    else this.send({ t: 'build', i: y * SIZE + x, kind: this.placing, dir: this.placeDir });
     if (this.inv[this.placing] <= 1) this.setPlacing(null);
   }
 
@@ -365,6 +401,7 @@ class Hearth extends Phaser.Scene {
       for (const [i, kind, hp, dir, lvl] of m.structures) for (let l = 1; l <= (lvl || 1); l++) this.addStruct(i, kind, hp, dir, l);
       for (const i of m.digs || []) this.addDug(i);
       for (const i of m.torches || []) this.addTorch(i);
+      for (const [i, kind] of m.furn || []) this.addFurn(i, kind);
       for (const [pid, x, y, eq, pz] of m.players) {
         this.addOther(pid, x, y);
         const o = this.others.get(pid);
@@ -378,8 +415,8 @@ class Hearth extends Phaser.Scene {
       const o = this.others.get(m.id);
       if (o) {
         const nz = m.z || 0;
-        const p = nz === 1 ? this.iso(m.x, m.y) : this.isoE(m.x, m.y);
-        if (nz === 1) p.y += 16;
+        const p = nz !== 0 ? this.iso(m.x, m.y) : this.isoE(m.x, m.y);
+        if (nz !== 0) p.y += 16;
         o.tx = p.x; o.ty = p.y;
         if (nz !== o.z) { o.z = nz; o.rig.setVisible(o.z === this.z); o.rig.setPosition(p.x, p.y); }
       }
@@ -404,6 +441,7 @@ class Hearth extends Phaser.Scene {
     else if (m.t === 'mud') { for (const i of m.tiles) { this.mud.add(i); this.setTileMut(i, 'mud'); } showMsg('The soil sours — this sector\'s ecosystem is collapsing!'); }
     else if (m.t === 'dig') { for (const i of m.tiles) this.addDug(i); }
     else if (m.t === 'torch') { this.addTorch(m.i); this.audio.build(); }
+    else if (m.t === 'furn') { this.addFurn(m.i, m.kind); this.audio.build(); }
     else if (m.t === 'boat') {
       this.sailing = false; this.boatKind = 0;
       this.boatSpr?.destroy(); this.boatSpr = null;
@@ -448,6 +486,7 @@ class Hearth extends Phaser.Scene {
     else if (m.t === 'chit') { this.audio.hitmob(); const s = this.creSpr.get(m.id) || this.aniSpr.get(m.id); if (s) { s.setTintFill(0xffffff); setTimeout(() => s.clearTint(), 80); } }
     else if (m.t === 'cre') {
       this.wtime = m.time;
+      if (m.day) this.day = m.day;
       const seen = new Set<string>();
       for (const [cid, x, y, type] of m.c) {
         seen.add(cid);
@@ -568,10 +607,15 @@ class Hearth extends Phaser.Scene {
   blockedAt(x: number, y: number) {
     if (x < 0 || y < 0 || x >= SIZE || y >= SIZE) return true;
     if (this.z === 1) return !this.digs.has((y | 0) * SIZE + (x | 0));   // underground: only carved tunnels
+    if (this.z === 2) {                                                  // shelter interior: stay in the room
+      const ax = this.shelterAnchor % SIZE, ay = (this.shelterAnchor / SIZE) | 0;
+      return Math.max(Math.abs((x | 0) - ax), Math.abs((y | 0) - ay)) > this.shelterLvl;
+    }
     if (this.tileAt(x, y) === T.WATER)
       return !(this.sailing || this.inv.boat > 0 || this.inv.sboat > 0);  // boats open the sea
     const climb = this.jumpT >= 0 ? 2 : 1;                               // jumping clears higher ledges
-    if (Math.abs(this.elevAt(x, y) - this.elevAt(this.px, this.py)) > climb) return true;
+    // you can always drop DOWN a cliff (fall damage applies) — only climbing is limited
+    if (this.elevAt(x, y) - this.elevAt(this.px, this.py) > climb) return true;
     const st = this.structSpr.get((y | 0) * SIZE + (x | 0));
     return !!st && st.kind !== 'shelter';                                // shelters are enterable
   }
@@ -588,6 +632,16 @@ class Hearth extends Phaser.Scene {
     if (now - this.lastGather < 300) return;
     this.lastGather = now;
 
+    if (this.z === 2) {
+      // chest? else exit the shelter
+      for (const [i, s] of this.furnSpr)
+        if (s.texture.key === 'chest' && Math.hypot((i % SIZE) - this.px, ((i / SIZE) | 0) - this.py) < 1.5) {
+          showMsg('📦 Your stash. (Shared storage UI coming in a future update.)');
+          return;
+        }
+      if (now - this.zToggleAt > 900) { this.zToggleAt = now; this.setZ(0); }
+      return;
+    }
     if (this.z === 1) {
       // exit via the shaft, or dig the rock face you're moving toward
       const shaft = this.nearMineshaft();
@@ -620,6 +674,17 @@ class Hearth extends Phaser.Scene {
       this.setZ(1);
       return;
     }
+    // a shelter? step inside
+    if (now - this.zToggleAt > 900)
+      for (const [i, s] of this.structSpr)
+        if (s.kind === 'shelter' && Math.hypot((i % SIZE) - this.px, ((i / SIZE) | 0) - this.py) < 1.6) {
+          this.zToggleAt = now;
+          this.shelterAnchor = i; this.shelterLvl = s.lvl || 1;
+          this.px = (i % SIZE) + 0.5; this.py = ((i / SIZE) | 0) + 0.5;
+          this.setZ(2);
+          showMsg('🏠 Home. Place a Bed (respawn), Chest and Torches here. E to step outside.');
+          return;
+        }
     // a hidden note?
     for (const n of this.notes)
       if (Math.hypot(n.x - this.px, n.y - this.py) < 1.8) { showMsg(n.text, 15000); return; }
@@ -693,8 +758,8 @@ class Hearth extends Phaser.Scene {
       else hop = Math.sin(Math.PI * this.jumpT) * 20;
     }
     // underground is flat — no hill offsets down there
-    const p = this.z === 1 ? this.iso(this.px, this.py) : this.isoE(this.px, this.py);
-    if (this.z === 1) p.y += 16;   // stand on the cave floor's center
+    const p = this.z !== 0 ? this.iso(this.px, this.py) : this.isoE(this.px, this.py);
+    if (this.z !== 0) p.y += 16;   // stand on the flat interior/cave floor
     this.me.setPosition(p.x, p.y - hop).setDepth(p.y);
     this.ensureChunks();
 
@@ -749,7 +814,7 @@ class Hearth extends Phaser.Scene {
       const gi = g.y * SIZE + g.x;
       const target = this.structSpr.get(gi);
       const stackOk = !!target && target.kind === this.placing && target.lvl < (MAX_LVL[this.placing!] || 1);
-      const ok = (stackOk || (!this.blockedAt(g.x, g.y) && !this.nodeSpr.has(gi))) &&
+      const ok = (stackOk || (!this.blockedAt(g.x, g.y) && (this.z === 2 || !this.nodeSpr.has(gi)))) &&
         Math.hypot(g.x - this.px, g.y - this.py) <= 6;
       this.ghost.setTint(ok ? 0x88ff88 : 0xff6666);
     }
@@ -788,17 +853,17 @@ class Hearth extends Phaser.Scene {
     // weather visuals depend on which biome the player stands in (none underground)
     const zt = this.tileAt(this.px, this.py);
     const zone = zt === T.SAND ? 'sand' : zt === T.SNOW ? 'snow' : 'rain';
-    const under = this.z === 1;
+    const under = this.z !== 0;
     const rainOn = !under && this.weather === 'rain' && zone === 'rain';
     const snowOn = !under && zone === 'snow';
     const sandOn = !under && this.weather === 'sandstorm' && zone === 'sand';
+    const blizOn = !under && this.weather === 'snowstorm' && zone === 'snow';
     if (rainOn !== this.rainFx.emitting) rainOn ? this.rainFx.start() : this.rainFx.stop();
-    if (snowOn !== this.snowFx.emitting) {
-      snowOn ? this.snowFx.start() : this.snowFx.stop();
-    }
-    if (snowOn) this.snowFx.setFrequency(this.weather === 'snowstorm' ? 15 : 130, this.weather === 'snowstorm' ? 6 : 2);
+    if (snowOn !== this.snowFx.emitting) snowOn ? this.snowFx.start() : this.snowFx.stop();
     if (sandOn !== this.sandFx.emitting) sandOn ? this.sandFx.start() : this.sandFx.stop();
+    if (blizOn !== this.blizFx.emitting) blizOn ? this.blizFx.start() : this.blizFx.stop();
     this.sandOverlay.setAlpha(Phaser.Math.Linear(this.sandOverlay.alpha, sandOn ? 0.2 : 0, 0.03));
+    this.blizOverlay.setAlpha(Phaser.Math.Linear(this.blizOverlay.alpha, blizOn ? 0.16 : 0, 0.03));
 
     // audio: weather beds, generative score, footsteps, monster growls
     this.audio.setWeather(rainOn, sandOn, this.weather === 'snowstorm' && zone === 'snow', zone === 'snow');

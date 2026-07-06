@@ -33,6 +33,7 @@ let weather = { kind: null, until: 0 };
 const infected = new Map();          // tile -> cure timestamp (wisp-spread corruption)
 const digs = new Set();              // underground tiles carved out by players
 const torches = new Set();           // torch-lit underground tiles
+const furn = new Map();              // shelter furniture: tile -> {kind, owner}
 const brokenBergs = new Set();       // icebergs smashed by reinforced boats
 let nextCre = 1, nextAni = 1, time = 0.3, day = 1, won = false, tickN = 0;
 let wave = null;                     // {until, engineI}
@@ -53,6 +54,7 @@ function loadSave() {
     for (const [i, st] of s.structures) structures.set(i, st);
     s.digs.forEach((i) => digs.add(i));
     s.torches.forEach((i) => torches.add(i));
+    for (const [i, f] of s.furn || []) furn.set(i, f);
     (s.brokenBergs || []).forEach((i) => brokenBergs.add(i));
     Object.assign(profiles, s.profiles || {});
     console.log(`[hearth] save loaded: day ${day}, ${structures.size} structures, ${Object.keys(profiles).length} profiles`);
@@ -65,7 +67,7 @@ function saveGame() {
     removed: [...removed].map(([i, at]) => [i, Math.max(0, at - Date.now())]),
     mud: [...mudTiles], sectorChops,
     structures: [...structures], digs: [...digs], torches: [...torches],
-    brokenBergs: [...brokenBergs], profiles
+    furn: [...furn], brokenBergs: [...brokenBergs], profiles
   };
   try { writeFileSync(SAVE_PATH, JSON.stringify(s)); } catch (e) { console.log('[hearth] save failed:', e.message); }
 }
@@ -97,6 +99,8 @@ const nearStruct = (p, kind, r = 4) => {
 };
 const sendInv = (id, p) => send(p.ws, { t: 'inv', inv: p.inv, tools: [...p.tools], gear: [...p.gear] });
 const respawnPoint = (id) => {
+  for (const [i, f] of furn)   // own bed wins
+    if (f.kind === 'bed' && f.owner === id) return [i % SIZE, ((i / SIZE) | 0) + 1];
   let best = spawn, bd = 1e9;
   for (const [i, s] of structures)
     if (s.kind === 'campfire' && s.owner === id) {
@@ -131,6 +135,7 @@ wss.on('connection', (ws) => {
         t: 'init', id, seed: SEED, x: p.x, y: p.y, time, day, mono, won,
         weather: weather.kind, infected: [...infected.keys()], digs: [...digs],
         torches: [...torches], brokenBergs: [...brokenBergs],
+    furn: [...furn].map(([i, f]) => [i, f.kind]),
         removed: [...removed.keys()], mud: [...mudTiles],
         structures: [...structures].map(([i, s]) => [i, s.kind, s.hp, s.dir || 0, s.lvl || 1]),
         inv: p.inv, tools: [...p.tools], gear: [...p.gear],
@@ -159,7 +164,18 @@ wss.on('connection', (ws) => {
     }
 
     if (m.t === 'pos') {
-      p.x = m.x; p.y = m.y; p.z = m.z ? 1 : 0;
+      // fall damage: dropping 2+ elevation levels in one step hurts (drop − 1 hp)
+      const moved = Math.hypot(m.x - p.x, m.y - p.y);
+      if (p.z === 0 && !m.b && moved > 0.01 && moved < 3) {
+        const drop = world.elev[ti(p.x, p.y)] - world.elev[ti(m.x, m.y)];
+        if (drop >= 2 && world.tiles[ti(m.x, m.y)] !== T.WATER) {
+          p.hp = Math.max(0, p.hp - (drop - 1));
+          if (p.hp <= 0) { p.hp = 10; p.z = 0; [m.x, m.y] = respawnPoint(id); }
+          send(ws, { t: 'hp', hp: p.hp, x: m.x, y: m.y });
+          send(ws, { t: 'msg', s: '💥 You fell hard!' });
+        }
+      }
+      p.x = m.x; p.y = m.y; p.z = m.z | 0;
       bcast({ t: 'pos', id, x: m.x, y: m.y, z: p.z });
       // sailing: check iceberg collisions around the player
       const b = m.b | 0;
@@ -183,6 +199,21 @@ wss.on('connection', (ws) => {
             }
           }
       }
+    }
+
+    else if (m.t === 'furn') {
+      const kind = m.kind, i = m.i;
+      if (p.z !== 2 || !['chest', 'bed', 'torch'].includes(kind) || !p.inv[kind] || furn.has(i)) return;
+      const x = i % SIZE, y = (i / SIZE) | 0;
+      let room = false;   // tile must be inside a shelter's interior (Chebyshev ≤ its level)
+      for (const [si, s] of structures)
+        if (s.kind === 'shelter' && Math.max(Math.abs((si % SIZE) - x), Math.abs(((si / SIZE) | 0) - y)) <= (s.lvl || 1)) { room = true; break; }
+      if (!room || Math.hypot(x - p.x, y - p.y) > 5) return;
+      p.inv[kind]--;
+      furn.set(i, { kind, owner: id });
+      bcast({ t: 'furn', i, kind });
+      sendInv(id, p);
+      if (kind === 'bed') send(ws, { t: 'msg', s: '🛏 You will now respawn at your bed.' });
     }
 
     else if (m.t === 'torch') {
@@ -326,7 +357,7 @@ wss.on('connection', (ws) => {
 
     else if (m.t === 'atk') {
       if (now - p.lastAtk < 400) return;
-      if (p.z === 1) return;          // nothing to strike underground — protects surface structures
+      if (p.z !== 0) return;          // nothing to strike underground/indoors — protects structures
       p.lastAtk = now;
       const dmg = p.equip === 'isword' ? 5 : p.equip === 'sword' ? 3 : p.equip === 'axe' ? 2 : 1;
       let best = null, bid = null, bd = 2.4, isAnimal = false;
@@ -501,7 +532,7 @@ setInterval(() => {
     } else {
       let bd = 26;
       for (const q of players.values()) {
-        if (q.z === 1) continue;      // underground players are hidden from surface hunters
+        if (q.z !== 0) continue;      // underground/indoor players are hidden from surface hunters
         // scent: carrying essence or raw meat attracts hunters from farther away
         const rad = q.inv.essence > 0 || q.inv.meat > 0 ? 40 : 26;
         const d = Math.hypot(q.x - c.x, q.y - c.y);
@@ -527,7 +558,7 @@ setInterval(() => {
     // contact damage
     if (tickN % 5 === 0 && cdmg) {
       for (const [pid, q] of players) {
-        if (q.z !== 1 && Math.hypot(q.x - c.x, q.y - c.y) < 1.1) {
+        if (q.z === 0 && Math.hypot(q.x - c.x, q.y - c.y) < 1.1) {
           q.hp -= cdmg;
           if (q.hp <= 0) { q.hp = 10; q.z = 0; [q.x, q.y] = respawnPoint(pid); }
           send(q.ws, { t: 'hp', hp: q.hp, x: q.x, y: q.y });
@@ -587,7 +618,7 @@ setInterval(() => {
       send(q.ws, { t: 'stat', hunger: Math.ceil(q.hunger), thirst: Math.ceil(q.thirst) });
       const t = world.tiles[ti(q.x, q.y)];
       let delta = 0;
-      if (q.z === 1) { /* underground: sheltered from weather and climate */ }
+      if (q.z !== 0) { /* underground or indoors: sheltered from weather */ }
       else if (weather.kind === 'sandstorm' && t === T.SAND && !nearAnyStruct(q, 2)) { delta = -1; send(q.ws, { t: 'msg', s: 'The sandstorm flays you — shelter beside a structure!' }); }
       else if (weather.kind === 'snowstorm' && t === T.SNOW && !nearStruct(q, 'campfire', 6)) { delta = -1; send(q.ws, { t: 'msg', s: 'The blizzard freezes you — get to a campfire!' }); }
       else if (t === T.SAND && !isNight() && !q.gear.has('heatcloak')) { delta = -1; send(q.ws, { t: 'msg', s: 'The desert heat sears you! Craft a Heat Cloak.' }); }
@@ -628,6 +659,6 @@ setInterval(() => {
     t: 'cre',
     c: [...creatures].map(([cid, c]) => [cid, +c.x.toFixed(2), +c.y.toFixed(2), c.type || 'crawler']),
     a: [...animals].map(([aid, a]) => [aid, +a.x.toFixed(2), +a.y.toFixed(2), a.type]),
-    time: +time.toFixed(4)
+    time: +time.toFixed(4), day
   });
 }, 200);

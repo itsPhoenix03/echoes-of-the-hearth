@@ -25,6 +25,8 @@ export const RECIPES = {
   forge:     { cost: { wood: 25, stone: 20, crystal: 6 }, station: 'workbench', place: true },
   cookedmeat:{ cost: { meat: 1, wood: 1 }, station: 'campfire' },
   torch:     { cost: { wood: 2, fiber: 1 }, station: null },
+  chest:     { cost: { wood: 8 }, station: 'workbench', place: true },
+  bed:       { cost: { wood: 10, fiber: 6 }, station: 'workbench', place: true },
   boat:      { cost: { wood: 25, fiber: 10 }, station: 'workbench' },
   sboat:     { cost: { wood: 20, fiber: 8, starmetal: 5 }, station: 'workbench' },
   mineshaft: { cost: { wood: 10, stone: 5 }, station: 'workbench', place: true },
@@ -41,14 +43,16 @@ export const NAMES = {
   wood: 'Wood', stone: 'Stone', fiber: 'Fiber', crystal: 'Crystal', essence: 'Essence',
   water: 'Water', meat: 'Raw Meat', cookedmeat: 'Cooked Meat',
   iron: 'Iron', diamond: 'Diamond', mineshaft: 'Mine Entrance', shelter: 'Shelter', isword: 'Iron Sword',
-  starmetal: 'Starmetal', boat: 'Boat', sboat: 'Reinforced Boat', torch: 'Torch'
+  starmetal: 'Starmetal', boat: 'Boat', sboat: 'Reinforced Boat', torch: 'Torch',
+  chest: 'Chest', bed: 'Bed'
 };
+export const FURNITURE = new Set(['chest', 'bed', 'torch']);   // placeable only inside shelters (torch also in mines)
 
 export const STRUCT_HP = { wall: 20, campfire: 10, workbench: 15, forge: 30, engine: 120, mineshaft: 25, shelter: 40 };
 export const WOODEN = new Set(['wall', 'workbench']);   // erode in Blight Storms w/o campfire
 export const RESOURCES = ['wood', 'stone', 'fiber', 'crystal', 'essence', 'iron', 'diamond', 'starmetal'];
 export const PLACEABLES = ['wall', 'campfire', 'workbench', 'forge', 'engine', 'mineshaft', 'shelter'];
 
-export const emptyInv = () => ({ wood: 0, stone: 0, fiber: 0, crystal: 0, essence: 0, iron: 0, diamond: 0, starmetal: 0, water: 0, meat: 0, cookedmeat: 0, wall: 0, campfire: 0, workbench: 0, forge: 0, engine: 0, core: 0, mineshaft: 0, shelter: 0, boat: 0, sboat: 0, torch: 0 });
+export const emptyInv = () => ({ wood: 0, stone: 0, fiber: 0, crystal: 0, essence: 0, iron: 0, diamond: 0, starmetal: 0, water: 0, meat: 0, cookedmeat: 0, wall: 0, campfire: 0, workbench: 0, forge: 0, engine: 0, core: 0, mineshaft: 0, shelter: 0, boat: 0, sboat: 0, torch: 0, chest: 0, bed: 0 });
 export const canAfford = (inv, cost) => Object.entries(cost).every(([k, v]) => inv[k] >= v);
 export const pay = (inv, cost) => Object.entries(cost).forEach(([k, v]) => inv[k] -= v);

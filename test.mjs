@@ -159,6 +159,21 @@ A.send({ t: 'torch' });
 const tm = await A.wait('torch');
 console.log('torch placed underground OK at tile', tm.i);
 
+// fall damage: step off a 2+ level cliff
+let cliff = null;
+outer: for (let y = 30; y < 130; y++)
+  for (let x = 30; x < 130; x++) {
+    const a = y * SIZE + x, b = y * SIZE + x + 1;
+    if (world.tiles[a] !== 4 && world.tiles[b] !== 4 && world.elev[a] - world.elev[b] >= 2) { cliff = [x, y]; break outer; }
+  }
+if (cliff) {
+  A.msgs = A.msgs.filter((m) => m.t !== 'hp');
+  A.send({ t: 'pos', x: cliff[0], y: cliff[1], z: 0 }); await sleep(80);
+  A.send({ t: 'pos', x: cliff[0] + 1, y: cliff[1], z: 0 });
+  const fh = await A.wait('hp');
+  console.log('fall damage OK: hp', fh.hp);
+} else console.log('fall damage skipped (no cliff found in scan)');
+
 // iceberg: sailing a wooden boat into a berg shatters it
 const berg = [...world.bergs][0];
 A.send({ t: 'pos', x: berg % SIZE, y: (berg / SIZE) | 0, z: 0, b: 1 });
