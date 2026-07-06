@@ -1,0 +1,21 @@
+# dependencies / build output
+node_modules/
+dist/
+
+# runtime state (world save — delete-able, never commit)
+server/save.json
+
+# logs & scratch
+*.log
+srv.log
+vite.log
+
+# environment / secrets
+.env
+.env.*
+
+# editor & OS noise
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,52 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Echoes of the Hearth</title>
+  <style>
+    body { margin: 0; background: #111; overflow: hidden; font-family: monospace; }
+    #hud { position: fixed; top: 8px; left: 8px; color: #fff; background: rgba(0,0,0,.55);
+           padding: 8px 12px; border-radius: 6px; font-size: 14px; line-height: 1.6; pointer-events: none; z-index: 10; }
+    #objective { position: fixed; top: 8px; right: 8px; max-width: 320px; color: #ffd97a; background: rgba(0,0,0,.55);
+           padding: 8px 12px; border-radius: 6px; font-size: 13px; line-height: 1.4; pointer-events: none; z-index: 10; }
+    #msg { position: fixed; top: 8px; left: 50%; transform: translateX(-50%); color: #ffd97a;
+           background: rgba(0,0,0,.65); padding: 6px 14px; border-radius: 6px; font-size: 15px;
+           z-index: 11; display: none; max-width: 60vw; text-align: center; }
+    #inv { position: fixed; bottom: 8px; left: 50%; transform: translateX(-50%); z-index: 10;
+           display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; max-width: 90vw; }
+    .slot { color: #fff; background: rgba(0,0,0,.6); padding: 5px 9px; border-radius: 6px; font-size: 13px;
+            border: 1px solid #333; white-space: nowrap; }
+    .slot.place { cursor: pointer; border-color: #6a5; }
+    .slot.place:hover { background: rgba(40,60,40,.8); }
+    .slot.sel { border-color: #ffd97a; background: rgba(80,70,20,.8); }
+    .slot.tool { border-color: #57a; cursor: pointer; }
+    .slot.tool.eq { border-color: #ffd97a; background: rgba(80,70,20,.85); box-shadow: 0 0 6px rgba(255,217,122,.4); }
+    .slot.use { cursor: pointer; border-color: #4aa; }
+    .slot.use:hover { background: rgba(30,60,60,.85); }
+    #craftBtn { position: fixed; bottom: 8px; right: 8px; z-index: 10; background: #2a3a4a; color: #fff;
+                border: 1px solid #57a; border-radius: 6px; padding: 8px 14px; font-family: monospace;
+                font-size: 14px; cursor: pointer; }
+    #craftPanel { position: fixed; bottom: 52px; right: 8px; width: 300px; max-height: 60vh; overflow-y: auto;
+                  background: rgba(10,15,20,.92); color: #fff; border: 1px solid #57a; border-radius: 8px;
+                  padding: 12px; font-size: 13px; z-index: 12; display: none; }
+    .recipe { margin: 6px 0; display: flex; align-items: center; gap: 8px; }
+    .recipe button { background: #2a3a4a; color: #fff; border: 1px solid #57a; border-radius: 4px;
+                     padding: 4px 8px; font-family: monospace; cursor: pointer; min-width: 120px; text-align: left; }
+    .recipe button:disabled { opacity: 0.4; cursor: default; }
+    .cost { color: #aaa; } .need { color: #d66; font-size: 11px; }
+    #help { position: fixed; bottom: 8px; left: 8px; color: #aaa; background: rgba(0,0,0,.45);
+            padding: 6px 10px; border-radius: 6px; font-size: 12px; z-index: 10; max-width: 260px; }
+  </style>
+</head>
+<body>
+  <div id="hud"></div>
+  <div id="objective"></div>
+  <div id="msg"></div>
+  <div id="inv"></div>
+  <button id="craftBtn">Craft [C]</button>
+  <div id="craftPanel"></div>
+  <div id="help">WASD move · SPACE jump · F attack · E gather/dig/use · C craft · 1-5 equip · T torch (in mine) · M mute · walk into water with a boat to sail · click 🔨 item then a tile to build · R rotate wall · stack walls/shelters by clicking</div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>

@@ -1,0 +1,384 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Echoes of the Hearth — Agent Development Guide</title>
+<style>
+  body { font-family: Segoe UI, system-ui, sans-serif; background: #0f1419; color: #d8dee8; max-width: 1100px; margin: 0 auto; padding: 24px 32px 120px; line-height: 1.55; }
+  h1 { color: #6dd6c8; border-bottom: 2px solid #2a3a4a; padding-bottom: 8px; }
+  h2 { color: #ffd97a; margin-top: 44px; border-bottom: 1px solid #2a3a4a; padding-bottom: 4px; }
+  h3 { color: #9ad4e8; margin-top: 28px; }
+  code, pre { font-family: Consolas, monospace; background: #1a222c; border-radius: 4px; }
+  code { padding: 1px 6px; color: #a8e0d0; }
+  pre { padding: 12px 16px; overflow-x: auto; border: 1px solid #2a3a4a; color: #c8d4e0; }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 14px; }
+  th, td { border: 1px solid #2a3a4a; padding: 6px 10px; text-align: left; vertical-align: top; }
+  th { background: #1a222c; color: #ffd97a; }
+  td code { font-size: 13px; }
+  .warn { background: #3a2a1a; border-left: 4px solid #e8a838; padding: 10px 14px; margin: 12px 0; border-radius: 4px; }
+  .crit { background: #3a1a1a; border-left: 4px solid #d65a4a; padding: 10px 14px; margin: 12px 0; border-radius: 4px; }
+  .ok   { background: #1a3a2a; border-left: 4px solid #5cab4a; padding: 10px 14px; margin: 12px 0; border-radius: 4px; }
+  .toc a { color: #9ad4e8; text-decoration: none; } .toc a:hover { text-decoration: underline; }
+  .toc li { margin: 3px 0; }
+</style>
+</head>
+<body>
+
+<h1>🔥 Echoes of the Hearth — Agent Development Guide</h1>
+<p><b>Audience:</b> AI coding agents (and humans) continuing development of this repo.
+Read this whole document before making changes. It encodes the architecture, every protocol
+message, all game balance data, the workflows to build/test, and — most importantly —
+<a href="#pitfalls">the pitfalls that have already caused real bugs</a>.</p>
+
+<div class="toc"><b>Contents</b><ol>
+<li><a href="#overview">What this game is</a></li>
+<li><a href="#quickstart">Quickstart & workflows</a></li>
+<li><a href="#layout">Repo layout</a></li>
+<li><a href="#architecture">Architecture & core principles</a></li>
+<li><a href="#shared">Shared modules (worldgen & defs)</a></li>
+<li><a href="#protocol">Network protocol reference</a></li>
+<li><a href="#server">Server internals</a></li>
+<li><a href="#client">Client internals</a></li>
+<li><a href="#balance">Game design & balance tables</a></li>
+<li><a href="#howto">How-to: common change recipes</a></li>
+<li><a href="#testing">Testing & dev mode</a></li>
+<li><a href="#pitfalls">Known pitfalls (read this!)</a></li>
+<li><a href="#roadmap">Roadmap / unimplemented design</a></li>
+</ol></div>
+
+<h2 id="overview">1. What this game is</h2>
+<p><b>Echoes of the Hearth</b> — web-based 2D isometric co-op survival sandbox RPG.
+Players ("Keepers") wake on the Whispering Woods island of a dying archipelago world ("The Hearth")
+infested by a cosmic parasite ("The Blight"). To win: climb the tech tree, sail between five
+far-apart islands, awaken all 4 Titan Monoliths (one per biome island), build the World Engine
+on the central Core Void island, and survive a 4-minute final assault.</p>
+<p>Full design doc: <code>PLAN.md</code>. The design pillars: <b>web-first</b> (Phaser 3 + TS + Vite),
+<b>zero-budget assets</b> (hand-written SVGs + procedural textures + procedural audio),
+<b>reactive simulation</b> (ecosystem decay, weather, infection), <b>co-op required difficulty</b>.</p>
+
+<h2 id="quickstart">2. Quickstart & workflows</h2>
+<pre>npm install
+npm run server       # authoritative WebSocket game server on :8081
+npm run server:dev   # same, but F9 in-game grants a full dev kit (cheats)
+npm run dev          # Vite dev server on :5173 (client) — open several tabs for co-op
+npm run build        # tsc --noEmit type-check THEN vite build  (both must pass)
+node test.mjs        # full protocol test suite (server must be running)</pre>
+<div class="ok"><b>Definition of done for ANY change:</b> <code>npm run build</code> passes
+(type-check + bundle), then start a <i>fresh</i> server and <code>node test.mjs</code> passes all stages.
+If you changed server/shared code, extend <code>test.mjs</code> with a stage covering it.</div>
+<ul>
+<li>World/persistent state lives in <code>server/save.json</code> (auto-saved every 30s). <b>Delete it for a fresh world</b> — stale saves from an older seed/format are skipped by seed check but a format change needs manual deletion.</li>
+<li>After changing client code, the browser needs a <b>hard refresh</b> (Ctrl+Shift+R).</li>
+<li>Kill stale node processes before starting the server — port 8081 conflicts have wasted debugging time before:
+<code>Get-Process node | Stop-Process -Force</code> (PowerShell).</li>
+</ul>
+
+<h2 id="layout">3. Repo layout</h2>
+<table>
+<tr><th>Path</th><th>What it is</th></tr>
+<tr><td><code>PLAN.md</code></td><td>Game design blueprint (eras, milestones, systems).</td></tr>
+<tr><td><code>index.html</code></td><td>Page shell + <b>all DOM UI styles</b> (HUD, crafting panel, inventory bar, help). The game UI is DOM, not Phaser.</td></tr>
+<tr><td><code>vite.config.ts</code></td><td><code>publicDir: 'assets'</code> — so <code>assets/tiles/x.svg</code> is served at <code>/tiles/x.svg</code>.</td></tr>
+<tr><td><code>shared/world.js</code></td><td><b>Deterministic worldgen</b> — imported by BOTH client and server. Plain JS (runs in Node + browser).</td></tr>
+<tr><td><code>shared/defs.js</code></td><td>All game data: node types, recipes, structure HP, resource lists, inventory shape, names.</td></tr>
+<tr><td><code>server/index.js</code></td><td>The entire authoritative server (~550 lines): connection/hello flow, all message handlers, the 200ms sim tick, persistence.</td></tr>
+<tr><td><code>src/main.ts</code></td><td>The entire Phaser scene (~800 lines): rendering, input, networking, all client game logic.</td></tr>
+<tr><td><code>src/rig.ts</code></td><td>Procedurally-animated character (Container of generated part-textures; walk/swing/hold animations). No spritesheets.</td></tr>
+<tr><td><code>src/ui.ts</code></td><td>DOM UI: HUD, objective tracker, inventory bar, crafting panel. Signature-based rebuild + delegated clicks.</td></tr>
+<tr><td><code>src/audio.ts</code></td><td>100% procedural Web Audio: weather beds, footsteps, growls, hits, generative ambient score.</td></tr>
+<tr><td><code>assets/tiles/*.svg</code></td><td>Isometric ground tiles 64×40 (top diamond 64×32 + 8px skirt): grass, sand, snow, mud, water, blight, cavefloor; <code>rock.svg</code> is 64×64 (tall cave wall).</td></tr>
+<tr><td><code>assets/sprites/*.svg</code></td><td>Everything else: nodes, structures, monsters, animals, boat, iceberg, torch, note, monolith…</td></tr>
+<tr><td><code>test.mjs</code></td><td>End-to-end protocol test: two WebSocket clients drive the real server through every major flow.</td></tr>
+<tr><td><code>server/save.json</code></td><td>Runtime persistence snapshot (gitignore-able; safe to delete).</td></tr>
+</table>
+
+<h2 id="architecture">4. Architecture & core principles</h2>
+<pre>
+Browser A ──ws──┐
+Browser B ──ws──┤──► server/index.js (authoritative: inventory, combat, building,
+Browser C ──ws──┘        gathering, digging, weather, creatures, persistence)
+        ▲
+        │  both sides independently run genWorld(seed) from shared/world.js
+        ▼
+   src/main.ts (rendering, input, movement prediction, visuals-only state)
+</pre>
+<ol>
+<li><b>Deterministic shared worldgen.</b> The server sends only a <code>seed</code>; client and server
+both call <code>genWorld(seed)</code> and get identical tiles/elevation/nodes/veins/bergs. Only
+<i>mutations</i> (chopped nodes, mud, structures, digs…) are synced. Never send the map.</li>
+<li><b>Server is authoritative for everything that matters</b>: inventory, crafting costs,
+gathering yields, damage, structure HP, digging. It validates distance, tools, stations,
+and rate-limits (250–400ms) every action. The one exception: <b>movement is client-authoritative</b>
+(client sends positions; server trusts them). Keep new mechanics server-validated.</li>
+<li><b>Tile index convention:</b> a tile is one integer <code>i = y * SIZE + x</code> (SIZE=320).
+Decode: <code>x = i % SIZE; y = (i / SIZE) | 0</code>. All protocol messages use tile indices.</li>
+<li><b>Isometric math</b> (TW=64, TH=32): screen <code>sx = (x−y)*32 + offX</code>,
+<code>sy = (x+y)*16</code>, where <code>offX = (SIZE−1)*32</code>. Inverse (used for mouse picking
+and chunk bounds): <code>x = (sy/16 + (sx−offX)/32)/2</code>, <code>y = (sy/16 − (sx−offX)/32)/2</code>, floor both.
+A tile's top diamond vertex is at (sx, sy); its center is (sx, sy+16). Depth-sorting: every
+world object sets <code>depth = its screen y</code>.</li>
+<li><b>Zero-asset pipeline:</b> art = small hand-written SVGs in <code>assets/</code>; character
+parts, weather particles, light glows = runtime-generated textures; audio = Web Audio synthesis.
+When adding art, follow the existing flat-shaded SVG style with a drop-shadow ellipse.</li>
+</ol>
+
+<h2 id="shared">5. Shared modules</h2>
+<h3>shared/world.js — genWorld(seed) returns:</h3>
+<table>
+<tr><th>Field</th><th>Type</th><th>Meaning</th></tr>
+<tr><td><code>tiles</code></td><td>Uint8Array</td><td>Biome per tile. <code>T = {GRASS:0, SAND:1, SNOW:2, MUD:3, WATER:4, BLIGHT:5}</code></td></tr>
+<tr><td><code>elev</code></td><td>Uint8Array</td><td>0 water, 1 plain, 2 hill, 3 peak. Rendered 10px higher per level; moves &gt;1 level are cliffs (2 while jumping).</td></tr>
+<tr><td><code>veins</code></td><td>Uint8Array</td><td>Underground minerals: 0 none, 1 iron, 2 diamond. Only meaningful under diggable tiles.</td></tr>
+<tr><td><code>nodes</code></td><td>Map&lt;i,kind&gt;</td><td>Harvestables. <code>NODE = {TREE:0, BOULDER:1, BUSH:2, STONE:3, CRYSTAL:4, STARMETAL:5}</code></td></tr>
+<tr><td><code>bergs</code></td><td>Set&lt;i&gt;</td><td>Iceberg water tiles ringing the Frozen Spire (radius &lt; 72 of isle center).</td></tr>
+</table>
+<p><b>World geography</b> (SIZE=320): five islands in open ocean, gaps ≈ 80 tiles (&gt; 2 screens — islands are
+invisible from each other). <code>ISLES = [[80,80] Woods/GRASS, [240,80] Dunes/SAND, [80,240] Spire/SNOW,
+[240,240] Marsh/MUD]</code>, radius ≈ 40 with coast noise. <code>MONOLITHS === ISLES</code> (index order matters —
+client's MONO_NAMES matches it). <code>CORE=[160,160]</code>, Core Void island radius 14.
+Helpers: <code>findSpawn(world)</code> (starts near 68,68 on Woods), <code>nearestLand(world,x,y)</code>,
+<code>DIGGABLE(world,i)</code> (grass/sand/snow only — never Marsh, water, blight).</p>
+<div class="warn">Changing anything inside <code>genWorld</code> changes the world for everyone and
+invalidates <code>server/save.json</code> semantics (structures may end up on water). If you change
+worldgen, bump the default seed or tell the user to delete the save.</div>
+
+<h3>shared/defs.js</h3>
+<p><code>RECIPES</code> (cost / station / flags: <code>tool</code>, <code>gear</code>, <code>place</code>),
+<code>NODE_DEF</code> (hp, required tool, yield, respawn), <code>STRUCT_HP</code>, <code>WOODEN</code>
+(erodes in night Blight Storms unless near campfire), <code>RESOURCES</code> (inventory bar order),
+<code>PLACEABLES</code>, <code>NAMES</code> (display names), <code>emptyInv()</code>,
+<code>canAfford / pay</code>. <b>Add every new item to: RECIPES + NAMES + emptyInv() + (if resource) RESOURCES + ui.ts icon map.</b></p>
+
+<h2 id="protocol">6. Network protocol reference (JSON over ws, port 8081)</h2>
+<h3>Client → Server</h3>
+<table>
+<tr><th>Msg</th><th>Payload</th><th>Notes</th></tr>
+<tr><td><code>hello</code></td><td><code>{tok}</code></td><td><b>Must be the first message.</b> tok = persistent browser identity (localStorage <code>hearth-tok</code>); restores saved profile. Server replies with <code>init</code>.</td></tr>
+<tr><td><code>pos</code></td><td><code>{x,y,z,b}</code></td><td>10 Hz. z: 0 surface / 1 underground. b: 0 walking / 1 wooden boat / 2 reinforced boat (triggers iceberg checks server-side).</td></tr>
+<tr><td><code>gather</code></td><td><code>{i}</code></td><td>Hit node at tile i. Server checks distance ≤2.5, tool, node hp; rate 250ms.</td></tr>
+<tr><td><code>dig</code></td><td><code>{i}</code></td><td>Underground only (z=1), adjacent (≤2), pickaxe required, tile DIGGABLE & undug. May yield iron/diamond/stone from veins.</td></tr>
+<tr><td><code>craft</code></td><td><code>{r}</code></td><td>r = recipe key. Server checks cost + station proximity (within 4 tiles of workbench/forge/campfire).</td></tr>
+<tr><td><code>build</code></td><td><code>{i,kind,dir}</code></td><td>Place structure (consumes inventory item). dir 0/1 = wall orientation. Building on same-kind structure stacks (wall→2, shelter→3). Engine: only near CORE with 4 monoliths lit. Mineshaft: DIGGABLE tiles; carves 3×3 chamber.</td></tr>
+<tr><td><code>torch</code></td><td><code>{}</code></td><td>Place torch at player's current underground tile (z=1, dug, has torch item).</td></tr>
+<tr><td><code>atk</code></td><td><code>{}</code></td><td>Melee. Rejected when z=1. Hits nearest creature/animal ≤2.4, else demolishes nearest structure (double dmg, refunds half cost). Dmg: isword 5 / sword 3 / axe 2 / else 1 (uses <b>equipped</b>, not owned).</td></tr>
+<tr><td><code>eq</code></td><td><code>{k}</code></td><td>Equip tool k (must own) or null. Broadcast so others see held item.</td></tr>
+<tr><td><code>usecore</code></td><td><code>{i}</code></td><td>Awaken monolith index 0-3 (needs core item, within 3 tiles).</td></tr>
+<tr><td><code>water</code></td><td><code>{}</code></td><td>Collect water when adjacent to a water tile (max 10).</td></tr>
+<tr><td><code>use</code></td><td><code>{k}</code></td><td>Consume: 'water' (+4 thirst) or 'cookedmeat' (+5 hunger).</td></tr>
+<tr><td><code>anim</code></td><td><code>{a}</code></td><td>Cosmetic relay: 'axe'|'pick'|'sword'|'isword'|null (swing) or 'j' (jump).</td></tr>
+<tr><td><code>dev</code></td><td><code>{}</code></td><td>Grants full kit if server started with DEV=1, else polite refusal.</td></tr>
+</table>
+<h3>Server → Client</h3>
+<table>
+<tr><th>Msg</th><th>Payload</th><th>Notes</th></tr>
+<tr><td><code>init</code></td><td>id, seed, x, y, time, day, mono[4], won, weather, infected[], digs[], torches[], brokenBergs[], removed[], mud[], structures[[i,kind,hp,dir,lvl]], inv, tools[], gear[], players[[id,x,y,eq,z]]</td><td>Complete world sync on join.</td></tr>
+<tr><td><code>pj / pl</code></td><td><code>{id,x,y} / {id}</code></td><td>Player joined / left.</td></tr>
+<tr><td><code>pos</code></td><td><code>{id,x,y,z}</code></td><td>Remote player moved (clients lerp).</td></tr>
+<tr><td><code>node</code></td><td><code>{i,hp}</code></td><td>hp&gt;0 damaged (shake), hp=0 depleted (fall+fade), hp=−1 respawned.</td></tr>
+<tr><td><code>inv</code></td><td><code>{inv,tools,gear}</code></td><td>Full inventory refresh for THIS player only.</td></tr>
+<tr><td><code>stat</code></td><td><code>{hunger,thirst}</code></td><td>Every 5s + on consume.</td></tr>
+<tr><td><code>hp</code></td><td><code>{hp,x,y}</code></td><td>Damage/regen. hp back to 10 after ≤1 = death respawn (client teleports, resets z).</td></tr>
+<tr><td><code>build / sd</code></td><td><code>{i,kind,hp,dir,lvl} / {i,hp}</code></td><td>Structure placed(or stacked) / damaged (hp=0 → remove).</td></tr>
+<tr><td><code>mud / infect / cure</code></td><td><code>{tiles[]}</code></td><td>Tile overlays: ecosystem collapse / wisp corruption / decay back.</td></tr>
+<tr><td><code>dig / torch</code></td><td><code>{tiles[]} / {i}</code></td><td>Underground carve / torch placed.</td></tr>
+<tr><td><code>cre</code></td><td><code>{c:[[id,x,y,type]], a:[[id,x,y,type]], time}</code></td><td>5 Hz sim broadcast: monsters, animals, world clock (0..1; night = &gt;0.65 or &lt;0.1).</td></tr>
+<tr><td><code>chit</code></td><td><code>{id}</code></td><td>Creature/animal hit flash.</td></tr>
+<tr><td><code>eq / anim</code></td><td><code>{id,k} / {id,a}</code></td><td>Remote equip / animation relays.</td></tr>
+<tr><td><code>mono / wave / win</code></td><td><code>{i} / {secs} / {}</code></td><td>Monolith awakened / final defense started / victory.</td></tr>
+<tr><td><code>wx</code></td><td><code>{kind}</code></td><td>Weather: 'rain'|'sandstorm'|'snowstorm'|null.</td></tr>
+<tr><td><code>boat / berg</code></td><td><code>{} / {i,pid}</code></td><td>Your wooden boat shattered / an iceberg was smashed by a reinforced hull.</td></tr>
+<tr><td><code>msg</code></td><td><code>{s}</code></td><td>Toast text for the player.</td></tr>
+</table>
+
+<h2 id="server">7. Server internals (server/index.js)</h2>
+<p><b>State maps</b> (all keyed by tile index unless noted): <code>nodeHp</code> (damaged nodes),
+<code>removed</code> (i → respawn timestamp), <code>mudTiles</code>, <code>sectorChops</code> (16×16 sector counters),
+<code>structures</code> (i → {kind,hp,owner,dir,lvl}), <code>digs</code>, <code>torches</code>, <code>brokenBergs</code>,
+<code>infected</code> (i → cure timestamp), <code>players</code> (sessionId → player), <code>creatures</code>, <code>animals</code>,
+<code>mono[4]</code>, <code>wave</code>, <code>profiles</code> (token → saved player).</p>
+<p><b>The 200ms tick</b>, in order: day/night clock (300s/day) → weather roll (~90s avg, 40-80s duration)
+→ infection decay (2min) → monster spawn (cap scales with monolith count & night; spawns at Core,
+at infected tiles, or near players at night) → monster AI (wisp drifts+infects; brute prefers structures,
+3 dmg; others chase nearest surface player — scent radius 40 if carrying essence/meat, else 26; structures
+in the path get attacked; contact damage) → wildlife spawn (player-biased, per-island species) + wander/flee
+→ every 5s: hunger/thirst drain (~10/7min), env damage (sandstorm→shelter by structure; snowstorm→campfire;
+desert day heat→Heat Cloak; Spire cold→Fur Cloak; skipped underground), campfire regen → every 10s at night:
+Blight Storm erosion of WOODEN structures not near a campfire → wave timer → broadcast <code>cre</code>.</p>
+<p><b>Persistence:</b> <code>loadSave()/saveGame()</code> ↔ <code>server/save.json</code>, every 30s + SIGINT.
+Saves world mutations + day/time/mono/won + <code>profiles</code>. Player profiles restore on
+<code>hello</code> by token. This is THE seam for swapping in a real DB later.</p>
+
+<h2 id="client">8. Client internals (src/main.ts — scene class "Hearth")</h2>
+<ul>
+<li><b>Terrain = streamed chunks.</b> The 320×320 map is far too big for one texture. <code>ensureChunks()</code>
+(called every frame) creates 1024×512 RenderTextures covering the camera (+margin) and evicts beyond 24.
+<code>drawChunk</code> inverse-projects the chunk rect to a tile range and paints tiles bottom-up with
+elevation: each tile is drawn <code>elev</code> times stacked 10px apart (skirts become cliff faces).
+Tile mutations go through <code>setTileMut(i, key|null)</code> which repaints the tile + its 3 southern
+neighbors on all loaded chunks.</li>
+<li><b>Two Z layers.</b> <code>z=0</code> surface, <code>z=1</code> underground. <code>setZ()</code> swaps visibility:
+surface fades to alpha 0.15, cave sprites (ugFloor/ugRock/ugOre/torches) show, creatures/animals hide,
+other players show only on the same layer. Underground positions use flat <code>iso()</code> + 16 (no elevation).
+<code>addDug(i)</code> maintains floor sprites + rock-wall sprites around tunnels + ore glints from <code>veins</code>.
+Darkness: <code>darkRT</code> screen-overlay filled black 0.93, with radial-gradient light holes erased at the
+player (glow-s), torches and mineshafts (glow-l).</li>
+<li><b>Movement</b> is screen-relative WASD mapped onto iso axes, ~4.4 tiles/s (2.2 on mud, 6.2 sailing).
+<code>blockedAt()</code> is the single collision gate: bounds → (underground: only dug tiles) → water
+(passable only with a boat) → cliffs (&gt;1 elev, &gt;2 while jumping) → structures (shelters are enterable).</li>
+<li><b>Boats:</b> walking onto water with a boat item auto-boards (sboat preferred); walking ashore
+disembarks; boat sprite follows under the rig. Server destroys wooden boats near icebergs (see pos msg).</li>
+<li><b>Rig (rig.ts):</b> characters/tools are generated textures; walk cycle & swings are code (tweens).
+Textures: <code>p-*</code> body parts, <code>i-axe/i-pick/i-spick/i-sword/i-isword</code> hand items.
+<b>Every equippable tool needs an <code>i-&lt;key&gt;</code> texture or Phaser shows a green missing-texture box.</b></li>
+<li><b>UI (ui.ts)</b> is DOM. It rebuilds innerHTML <b>only when a JSON signature changes</b> and uses
+<b>delegated</b> click listeners attached once. Never rebuild DOM per-frame (breaks clicks — see pitfalls).</li>
+<li><b>Occlusion fade:</b> any structure in front of (deeper than) the player within ~64px fades to 0.35 alpha.</li>
+<li><b>Audio (audio.ts)</b> is entirely synthesized; unlocks on first user gesture. Weather beds crossfade;
+footsteps keyed by surface; growls scale with nearest-monster distance; generative pad/pluck score, darker at night.</li>
+<li><b>Clue notes:</b> <code>NOTE_DEFS</code> in main.ts — one per island near its monolith, chained hints
+(Woods→Dunes→Marsh→Spire→Core). Client-only lore; E to read.</li>
+</ul>
+
+<h2 id="balance">9. Game design & balance tables</h2>
+<h3>Progression chain (intended)</h3>
+<pre>wood/fiber/stones by hand → Workbench(8w) → Axe(6w4f) → Campfire(5w3s) → Pickaxe(6w4s)
+→ Stone Pickaxe(8w10s) → Stone Sword / Walls / Shelter → Boat(25w10f) → sail to Dunes (Heat Cloak 15f5w)
+→ Marsh (bushes, marsh crystal) → find rare STARMETAL (Woods/Dunes/Marsh only, 14 nodes/world)
+→ Reinforced Boat(20w8f+5⭐) → survive icebergs → Frozen Spire (Fur Cloak 20f8w) → Crystal (needs spick)
+→ Aether Forge(25w20s6💎) → Iron Sword (mine iron underground) → 4× Monolith Core(8💎4🟣 each)
+→ awaken 4 Monoliths → World Engine(40w40s15💎10🟣) at the Core → 4-min wave defense → WIN</pre>
+<h3>Nodes</h3>
+<table>
+<tr><th>Node</th><th>HP</th><th>Tool</th><th>Yield</th><th>Respawn</th><th>Where</th></tr>
+<tr><td>tree</td><td>3 (axe hits ×3)</td><td>hand ok</td><td>3 wood</td><td>3min</td><td>Woods (over-chop a 16×16 sector → mud spreads: ecosystem metric)</td></tr>
+<tr><td>bush</td><td>1</td><td>hand</td><td>2 fiber</td><td>90s</td><td>Woods, Marsh</td></tr>
+<tr><td>stone (loose)</td><td>1</td><td>hand</td><td>1 stone</td><td>2min</td><td>all except Marsh</td></tr>
+<tr><td>boulder</td><td>4 (spick ×2)</td><td>pick</td><td>4 stone</td><td>4min</td><td>Dunes, Spire</td></tr>
+<tr><td>crystal</td><td>4</td><td>spick</td><td>3 crystal</td><td>5min</td><td>Spire, rare Marsh</td></tr>
+<tr><td>starmetal</td><td>6</td><td>spick</td><td>2 starmetal</td><td>15min</td><td>very rare, Woods/Dunes/Marsh</td></tr>
+</table>
+<h3>Monsters (hp = base + perStrength × strength; strength = 1 + lit monoliths)</h3>
+<table>
+<tr><th>Type</th><th>HP</th><th>Speed</th><th>Contact dmg</th><th>Behavior / drops</th></tr>
+<tr><td>crawler</td><td>1+1s</td><td>0.44</td><td>1</td><td>Default. 1-2 essence.</td></tr>
+<tr><td>stalker</td><td>2+1s</td><td>0.68</td><td>1</td><td>Night only. 1-2 essence.</td></tr>
+<tr><td>brute</td><td>6+3s</td><td>0.30</td><td>2</td><td>Appears at strength≥3; targets structures (3 dmg). 4-5 essence.</td></tr>
+<tr><td>wisp</td><td>3</td><td>0.20 drift</td><td>0</td><td>Max 2 alive; infects tiles (blight overlay, 2min, breeds crawlers). 3-4 essence.</td></tr>
+</table>
+<h3>Animals (one pair per island; kill → raw meat → cook at campfire → eat)</h3>
+<table><tr><th>Island</th><th>Species (hp / meat / flee radius / flee speed)</th></tr>
+<tr><td>Woods</td><td>deer (2/2/4/0.42), boar (4/3/3/0.30)</td></tr>
+<tr><td>Dunes</td><td>lizard (2/1/4/0.50), crab (1/1/5/0.35)</td></tr>
+<tr><td>Spire</td><td>fox (2/2/6/0.42), hare (1/1/7/0.55)</td></tr>
+<tr><td>Marsh</td><td>toad (2/1/2.5/0.25)</td></tr></table>
+<h3>Survival numbers</h3>
+<p>HP 10. Hunger empties in ~10min, thirst ~7min; at 0 → 1 dmg/5s. Water: E at a lake edge, click 💧 to drink (+4).
+Cooked meat +5. Campfire: regen 1hp/5s within 4 tiles, blocks Blight-Storm erosion within 6, respawn point (nearest own).
+Day = 300s; night = time&gt;0.65 or &lt;0.1. Carrying raw meat or essence doubles monster scent range.</p>
+
+<h2 id="howto">10. How-to: common change recipes</h2>
+<h3>Add a craftable item</h3>
+<ol><li><code>shared/defs.js</code>: RECIPES + NAMES + emptyInv() (+ STRUCT_HP/PLACEABLES if placeable, + RESOURCES if a raw resource).</li>
+<li><code>src/ui.ts</code>: icon map entry (+ add to the inventory-bar display list if it's an item).</li>
+<li>If it's a tool: add to HOTBAR arrays in <b>both</b> ui.ts and main.ts, generate an <code>i-&lt;key&gt;</code> texture in rig.ts, add damage case in server <code>atk</code>.</li>
+<li>If placeable: sprite SVG + STRUCT_SPR size entry in main.ts (preload loops pick it up automatically).</li></ol>
+<h3>Add a resource node</h3>
+<ol><li>defs.js: NODE, NODE_KEYS, NODE_DEF.</li><li>world.js: placement rule in genWorld.</li>
+<li>SVG in assets/sprites + NODE_SPR entry in main.ts.</li><li>Nothing server-side — gather flow is generic.</li></ol>
+<h3>Add a monster</h3>
+<ol><li>server: CRE_TYPES entry + spawn condition in tick + any special AI branch.</li>
+<li>client: SVG + preload + CRE_TEX entry (+ special tween if wanted).</li></ol>
+<h3>Add a network message</h3>
+<ol><li>Handler in server message switch (validate: distance, rate-limit, inventory).</li>
+<li>Client: send where needed; add case to <code>onMsg</code>.</li>
+<li>If it mutates persistent state, add to <code>saveGame()/loadSave()</code>.</li>
+<li>Add a test stage in test.mjs.</li></ol>
+
+<h2 id="testing">11. Testing & dev mode</h2>
+<p><code>test.mjs</code> spins up two real WebSocket clients against a running server and walks the full game:
+join/sync, movement relay, gather→craft→build, validation rejections, water/food, demolition+refund,
+wildlife sim, mineshaft chamber, underground digging, underground attack guard, torch placement,
+iceberg collision. It recomputes the world from the seed to find real node positions. Patterns to reuse:
+<code>c.wait(type)</code> polls for a message type; <b>filter stale periodic messages</b>
+(<code>stat</code>, <code>cre</code>, <code>dig</code>) from <code>c.msgs</code> before waiting for a fresh one — a past test bug.</p>
+<p><b>Dev mode:</b> <code>npm run server:dev</code> then F9 in the browser = full kit (all tools/gear/materials).
+Refused unless the DEV env var is set. Persistence test pattern (proven): join with a fixed token, mutate,
+wait for the 30s autosave, kill server, restart, rejoin same token, assert restored inventory.</p>
+
+<h2 id="pitfalls">12. Known pitfalls — every one of these caused a real bug</h2>
+<div class="crit"><b>Vite/esbuild does NOT type-check.</b> A reference to an undeclared class field
+(<code>this.monoSpr</code>) built fine and crashed at runtime, freezing the whole game loop (uncaught
+exception in <code>update()</code> every frame). That's why <code>npm run build</code> now runs
+<code>tsc --noEmit</code> first. <b>Never remove that step.</b> If the game "freezes", check the browser
+console — it's almost always an exception thrown per-frame from <code>update()</code>.</div>
+<div class="crit"><b>Never rebuild DOM innerHTML every frame.</b> The crafting panel originally regenerated
+its buttons 60×/s, so mousedown/mouseup landed on different elements and clicks never fired ("crafting is
+broken"). Rule: rebuild only when a state signature changes; attach listeners once via delegation (see ui.ts).</div>
+<div class="crit"><b>Don't shadow Phaser Scene properties.</b> A scene field named <code>time</code> collided
+with Phaser's <code>Scene.time</code> Clock (renamed to <code>wtime</code>); <code>Rig.body</code> collided with
+the physics property (renamed <code>torso</code>). Check the Phaser Scene/GameObject API before naming fields.</div>
+<div class="warn"><b>PowerShell mangles UTF-8.</b> Piping file content through
+<code>Get-Content | Set-Content</code> corrupted em-dashes and emoji (mojibake in server messages).
+Use the Edit tool / <code>[IO.File]::ReadAllText/WriteAllText</code> for files containing non-ASCII.</div>
+<div class="warn"><b>Stale processes & caches:</b> an old server holding :8081 made new code appear broken;
+an old browser tab ran outdated client code. Always kill node processes and hard-refresh after changes.</div>
+<div class="warn"><b>Symmetric sprites make flips invisible.</b> Wall "rotation" (flipX) did nothing because
+the original wall SVG was horizontally symmetric. Isometric direction variants must be drawn along a tile
+diagonal (see current wall.svg: parallelogram at 2:1 slope, ±20px span so neighbors overlap ~8px).</div>
+<div class="warn"><b>Hold-vs-press input:</b> E is polled every frame (hold-to-gather). The mine enter/exit
+toggle flip-flopped every 300ms while E was held until a 900ms <code>zToggleAt</code> cooldown was added.
+Any state toggle triggered from polled keys needs its own cooldown.</div>
+<div class="warn"><b>Ordering matters in interact():</b> current priority is
+notes → mine entrance → nodes → monolith → water. The mine check must precede nodes or nearby trees
+steal the keypress forever.</div>
+<div class="warn"><b>Phaser missing texture = black/green box.</b> Equipping the stone pickaxe showed one
+because <code>i-spick</code> was never generated. Every new equippable/tool/creature type needs its texture
+registered before use.</div>
+<div class="warn"><b>One giant RenderTexture will blow up GPU memory.</b> The map is rendered via streamed
+1024×512 chunks for a reason (a full-map texture would be ~12288×10280 ≈ 500MB). Keep using
+<code>ensureChunks/drawChunk/setTileMut</code>; don't "simplify" back to one texture.</div>
+
+<h2 id="roadmap">13. Roadmap — designed but not yet implemented (from PLAN.md)</h2>
+<h3>Ready-made assets, not yet wired into gameplay</h3>
+<p>These SVGs already exist in <code>assets/</code> in the house style — use them when building the
+matching feature (preload + one entry in the relevant map is all that's needed):</p>
+<table>
+<tr><th>Asset</th><th>Intended feature</th></tr>
+<tr><td><code>tiles/lava.svg</code></td><td>Lava tile — volcanic Core Void depths / deep-mine hazard layer (damage on touch, light source in the dark).</td></tr>
+<tr><td><code>sprites/fire.svg</code></td><td>Flame overlay for the fire cellular-automata system (burning trees/structures spread by wind).</td></tr>
+<tr><td><code>sprites/obsidian.svg</code></td><td>Obsidian node — mine near lava, endgame tool/building tier.</td></tr>
+<tr><td><code>sprites/blightedtree.svg</code></td><td>Corrupted tree variant — swap in when infection touches forest tiles.</td></tr>
+<tr><td><code>sprites/chest.svg</code></td><td>Storage structure (shared team stash; persists in save.json like other structures).</td></tr>
+<tr><td><code>sprites/bridge.svg</code></td><td>Buildable bridge segment — cross rivers/lakes without a boat.</td></tr>
+<tr><td><code>sprites/farmplot.svg + crop.svg</code></td><td>Farming: till plot, plant, grows over in-game days (mud sectors block growth per the ecosystem rule).</td></tr>
+<tr><td><code>sprites/bed.svg</code></td><td>Respawn point upgrade / skip-night-if-all-players-sleep.</td></tr>
+<tr><td><code>sprites/lantern.svg</code></td><td>Surface light post — extends the darkness/glow system to night-time surface play.</td></tr>
+<tr><td><code>sprites/golem.svg</code></td><td>Titan Guardian boss — guards each Monolith before it can be awakened.</td></tr>
+<tr><td><code>sprites/blightheart.svg</code></td><td>"Blighted Heart" mini-dungeon objective (Ecosystem Expeditions from PLAN.md).</td></tr>
+<tr><td><code>sprites/fish.svg</code></td><td>Fishing from boats/shores — alternative food source.</td></tr>
+<tr><td><code>sprites/ruins.svg</code></td><td>Ancient ruin POIs — lore spots / places to hide the clue notes or treasure.</td></tr>
+<tr><td><code>sprites/villager.svg, villager2.svg, tribal.svg, shaman.svg</code></td><td>NPCs: Hearthfolk survivors (Woods camp), Ashmark hunter & Elder Yvenne (Marsh tribe). Dialogue banks ready in <code>shared/dialogue.js</code>; full narrative in <code>SCRIPT.md</code> with wiring notes.</td></tr>
+</table>
+<ul>
+<li>Fire cellular automata (spreading by wind/material); water flow & trench digging.</li>
+<li>Blight evolution (enemies adapt to specific defenses), siege escalation.</li>
+<li>Convergence events (periodic map shifts), transport networks (rails/zip-lines).</li>
+<li>Ecosystem Expedition mini-dungeons ("Blighted Hearts" physics puzzles).</li>
+<li>Roles/classes (Geomancer vs Chrono-Alchemist perks).</li>
+<li>Real DB persistence (swap seam: <code>loadSave/saveGame/profiles</code> in server/index.js).</li>
+<li>Player names/chat; death inventory penalties; more diamond uses (diamond tools?).</li>
+<li>Code-splitting the 1.5MB bundle (Phaser is the bulk; use dynamic import if it matters).</li>
+</ul>
+
+<h2>14. Working agreements</h2>
+<ul>
+<li>Be token/time efficient: make targeted edits, batch independent changes, verify with build+tests once per batch.</li>
+<li>Server validates everything; client predicts movement only.</li>
+<li>Every world mutation must flow: client intent → server validation → broadcast → all clients apply. Never mutate shared world state client-side first.</li>
+<li>Keep <code>shared/</code> plain JS (it runs in Node and the browser).</li>
+<li>Extend <code>test.mjs</code> for every new server behavior; keep all stages green.</li>
+<li>After user-visible changes, tell the user whether they need a server restart, a hard refresh, or a save.json deletion.</li>
+</ul>
+
+</body>
+</html>
