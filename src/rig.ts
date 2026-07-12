@@ -45,7 +45,7 @@ export class Rig extends Phaser.GameObjects.Container {
   armL: Phaser.GameObjects.Image; armR: Phaser.GameObjects.Image;
   torso: Phaser.GameObjects.Image; head: Phaser.GameObjects.Image;
   tool: Phaser.GameObjects.Image;
-  phase = 0; moving = false; acting = 0; holdKind: string | null = null;
+  phase = 0; moving = false; acting = 0; holdKind: string | null = null; swim = false;
 
   constructor(scene: Phaser.Scene, x: number, y: number, shirtColor: number) {
     super(scene, x, y);
@@ -72,14 +72,26 @@ export class Rig extends Phaser.GameObjects.Container {
   private restTool() {
     this.tool.rotation = 0;
     this.tool.setPosition(8, -14);
-    if (this.holdKind) this.tool.setTexture('i-' + this.holdKind).setVisible(true);
+    if (this.holdKind && !this.swim) this.tool.setTexture('i-' + this.holdKind).setVisible(true);
     else this.tool.setVisible(false);
+  }
+
+  // swimming: body submerged — only the head shows (the striking arm surfaces during actions)
+  setSwim(on: boolean) {
+    if (this.swim === on) return;
+    this.swim = on;
+    const vis = !on;
+    this.legL.setVisible(vis); this.legR.setVisible(vis);
+    this.torso.setVisible(vis); this.armL.setVisible(vis);
+    if (!this.acting) this.armR.setVisible(vis);
+    this.restTool();
   }
 
   // kind: 'axe' | 'pick' | 'sword' | null (bare-hand swing / falls back to held item)
   act(kind: string | null) {
     if (this.acting) return;
     this.acting = 1;
+    if (this.swim) this.armR.setVisible(true);   // arm breaks the surface to strike
     kind = kind || this.holdKind;
     if (kind) this.tool.setTexture('i-' + kind).setVisible(true);
     this.scene.tweens.addCounter({
@@ -92,7 +104,7 @@ export class Rig extends Phaser.GameObjects.Container {
         const tip = Phaser.Math.RotateAround({ x: 8, y: -12 }, 8, -23, swing);
         this.tool.setPosition(tip.x, tip.y);
       },
-      onComplete: () => { this.acting = 0; this.armR.rotation = 0; this.restTool(); }
+      onComplete: () => { this.acting = 0; this.armR.rotation = 0; if (this.swim) this.armR.setVisible(false); this.restTool(); }
     });
   }
 

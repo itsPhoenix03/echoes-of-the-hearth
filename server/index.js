@@ -1,8 +1,9 @@
 ﻿// Echoes of the Hearth — authoritative co-op survival server.
 import { WebSocketServer } from 'ws';
 import { readFileSync, writeFileSync, existsSync } from 'fs';
-import { genWorld, findSpawn, nearestLand, SIZE, T, MONOLITHS, CORE, DIGGABLE } from '../shared/world.js';
-import { NODE_DEF, RECIPES, STRUCT_HP, WOODEN, canAfford, pay, emptyInv } from '../shared/defs.js';
+import { genWorld, findSpawn, nearestLand, SIZE, T, MONOLITHS, CORE, DIGGABLE, WORLD_VERSION, ACTIVATION_I, ISLES } from '../shared/world.js';
+import { NODE_DEF, RECIPES, STRUCT_HP, WOODEN, NAMES, canAfford, pay, emptyInv } from '../shared/defs.js';
+import { TICK_MS, DAY_LENGTH_SEC, isNightTime } from '../shared/time.js';
 
 const PORT = 8081;
 const SEED = process.env.SEED || 'hearth-1';
@@ -22,10 +23,10 @@ const creatures = new Map();         // id -> {x,y,hp}
 const animals = new Map();           // id -> {x,y,hp,dx,dy,tw,type,home} — huntable wildlife
 // type -> [home tile, island x0, y0, hp, meat, flee radius, flee speed]
 const ANIMAL_TYPES = {
-  deer:   [T.GRASS, 50, 50, 2, 2, 4, 0.42],   boar: [T.GRASS, 50, 50, 4, 3, 3, 0.3],
-  lizard: [T.SAND, 210, 50, 2, 1, 4, 0.5],    crab: [T.SAND, 210, 50, 1, 1, 5, 0.35],
-  fox:    [T.SNOW, 50, 210, 2, 2, 6, 0.42],   hare: [T.SNOW, 50, 210, 1, 1, 7, 0.55],
-  toad:   [T.MUD, 210, 210, 2, 1, 2.5, 0.25]
+  deer:   [T.GRASS, ISLES[0][0] - 35, ISLES[0][1] - 35, 2, 2, 4, 0.42],   boar: [T.GRASS, ISLES[0][0] - 35, ISLES[0][1] - 35, 4, 3, 3, 0.3],
+  lizard: [T.SAND,  ISLES[1][0] - 35, ISLES[1][1] - 35, 2, 1, 4, 0.5],    crab: [T.SAND,  ISLES[1][0] - 35, ISLES[1][1] - 35, 1, 1, 5, 0.35],
+  fox:    [T.SNOW,  ISLES[2][0] - 35, ISLES[2][1] - 35, 2, 2, 6, 0.42],   hare: [T.SNOW,  ISLES[2][0] - 35, ISLES[2][1] - 35, 1, 1, 7, 0.55],
+  toad:   [T.MUD,   ISLES[3][0] - 35, ISLES[3][1] - 35, 2, 1, 2.5, 0.25]
 };
 // monster type -> [hp base, hp/strength, speed, contact dmg]
 const CRE_TYPES = { crawler: [1, 1, 0.44, 1], stalker: [2, 1, 0.68, 1], brute: [6, 3, 0.3, 2], wisp: [3, 0, 0.2, 0] };
@@ -45,7 +46,7 @@ function loadSave() {
   if (!existsSync(SAVE_PATH)) return;
   try {
     const s = JSON.parse(readFileSync(SAVE_PATH, 'utf8'));
-    if (s.seed !== SEED) return console.log('[hearth] save.json is for a different seed — starting fresh');
+    if (s.version !== WORLD_VERSION || s.seed !== SEED) return console.log('[hearth] save.json version/seed mismatch — starting fresh');
     day = s.day; time = s.time; won = s.won;
     s.mono.forEach((v, i) => (mono[i] = v));
     for (const [i, rem] of s.removed) removed.set(i, Date.now() + rem);
@@ -63,6 +64,7 @@ function loadSave() {
 function saveGame() {
   for (const p of players.values()) if (p.tok) profiles[p.tok] = snapshot(p);
   const s = {
+    version: WORLD_VERSION, layout: 'v' + WORLD_VERSION + ':' + SIZE + ':' + SEED,
     seed: SEED, day, time, won, mono,
     removed: [...removed].map(([i, at]) => [i, Math.max(0, at - Date.now())]),
     mud: [...mudTiles], sectorChops,
@@ -71,7 +73,7 @@ function saveGame() {
   };
   try { writeFileSync(SAVE_PATH, JSON.stringify(s)); } catch (e) { console.log('[hearth] save failed:', e.message); }
 }
-const snapshot = (p) => ({ inv: p.inv, tools: [...p.tools], gear: [...p.gear], hp: p.hp, hunger: p.hunger, thirst: p.thirst, x: p.x, y: p.y });
+const snapshot = (p) => ({ inv: p.inv, tools: [...p.tools], gear: [...p.gear], wornGear: p.wornGear || null, hp: p.hp, hunger: p.hunger, thirst: p.thirst, x: p.x, y: p.y, name: p.name || 'Keeper' });
 loadSave();
 setInterval(saveGame, 30000);
 process.on('SIGINT', () => { saveGame(); console.log('\n[hearth] saved. bye'); process.exit(0); });
@@ -81,7 +83,7 @@ console.log(`[hearth] server on ws://0.0.0.0:${PORT} seed=${SEED}`);
 
 const send = (ws, m) => ws.readyState === 1 && ws.send(JSON.stringify(m));
 const bcast = (m) => { const s = JSON.stringify(m); for (const p of players.values()) if (p.ws.readyState === 1) p.ws.send(s); };
-const isNight = () => time > 0.65 || time < 0.1;
+const isNight = () => isNightTime(time);
 const blocked = (x, y) => {
   if (x < 0 || y < 0 || x >= SIZE || y >= SIZE) return true;
   if (world.tiles[ti(x, y)] === T.WATER) return true;
@@ -97,7 +99,7 @@ const nearStruct = (p, kind, r = 4) => {
     if (s.kind === kind && Math.hypot((i % SIZE) - p.x, ((i / SIZE) | 0) - p.y) <= r) return true;
   return false;
 };
-const sendInv = (id, p) => send(p.ws, { t: 'inv', inv: p.inv, tools: [...p.tools], gear: [...p.gear] });
+const sendInv = (id, p) => send(p.ws, { t: 'inv', inv: p.inv, tools: [...p.tools], gear: [...p.gear], wornGear: p.wornGear || null });
 const respawnPoint = (id) => {
   for (const [i, f] of furn)   // own bed wins
     if (f.kind === 'bed' && f.owner === id) return [i % SIZE, ((i / SIZE) | 0) + 1];
@@ -121,7 +123,9 @@ wss.on('connection', (ws) => {
 
     if (m.t === 'hello') {
       if (p) return;
-      p = { ws, x: spawn[0], y: spawn[1], z: 0, hp: 10, hunger: 10, thirst: 10, inv: emptyInv(), tools: new Set(), gear: new Set(), equip: null, lastGather: 0, lastAtk: 0, tok: typeof m.tok === 'string' ? m.tok.slice(0, 64) : null };
+      const rawName = String(m.name || '').replace(/[\x00-\x1f\x7f]/g, '').trim().slice(0, 18);
+      const helloName = rawName.length >= 2 ? rawName : 'Keeper';
+      p = { ws, x: spawn[0], y: spawn[1], z: 0, hp: 10, hunger: 10, thirst: 10, inv: emptyInv(), tools: new Set(), gear: new Set(), equip: null, wornGear: null, name: helloName, lastGather: 0, lastAtk: 0, tok: typeof m.tok === 'string' ? m.tok.slice(0, 64) : null, lastLandX: spawn[0], lastLandY: spawn[1], b: 0, thermN: 0 };
       const prof = p.tok && profiles[p.tok];
       if (prof) {
         Object.assign(p.inv, prof.inv);
@@ -129,20 +133,23 @@ wss.on('connection', (ws) => {
         prof.gear.forEach((g) => p.gear.add(g));
         p.hp = prof.hp; p.hunger = prof.hunger; p.thirst = prof.thirst;
         if (world.tiles[ti(prof.x, prof.y)] !== T.WATER) { p.x = prof.x; p.y = prof.y; }
+        p.wornGear = prof.wornGear && p.gear.has(prof.wornGear) ? prof.wornGear : null;
+        if (prof.name && helloName === 'Keeper') p.name = prof.name;
       }
       players.set(id, p);
       send(ws, {
         t: 'init', id, seed: SEED, x: p.x, y: p.y, time, day, mono, won,
+        name: p.name,
         weather: weather.kind, infected: [...infected.keys()], digs: [...digs],
         torches: [...torches], brokenBergs: [...brokenBergs],
-    furn: [...furn].map(([i, f]) => [i, f.kind]),
+        furn: [...furn].map(([i, f]) => [i, f.kind]),
         removed: [...removed.keys()], mud: [...mudTiles],
         structures: [...structures].map(([i, s]) => [i, s.kind, s.hp, s.dir || 0, s.lvl || 1]),
-        inv: p.inv, tools: [...p.tools], gear: [...p.gear],
-        players: [...players].filter(([pid]) => pid !== id).map(([pid, q]) => [pid, q.x, q.y, q.equip, q.z])
+        inv: p.inv, tools: [...p.tools], gear: [...p.gear], wornGear: p.wornGear || null,
+        players: [...players].filter(([pid]) => pid !== id).map(([pid, q]) => [pid, q.x, q.y, q.equip, q.z, q.name])
       });
-      bcast({ t: 'pj', id, x: p.x, y: p.y });
-      console.log(`[hearth] ${id} joined${prof ? ' (profile restored)' : ''} (${players.size} online)`);
+      bcast({ t: 'pj', id, x: p.x, y: p.y, name: p.name });
+      console.log(`[hearth] ${id} (${p.name}) joined${prof ? ' (profile restored)' : ''} (${players.size} online)`);
       return;
     }
     if (!p) return;
@@ -176,10 +183,24 @@ wss.on('connection', (ws) => {
         }
       }
       p.x = m.x; p.y = m.y; p.z = m.z | 0;
+      p.b = m.b | 0;
+      // track last land position for boat-wreck recovery
+      if (world.tiles[ti(p.x, p.y)] !== T.WATER) { p.lastLandX = p.x; p.lastLandY = p.y; }
       bcast({ t: 'pos', id, x: m.x, y: m.y, z: p.z });
-      // sailing: check iceberg collisions around the player
-      const b = m.b | 0;
-      if (b) {
+      // sailing hazards: icebergs and scalding water. Losing the boat leaves the
+      // player swimming in place — no teleport.
+      const b = p.b;
+      const wreckBoat = (reason) => {
+        if (p.inv.boat > 0) p.inv.boat--;
+        p.hp = Math.max(1, p.hp - 2);
+        p.b = 0;
+        send(ws, { t: 'boat', r: reason });
+        send(ws, { t: 'hp', hp: p.hp });
+        sendInv(id, p);
+      };
+      if (b === 1 && world.waterTemp[ti(p.x, p.y)] === 2) {
+        wreckBoat('burn');                             // wooden hulls ignite in the Core's scalding sea
+      } else if (b) {
         outer: for (let dy = -1; dy <= 1; dy++)
           for (let dx = -1; dx <= 1; dx++) {
             const bi = ti(p.x + dx, p.y + dy);
@@ -188,13 +209,7 @@ wss.on('connection', (ws) => {
               brokenBergs.add(bi);
               bcast({ t: 'berg', i: bi, pid: id });
             } else {                                   // wooden boat shatters
-              if (p.inv.boat > 0) p.inv.boat--;
-              p.hp = Math.max(1, p.hp - 2);
-              [p.x, p.y] = nearestLand(world, p.x, p.y);
-              send(ws, { t: 'boat' });
-              send(ws, { t: 'hp', hp: p.hp, x: p.x, y: p.y });
-              sendInv(id, p);
-              bcast({ t: 'pos', id, x: p.x, y: p.y, z: 0 });
+              wreckBoat('berg');
               break outer;
             }
           }
@@ -252,6 +267,15 @@ wss.on('connection', (ws) => {
       if (m.k !== null && !p.tools.has(m.k)) return;
       p.equip = m.k;
       bcast({ t: 'eq', id, k: m.k });
+    }
+
+    else if (m.t === 'wear') {
+      const k = m.k === null ? null : String(m.k);
+      if (k !== null && !['heatcloak', 'furcloak'].includes(k)) return;
+      if (k !== null && !p.gear.has(k)) return;
+      p.wornGear = p.wornGear === k ? null : k;
+      sendInv(id, p);
+      send(ws, { t: 'msg', s: p.wornGear ? 'You wrap yourself in the ' + NAMES[p.wornGear] + '.' : 'You remove your cloak.' });
     }
 
     else if (m.t === 'gather') {
@@ -321,8 +345,8 @@ wss.on('connection', (ws) => {
       if (blocked(x, y) || world.nodes.has(i) && !removed.has(i)) return;
       if (kind === 'mineshaft' && !DIGGABLE(world, i))
         return send(ws, { t: 'msg', s: 'Mines can only be dug in the Woods, Dunes or Spire.' });
-      if (kind === 'engine' && Math.hypot(x - CORE[0], y - CORE[1]) > 5)
-        return send(ws, { t: 'msg', s: 'The World Engine must be built at the Core Void center.' });
+      if (kind === 'engine' && i !== ACTIVATION_I)
+        return send(ws, { t: 'msg', s: 'The World Engine must be built on the activation dais at the temple heart.' });
       if (kind === 'engine' && !mono.every(Boolean))
         return send(ws, { t: 'msg', s: 'All 4 Monoliths must be awakened first.' });
       p.inv[kind]--;
@@ -442,11 +466,11 @@ wss.on('connection', (ws) => {
   });
 });
 
-// --- sim tick 200ms ---
+// --- sim tick TICK_MS ---
 setInterval(() => {
   tickN++;
   const prev = time;
-  time = (time + 0.2 / 300) % 1;                 // 300s full day
+  time = (time + (TICK_MS / 1000) / DAY_LENGTH_SEC) % 1;
   if (time < prev) { day++; bcast({ t: 'msg', s: `Day ${day} dawns over The Hearth.` }); }
 
   // node respawns
@@ -459,9 +483,9 @@ setInterval(() => {
   // weather events: rain (Woods/Marsh), sandstorm (Dunes), snowstorm (Spire)
   const nowMs = Date.now();
   if (weather.kind && nowMs > weather.until) { weather.kind = null; bcast({ t: 'wx', kind: null }); }
-  else if (!weather.kind && Math.random() < 1 / 450) {   // ~every 90s on average
+  else if (!weather.kind && Math.random() < (TICK_MS / 1000) / 180) {   // ~every 180s on average
     weather.kind = ['rain', 'sandstorm', 'snowstorm'][(Math.random() * 3) | 0];
-    weather.until = nowMs + (40 + Math.random() * 40) * 1000;
+    weather.until = nowMs + (45 + Math.random() * 45) * 1000;
     bcast({ t: 'wx', kind: weather.kind });
   }
 
@@ -613,16 +637,30 @@ setInterval(() => {
   // environmental damage, hunger/thirst, campfire regen (every 5s)
   if (tickN % 25 === 0) {
     for (const [pid, q] of players) {
-      q.hunger = Math.max(0, q.hunger - 0.08);   // empty in ~10 min
-      q.thirst = Math.max(0, q.thirst - 0.12);   // empty in ~7 min
+      q.hunger = Math.max(0, q.hunger - 0.055);   // empty in ~15 min
+      q.thirst = Math.max(0, q.thirst - 0.083);   // empty in ~10 min
       send(q.ws, { t: 'stat', hunger: Math.ceil(q.hunger), thirst: Math.ceil(q.thirst) });
       const t = world.tiles[ti(q.x, q.y)];
+      // Thermal water damage (BEFORE weather checks) — boats protect
+      if (t === T.WATER && q.z === 0 && !q.b) {
+        const wt = world.waterTemp[ti(q.x, q.y)];
+        if (wt > 0) {
+          q.thermN = (q.thermN || 0) + 1;
+          const protected_ = (wt === 1 && q.wornGear === 'furcloak') || (wt === 2 && q.wornGear === 'heatcloak');
+          if (!protected_ || (protected_ && q.thermN % 2 === 0)) {
+            q.hp = Math.max(1, q.hp - 1);
+            const msg = wt === 1 ? 'The freezing water saps your life!' : 'The scalding water burns!';
+            send(q.ws, { t: 'msg', s: msg });
+            send(q.ws, { t: 'hp', hp: q.hp, x: q.x, y: q.y });
+          }
+        } else { q.thermN = 0; }
+      } else { q.thermN = 0; }
       let delta = 0;
       if (q.z !== 0) { /* underground or indoors: sheltered from weather */ }
       else if (weather.kind === 'sandstorm' && t === T.SAND && !nearAnyStruct(q, 2)) { delta = -1; send(q.ws, { t: 'msg', s: 'The sandstorm flays you — shelter beside a structure!' }); }
       else if (weather.kind === 'snowstorm' && t === T.SNOW && !nearStruct(q, 'campfire', 6)) { delta = -1; send(q.ws, { t: 'msg', s: 'The blizzard freezes you — get to a campfire!' }); }
-      else if (t === T.SAND && !isNight() && !q.gear.has('heatcloak')) { delta = -1; send(q.ws, { t: 'msg', s: 'The desert heat sears you! Craft a Heat Cloak.' }); }
-      else if (t === T.SNOW && !q.gear.has('furcloak')) { delta = -1; send(q.ws, { t: 'msg', s: 'The glacial cold bites! Craft a Fur Cloak.' }); }
+      else if (t === T.SAND && !isNight() && q.wornGear !== 'heatcloak') { delta = -1; send(q.ws, { t: 'msg', s: 'The desert heat sears you! Craft a Heat Cloak.' }); }
+      else if (t === T.SNOW && q.wornGear !== 'furcloak') { delta = -1; send(q.ws, { t: 'msg', s: 'The glacial cold bites! Craft a Fur Cloak.' }); }
       else if (q.hunger <= 0 || q.thirst <= 0) { delta = -1; send(q.ws, { t: 'msg', s: q.thirst <= 0 ? 'You are dying of thirst!' : 'You are starving!' }); }
       else if (q.hp < 10 && nearStruct(q, 'campfire', 4)) delta = 1;
       if (delta) {
@@ -633,8 +671,8 @@ setInterval(() => {
     }
   }
 
-  // Blight Storm erosion: wooden structures decay at night unless near a campfire (every 10s)
-  if (tickN % 50 === 0 && isNight() && !won) {
+  // Blight Storm erosion: wooden structures decay at night unless near a campfire (every 20s)
+  if (tickN % 100 === 0 && isNight() && !won) {
     for (const [i, s] of structures) {
       if (!WOODEN.has(s.kind)) continue;
       const x = i % SIZE, y = (i / SIZE) | 0;
@@ -661,4 +699,4 @@ setInterval(() => {
     a: [...animals].map(([aid, a]) => [aid, +a.x.toFixed(2), +a.y.toFixed(2), a.type]),
     time: +time.toFixed(4), day
   });
-}, 200);
+}, TICK_MS);

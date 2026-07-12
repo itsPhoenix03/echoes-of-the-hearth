@@ -6,9 +6,9 @@ const world = genWorld('hearth-1');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const fail = (s) => { console.log('FAIL:', s); process.exit(1); };
 
-function client() {
+function client(name) {
   const ws = new WebSocket('ws://localhost:8081');
-  ws.on('open', () => ws.send(JSON.stringify({ t: 'hello', tok: 'test-' + Math.random().toString(36).slice(2) })));
+  ws.on('open', () => ws.send(JSON.stringify({ t: 'hello', tok: 'test-' + Math.random().toString(36).slice(2), ...(name ? { name } : {}) })));
   const c = { ws, msgs: [], state: {} };
   ws.on('message', (d) => { const m = JSON.parse(d); c.msgs.push(m); if (m.t === 'init') c.state = m; if (m.t === 'inv') c.state.inv = m.inv; });
   c.send = (m) => ws.send(JSON.stringify(m));
@@ -161,8 +161,8 @@ console.log('torch placed underground OK at tile', tm.i);
 
 // fall damage: step off a 2+ level cliff
 let cliff = null;
-outer: for (let y = 30; y < 130; y++)
-  for (let x = 30; x < 130; x++) {
+outer: for (let y = 115; y < 245; y++)
+  for (let x = 115; x < 245; x++) {
     const a = y * SIZE + x, b = y * SIZE + x + 1;
     if (world.tiles[a] !== 4 && world.tiles[b] !== 4 && world.elev[a] - world.elev[b] >= 2) { cliff = [x, y]; break outer; }
   }
@@ -179,6 +179,83 @@ const berg = [...world.bergs][0];
 A.send({ t: 'pos', x: berg % SIZE, y: (berg / SIZE) | 0, z: 0, b: 1 });
 await A.wait('boat');
 console.log('iceberg collision OK: wooden boat shattered, player washed ashore');
+
+// --- Stage E1: display names ---
+// C connects with name 'Tester-A'; verify init.name and that A sees pj with name
+A.msgs = A.msgs.filter((m) => m.t !== 'pj');
+const C = client('Tester-A');
+const initC = await C.wait('init');
+if (initC.name !== 'Tester-A') fail('E1: init.name wrong: ' + initC.name);
+// A should receive a pj broadcast for C with name
+const pjForC = await (async () => {
+  const t0 = Date.now();
+  while (Date.now() - t0 < 3000) {
+    const m = A.msgs.find((x) => x.t === 'pj' && x.name === 'Tester-A');
+    if (m) return m;
+    await sleep(50);
+  }
+  fail('E1: A did not receive pj with name Tester-A');
+})();
+console.log('E1 name OK: init.name =', initC.name, '| A saw pj.name =', pjForC.name);
+C.ws.close();
+await sleep(200);
+
+// --- Stage E2: wear reject — A sends wear for heatcloak without owning it ---
+// Filter any stale inv messages first
+A.msgs = A.msgs.filter((m) => m.t !== 'inv');
+A.send({ t: 'wear', k: 'heatcloak' });
+await sleep(500);
+// No inv message with wornGear set should have arrived
+const badWear = A.msgs.find((m) => m.t === 'inv' && m.wornGear === 'heatcloak');
+if (badWear) fail('E2: server accepted wear for unowned heatcloak!');
+console.log('E2 wear reject OK (no inv with wornGear=heatcloak)');
+
+// --- Stage E3: wear accept — craft heatcloak then toggle wear ---
+// Ensure A has enough fiber (15) and wood (5) for heatcloak near the workbench.
+// A already has some fiber from torch stage. Gather more bushes if needed.
+A.send({ t: 'pos', x: px, y: py, z: 0 }); await sleep(80);
+const allBushes = byDist([...world.nodes].filter(([, k]) => k === NODE.BUSH).map(([i]) => i));
+// Gather up to 8 bushes for fiber (each gives 2 fiber → 16 fiber total needed: 15)
+for (const bi of allBushes.slice(0, 8)) {
+  if ((A.state.inv?.fiber || 0) >= 15) break;
+  A.send({ t: 'pos', x: bi % SIZE, y: (bi / SIZE) | 0 }); await sleep(60);
+  A.send({ t: 'gather', i: bi }); await sleep(300);
+}
+await sleep(200);
+// Gather more trees if wood < 5
+const moreTrees2 = byDist([...world.nodes].filter(([, k]) => k === NODE.TREE).map(([i]) => i)).slice(10, 15);
+for (const tr of moreTrees2) {
+  if ((A.state.inv?.wood || 0) >= 5) break;
+  A.send({ t: 'pos', x: tr % SIZE, y: (tr / SIZE) | 0 }); await sleep(60);
+  for (let h = 0; h < 3; h++) { A.send({ t: 'gather', i: tr }); await sleep(280); }
+}
+await sleep(200);
+if ((A.state.inv?.fiber || 0) < 15 || (A.state.inv?.wood || 0) < 5)
+  fail(`E3: not enough materials for heatcloak: fiber=${A.state.inv?.fiber} wood=${A.state.inv?.wood}`);
+// Move near the existing workbench and craft heatcloak
+A.send({ t: 'pos', x: px, y: py }); await sleep(80);
+A.msgs = A.msgs.filter((m) => m.t !== 'inv');
+A.send({ t: 'craft', r: 'heatcloak' }); await sleep(400);
+if (!A.state.inv || ![...A.msgs].reverse().find((m) => m.t === 'inv' && m.gear && m.gear.includes('heatcloak'))) {
+  // double-check via state refresh
+  await sleep(300);
+}
+// Check gear from latest inv message
+const latestInv = [...A.msgs].reverse().find((m) => m.t === 'inv');
+if (!latestInv || !latestInv.gear || !latestInv.gear.includes('heatcloak'))
+  fail('E3: heatcloak not in gear after craft. gear=' + JSON.stringify(latestInv?.gear));
+// Now wear it
+A.msgs = A.msgs.filter((m) => m.t !== 'inv');
+A.send({ t: 'wear', k: 'heatcloak' });
+const wearInv1 = await A.wait('inv', 2000);
+if (wearInv1.wornGear !== 'heatcloak') fail('E3: wornGear should be heatcloak, got ' + wearInv1.wornGear);
+console.log('E3 wear accept OK: wornGear =', wearInv1.wornGear);
+// Toggle off by sending same key
+A.msgs = A.msgs.filter((m) => m.t !== 'inv');
+A.send({ t: 'wear', k: 'heatcloak' });
+const wearInv2 = await A.wait('inv', 2000);
+if (wearInv2.wornGear !== null) fail('E3: wornGear should be null after toggle, got ' + wearInv2.wornGear);
+console.log('E3 wear toggle off OK: wornGear =', wearInv2.wornGear);
 
 console.log('ALL TESTS PASSED');
 process.exit(0);

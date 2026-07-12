@@ -1,20 +1,14 @@
 import Phaser from 'phaser';
-import { genWorld, nearestLand, SIZE, T, TILE_KEYS, MONOLITHS, ISLES } from '../shared/world.js';
+import { genWorld, nearestLand, SIZE, T, TILE_KEYS, MONOLITHS, ISLES, MOUNTAINS, TEMPLE_PIECES, LANDMARK_BLOCK } from '../shared/world.js';
 import { NODE_KEYS, RECIPES, NAMES, emptyInv } from '../shared/defs.js';
+import { isNightTime, NIGHT_START } from '../shared/time.js';
 import { Rig, makePartTextures } from './rig.ts';
 import { initUI, showMsg, UIState } from './ui.ts';
 import { GameAudio } from './audio.ts';
+import { ASSET_MANIFEST, NODE_SPR, STRUCT_SPR } from './assets.ts';
 
 const TW = 64, TH = 32;
 const MONO_NAMES = ['Whispering Woods', 'Sinking Dunes', 'Frozen Spire', 'Blighted Marsh'];
-const NODE_SPR: Record<string, [string, number, number]> = { // texture, w, h
-  tree: ['tree', 48, 64], boulder: ['boulder', 44, 36], bush: ['bush', 36, 28],
-  stone: ['stone', 24, 16], crystal: ['crystal', 36, 44], starmetal: ['starmetal', 38, 32]
-};
-const STRUCT_SPR: Record<string, [number, number]> = {
-  wall: [48, 52], campfire: [40, 36], workbench: [52, 42], forge: [52, 60], engine: [64, 84],
-  mineshaft: [52, 48], shelter: [104, 100]
-};
 const STORY_OFF: Record<string, number> = { wall: 25, shelter: 52 };
 const MAX_LVL: Record<string, number> = { wall: 2, shelter: 3 };
 const colorFor = (id: string) => {
@@ -27,15 +21,42 @@ const CHW = 1024, CHH = 512;
 
 // Hidden clue notes — each island's note hints at the next, never with exact coordinates.
 const NOTE_DEFS: [number, number, string][] = [
-  [ISLES[0][0] + 7, ISLES[0][1] + 4, '📜 Weathered journal: "I left the whispering pines and sailed into the RISING SUN for a full day. When hope thinned, golden dunes broke the horizon. And mark this — where forests and marshes grow, gold-flecked starfall stone hides among the rocks."'],
-  [ISLES[1][0] + 7, ISLES[1][1] + 4, '📜 Sun-bleached scroll: "From these dunes I fled DUE SOUTH across an empty sea, a day and a night. Where the water turns black and the earth breathes, the marsh waits — and things wait in the marsh."'],
-  [ISLES[3][0] + 7, ISLES[3][1] + 4, '📜 Mud-stained page: "Chase the SETTING SUN from this bog and a frozen crown rises, ringed by white teeth of ice. My wooden hull was matchwood in a breath. Only a hull bound in fallen-star metal survives the teeth."'],
-  [ISLES[2][0] + 7, ISLES[2][1] + 4, '📜 Frost-rimed letter: "From the Spire\'s peak I finally saw it — a wound in the heart of the sea, EQUALLY FAR FROM EVERY SHORE. Four songs must wake before its engine will turn."']
+  [ISLES[0][0] + 7, ISLES[0][1] + 4, '📜 Weathered journal: "I left the whispering pines and sailed into the RISING SUN for a full day — two minutes hard sailing east. When hope thinned, golden dunes broke the horizon. Watch for a rock islet at the midpoint; shelter there if a storm finds you. And mark this — where forests and marshes grow, gold-flecked starfall stone hides among the rocks."'],
+  [ISLES[1][0] + 7, ISLES[1][1] + 4, '📜 Sun-bleached scroll: "From these dunes I fled DUE SOUTH across an empty sea, a day and a night. The southern crossing is long; a ruined islet breaks the journey — rest there if your hull is weary. Where the water turns black and the earth breathes, the marsh waits — and things wait in the marsh."'],
+  [ISLES[3][0] + 7, ISLES[3][1] + 4, '📜 Mud-stained page: "Chase the SETTING SUN from this bog and a frozen crown rises. The white teeth ring the WHOLE frozen isle now — no wooden hull survives any approach. Only a hull bound in fallen-star metal smashes through the teeth."'],
+  [ISLES[2][0] + 7, ISLES[2][1] + 4, '📜 Frost-rimed letter: "From the Spire\'s peak I finally saw it — the heart lies at the exact center of the world, ringed in scalding water, EQUALLY FAR FROM EVERY SHORE. Four songs must wake before its engine will turn."']
 ];
+
+// Bird species config: key prefix, frame-rate
+const BIRD_SPECIES: [string, number][] = [
+  ['gull',         8],
+  ['snow_tern',   10],
+  ['ember_kite',   7],
+  ['marsh_heron',  5],
+  ['dune_falcon',  9],
+  ['woods_thrush', 9],
+];
+// Which tile type spawns which species index
+const TILE_BIRD: Record<number, string> = {
+  [T.GRASS]: 'woods_thrush',
+  [T.SAND]:  'dune_falcon',
+  [T.SNOW]:  'snow_tern',
+  [T.MUD]:   'marsh_heron',
+  [T.BLIGHT]:'ember_kite',
+  [T.WATER]: 'gull',
+};
+
+interface BirdEntry {
+  spr: Phaser.GameObjects.Sprite;
+  vx: number;
+  vy: number;
+  bobPhase: number;
+  baseY: number;
+}
 
 class Hearth extends Phaser.Scene {
   ws!: WebSocket; id = '';
-  world!: { tiles: Uint8Array; elev: Uint8Array; veins: Uint8Array; nodes: Map<number, number>; bergs: Set<number> };
+  world!: { tiles: Uint8Array; elev: Uint8Array; veins: Uint8Array; nodes: Map<number, number>; bergs: Set<number>; waterTemp: Uint8Array; tileVis: Uint8Array; decor: Map<number, string> };
   chunks = new Map<string, Phaser.GameObjects.RenderTexture>();
   mutTiles = new Map<number, string>();   // tile overrides: mud, blight infection
   weather: string | null = null;
@@ -48,8 +69,9 @@ class Hearth extends Phaser.Scene {
   offX = (SIZE - 1) * TW / 2;
   me!: Rig; px = 40; py = 40; hp = 10; hunger = 10; thirst = 10;
   inv: any = emptyInv(); tools = new Set<string>(); gear = new Set<string>(); equipped: string | null = null;
+  wornGear: string | null = null;
   mono = [false, false, false, false]; day = 1; wtime = 0.3; won = false; waveEnd = 0;
-  others = new Map<string, { rig: Rig; tx: number; ty: number; z: number }>();
+  others = new Map<string, { rig: Rig; tx: number; ty: number; wx: number; wy: number; z: number; label: Phaser.GameObjects.Text }>();
   monoSpr: Phaser.GameObjects.Sprite[] = [];
   creSpr = new Map<string, Phaser.GameObjects.Sprite>();
   aniSpr = new Map<string, Phaser.GameObjects.Sprite>();
@@ -61,7 +83,12 @@ class Hearth extends Phaser.Scene {
   ugRock = new Map<number, Phaser.GameObjects.Image>();
   ugOre = new Map<number, Phaser.GameObjects.Image>();
   jumpT = -1; faceX = 1; faceY = 0; zToggleAt = 0;
-  sailing = false; boatKind = 0; boatSpr: Phaser.GameObjects.Image | null = null;
+  sailing = false; swimming = false; boatKind = 0; boatSpr: Phaser.GameObjects.Image | null = null;
+  selectedVehicle: 'boat' | 'sboat' | null = null;
+  warnedWaterTemp = false;
+  decorSpr: Map<number, Phaser.GameObjects.Image> = new Map();
+  mountainSpr: Phaser.GameObjects.Image[] = [];
+  templeSpr: Phaser.GameObjects.Image[] = [];
   bergSpr = new Map<number, Phaser.GameObjects.Image>();
   torchSpr = new Map<number, Phaser.GameObjects.Image>();
   darkRT!: Phaser.GameObjects.RenderTexture;
@@ -76,6 +103,12 @@ class Hearth extends Phaser.Scene {
   audio = new GameAudio();
   stepTimer = 0; growlTimer = 1;
   lastSend = 0; lastGather = 0; ready = false;
+  meLabel: Phaser.GameObjects.Text | null = null;
+  myName = 'Keeper';
+
+  // Bird system
+  birds: BirdEntry[] = [];
+  birdTimer = 0;
 
   iso(x: number, y: number) { return { x: (x - y) * TW / 2 + this.offX, y: (x + y) * TH / 2 }; }
   elevAt(x: number, y: number) {
@@ -94,43 +127,28 @@ class Hearth extends Phaser.Scene {
   }
 
   preload() {
-    for (const k of TILE_KEYS) this.load.svg(k, `/tiles/${k}.svg`, { width: 64, height: 40 });
-    for (const [k, [tex, w, h]] of Object.entries(NODE_SPR)) this.load.svg(tex, `/sprites/${tex}.svg`, { width: w, height: h });
-    for (const [k, [w, h]] of Object.entries(STRUCT_SPR)) this.load.svg(k, `/sprites/${k}.svg`, { width: w, height: h });
-    this.load.svg('monolith', '/sprites/monolith.svg', { width: 48, height: 80 });
-    this.load.svg('creature', '/sprites/blight-creature.svg', { width: 40, height: 36 });
-    this.load.svg('stalker', '/sprites/stalker.svg', { width: 44, height: 30 });
-    this.load.svg('brute', '/sprites/brute.svg', { width: 56, height: 54 });
-    this.load.svg('wisp', '/sprites/wisp.svg', { width: 32, height: 40 });
-    this.load.svg('boar', '/sprites/boar.svg', { width: 40, height: 28 });
-    this.load.svg('crab', '/sprites/crab.svg', { width: 30, height: 20 });
-    this.load.svg('hare', '/sprites/hare.svg', { width: 26, height: 26 });
-    this.load.svg('rock', '/tiles/rock.svg', { width: 64, height: 64 });
-    this.load.svg('cavefloor', '/tiles/cavefloor.svg', { width: 64, height: 40 });
-    this.load.svg('ironore', '/sprites/ironore.svg', { width: 30, height: 24 });
-    this.load.svg('diamondore', '/sprites/diamondore.svg', { width: 30, height: 24 });
-    this.load.svg('boat', '/sprites/boat.svg', { width: 56, height: 30 });
-    this.load.svg('iceberg', '/sprites/iceberg.svg', { width: 44, height: 42 });
-    this.load.svg('torch', '/sprites/torch.svg', { width: 16, height: 34 });
-    this.load.svg('note', '/sprites/note.svg', { width: 26, height: 30 });
-    this.load.svg('chest', '/sprites/chest.svg', { width: 44, height: 38 });
-    this.load.svg('bed', '/sprites/bed.svg', { width: 52, height: 36 });
-    this.load.svg('deer', '/sprites/animal.svg', { width: 36, height: 30 });
-    this.load.svg('lizard', '/sprites/lizard.svg', { width: 36, height: 22 });
-    this.load.svg('fox', '/sprites/fox.svg', { width: 34, height: 26 });
-    this.load.svg('toad', '/sprites/toad.svg', { width: 28, height: 22 });
+    for (const [k, u, w, h] of ASSET_MANIFEST) this.load.svg(k, u, { width: w, height: h });
   }
 
   create() {
     makePartTextures(this);
     this.makeWeatherFx();
     this.makeGlowTextures();
+    this.registerBirdAnims();
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     this.ws = new WebSocket(`${proto}://${location.hostname}:8081`);
     this.ws.onopen = () => {
       let tok = localStorage.getItem('hearth-tok');
       if (!tok) { tok = Math.random().toString(36).slice(2) + Date.now().toString(36); localStorage.setItem('hearth-tok', tok); }
-      this.send({ t: 'hello', tok });
+      // Task 5: player display name
+      const urlName = new URLSearchParams(location.search).get('name');
+      if (urlName) { this.myName = urlName; localStorage.setItem('hearth-name', urlName); }
+      else {
+        let stored = localStorage.getItem('hearth-name');
+        if (!stored) { stored = 'Keeper-' + Math.floor(1000 + Math.random() * 9000); localStorage.setItem('hearth-name', stored); }
+        this.myName = stored;
+      }
+      this.send({ t: 'hello', tok, name: this.myName });
     };
     this.ws.onmessage = (e) => this.onMsg(JSON.parse(e.data));
     this.ws.onclose = () => showMsg('Disconnected. Is the server running? (npm run server)', 60000);
@@ -160,10 +178,19 @@ class Hearth extends Phaser.Scene {
       (r) => this.send({ t: 'craft', r }),
       (k) => this.setPlacing(k),
       (k) => this.send({ t: 'use', k }),
-      (k) => this.setEquip(k)
+      (k) => this.setEquip(k),
+      (k) => this.setWear(k),
+      (k) => {
+        // TASK 4a: toggle selected vehicle
+        this.selectedVehicle = this.selectedVehicle === k ? null : k;
+        showMsg(this.selectedVehicle ? `⛵ ${NAMES[k]} selected — walk into the sea to sail.` : 'Vehicle deselected. You will swim.', 2000);
+      }
     );
     showMsg('Connecting to The Hearth...');
   }
+
+  // Task 4: send wear request
+  setWear(k: string | null) { this.send({ t: 'wear', k }); }
 
   send(m: any) { if (this.ws.readyState === 1) this.ws.send(JSON.stringify(m)); }
 
@@ -214,6 +241,49 @@ class Hearth extends Phaser.Scene {
       .setOrigin(0).setScrollFactor(0).setDepth(999994).setAlpha(0);
   }
 
+  registerBirdAnims() {
+    for (const [species, rate] of BIRD_SPECIES) {
+      this.anims.create({
+        key: `${species}_fly`,
+        frames: [
+          { key: `${species}_fly_1` },
+          { key: `${species}_fly_2` },
+          { key: `${species}_fly_3` },
+          { key: `${species}_fly_2` },
+        ],
+        frameRate: rate,
+        repeat: -1,
+      });
+    }
+  }
+
+  spawnBird() {
+    const cam = this.cameras.main.worldView;
+    // pick species based on tile under camera center
+    const cx = this.cameras.main.scrollX + this.scale.width / 2;
+    const cy = this.cameras.main.scrollY + this.scale.height / 2;
+    const { x: tx, y: ty } = this.unIso(cx, cy);
+    const tileType = this.tileAt(tx, ty);
+    const species = TILE_BIRD[tileType] ?? 'gull';
+
+    const fromLeft = Math.random() < 0.5;
+    const spawnX = fromLeft ? cam.x - 80 : cam.right + 80;
+    const spawnY = cam.y + Math.random() * cam.height;
+    const speed = 60 + Math.random() * 50;
+    const vx = fromLeft ? speed : -speed;
+    const vy = (Math.random() - 0.5) * 20;
+    const sc = 0.8 + Math.random() * 0.3;
+
+    const spr = this.add.sprite(spawnX, spawnY, `${species}_fly_1`)
+      .setOrigin(0.5, 0.5)
+      .setScale(sc)
+      .setDepth(999980)
+      .setFlipX(vx > 0);   // all bird art faces LEFT — flip when flying right
+    spr.play(`${species}_fly`);
+
+    this.birds.push({ spr, vx, vy, bobPhase: Math.random() * Math.PI * 2, baseY: spawnY });
+  }
+
   // --- chunk-streamed terrain (whole map is too large for one texture) ---
   ensureChunks() {
     const cam = this.cameras.main.worldView;
@@ -233,7 +303,24 @@ class Hearth extends Phaser.Scene {
       }
   }
 
-  private tileKey(i: number) { return this.mutTiles.get(i) || TILE_KEYS[this.world.tiles[i]]; }
+  private tileKey(i: number) {
+    if (this.mutTiles.has(i)) return this.mutTiles.get(i)!;
+    const t = this.world.tiles[i];
+    if (t === T.WATER) {
+      const wt = this.world.waterTemp?.[i] ?? 0;
+      if (wt === 1) return 'water_freezing';
+      if (wt === 2) return 'water_hot';
+      return 'water';
+    }
+    if (this.world.tileVis?.[i] === 1) {
+      if (t === T.GRASS)  return 'flower_grass';
+      if (t === T.SAND)   return 'cracked_sand';
+      if (t === T.SNOW)   return 'packed_ice';
+      if (t === T.MUD)    return 'moss_stone';
+      if (t === T.BLIGHT) return 'ash';
+    }
+    return TILE_KEYS[t];
+  }
 
   drawChunk(cx: number, cy: number) {
     const rt = this.add.renderTexture(cx * CHW, cy * CHH, CHW, CHH).setOrigin(0).setDepth(-1).setAlpha(this.z === 1 ? 0.15 : 1);
@@ -243,15 +330,21 @@ class Hearth extends Phaser.Scene {
       ty: (sy / (TH / 2) - (sx - this.offX) / (TW / 2)) / 2
     });
     const cs = [inv(rx - pad, ry - pad), inv(rx + CHW + pad, ry - pad), inv(rx - pad, ry + CHH + pad), inv(rx + CHW + pad, ry + CHH + pad)];
-    const tx0 = Math.max(0, Math.floor(Math.min(...cs.map((c) => c.tx))));
-    const tx1 = Math.min(SIZE - 1, Math.ceil(Math.max(...cs.map((c) => c.tx))));
-    const ty0 = Math.max(0, Math.floor(Math.min(...cs.map((c) => c.ty))));
-    const ty1 = Math.min(SIZE - 1, Math.ceil(Math.max(...cs.map((c) => c.ty))));
+    // Task 3b: compute unclamped tile range for ocean rendering
+    const tx0 = Math.floor(Math.min(...cs.map((c) => c.tx)));
+    const tx1 = Math.ceil(Math.max(...cs.map((c) => c.tx)));
+    const ty0 = Math.floor(Math.min(...cs.map((c) => c.ty)));
+    const ty1 = Math.ceil(Math.max(...cs.map((c) => c.ty)));
     rt.beginDraw();
     for (let y = ty0; y <= ty1; y++)
       for (let x = tx0; x <= tx1; x++) {
         const p = this.iso(x, y);
         if (p.x < rx - pad || p.x > rx + CHW + pad || p.y < ry - pad || p.y > ry + CHH + pad) continue;
+        // Task 3b: out-of-bounds tiles render as ocean water
+        if (x < 0 || x >= SIZE || y < 0 || y >= SIZE) {
+          rt.batchDraw('water', p.x - TW / 2 - rx, p.y - ry);
+          continue;
+        }
         const i = y * SIZE + x;
         const key = this.tileKey(i);
         const e = Math.max(1, this.world.elev[i]);
@@ -268,11 +361,11 @@ class Hearth extends Phaser.Scene {
     const list = [[x, y], [x + 1, y], [x, y + 1], [x + 1, y + 1]]
       .filter(([a, b]) => a < SIZE && b < SIZE);
     for (const [k, rt] of this.chunks) {
-      const [cx, cy] = k.split(',').map(Number);
+      const [ccx, ccy] = k.split(',').map(Number);
       rt.beginDraw();
       for (const [tx2, ty2] of list) {
         const p = this.iso(tx2, ty2);
-        const lx = p.x - TW / 2 - cx * CHW, ly = p.y - cy * CHH;
+        const lx = p.x - TW / 2 - ccx * CHW, ly = p.y - ccy * CHH;
         if (lx < -110 || lx > CHW + 110 || ly < -110 || ly > CHH + 110) continue;
         const ii = ty2 * SIZE + tx2;
         const kk = this.tileKey(ii);
@@ -284,7 +377,7 @@ class Hearth extends Phaser.Scene {
   }
 
   jump() {
-    if (!this.ready || this.jumpT >= 0 || this.sailing) return;
+    if (!this.ready || this.jumpT >= 0 || this.sailing || this.swimming) return;
     this.jumpT = 0;
     this.send({ t: 'anim', a: 'j' });
     this.audio.swing();
@@ -343,6 +436,9 @@ class Hearth extends Phaser.Scene {
     for (const s of this.nodeSpr.values()) s.setAlpha(surfA);
     for (const e of this.structSpr.values()) { e.spr.setAlpha(surfA); e.extra.forEach((s) => s.setAlpha(surfA)); e.glow?.setAlpha(z === 1 ? 0.03 : 0.13); }
     this.monoSpr.forEach((s) => s.setAlpha(surfA));
+    for (const s of this.decorSpr.values()) s.setAlpha(surfA);
+    for (const s of this.mountainSpr) s.setAlpha(surfA);
+    for (const s of this.templeSpr) s.setAlpha(surfA);
     for (const s of this.creSpr.values()) s.setVisible(z === 0);
     for (const s of this.aniSpr.values()) s.setVisible(z === 0);
     for (const s of this.ugFloor.values()) s.setVisible(z === 1);
@@ -351,7 +447,9 @@ class Hearth extends Phaser.Scene {
     for (const s of this.torchSpr.values()) s.setVisible(z === 1);
     for (const s of this.furnSpr.values()) s.setVisible(z === 2);
     for (const s of this.bergSpr.values()) s.setAlpha(surfA);
-    for (const o of this.others.values()) o.rig.setVisible(o.z === z);
+    for (const o of this.others.values()) { o.rig.setVisible(o.z === z); o.label.setVisible(o.z === z); }
+    // hide birds underground
+    for (const b of this.birds) b.spr.setVisible(z === 0);
     this.send({ t: 'pos', x: +this.px.toFixed(2), y: +this.py.toFixed(2), z });
     showMsg(z === 1 ? '⛏ You descend into the mine. Dig with E — watch for ore glints in the rock.' : 'You climb back to the surface.');
   }
@@ -384,12 +482,20 @@ class Hearth extends Phaser.Scene {
     if (this.inv[this.placing] <= 1) this.setPlacing(null);
   }
 
-  addOther(pid: string, x: number, y: number) {
+  addOther(pid: string, x: number, y: number, name?: string) {
     if (this.others.has(pid) || pid === this.id) return;
     const p = this.isoE(x, y);
     const rig = new Rig(this, p.x, p.y, colorFor(pid));
     rig.setDepth(p.y);
-    this.others.set(pid, { rig, tx: p.x, ty: p.y, z: 0 });
+    const labelText = name || 'Keeper';
+    const label = this.add.text(p.x, p.y - 58, labelText, {
+      fontSize: '11px',
+      fontFamily: 'monospace',
+      color: '#cfe8f5',
+      stroke: '#0a0f14',
+      strokeThickness: 3,
+    }).setOrigin(0.5, 1).setDepth(p.y + 1);
+    this.others.set(pid, { rig, tx: p.x, ty: p.y, wx: x, wy: y, z: 0, label });
   }
 
   onMsg(m: any) {
@@ -397,28 +503,34 @@ class Hearth extends Phaser.Scene {
       this.id = m.id; this.px = m.x; this.py = m.y; this.wtime = m.time; this.day = m.day;
       this.mono = m.mono; this.won = m.won; this.inv = m.inv;
       this.weather = m.weather;
+      // Task 4: wornGear from init
+      this.wornGear = m.wornGear ?? null;
       this.buildWorld(m.seed, m.removed, m.mud, m.infected, m.brokenBergs);
       for (const [i, kind, hp, dir, lvl] of m.structures) for (let l = 1; l <= (lvl || 1); l++) this.addStruct(i, kind, hp, dir, l);
       for (const i of m.digs || []) this.addDug(i);
       for (const i of m.torches || []) this.addTorch(i);
       for (const [i, kind] of m.furn || []) this.addFurn(i, kind);
-      for (const [pid, x, y, eq, pz] of m.players) {
-        this.addOther(pid, x, y);
+      for (const [pid, x, y, eq, pz, pname] of m.players) {
+        this.addOther(pid, x, y, pname);
         const o = this.others.get(pid);
-        if (o) { o.z = pz || 0; o.rig.setVisible(o.z === this.z); if (eq) o.rig.hold(eq); }
+        if (o) { o.z = pz || 0; o.rig.setVisible(o.z === this.z); o.label.setVisible(o.z === this.z); if (eq) o.rig.hold(eq); }
       }
       this.ready = true;
       showMsg('You are a Keeper. Follow the objective tracker (top right). Press C to craft.', 6000);
-    } else if (m.t === 'pj') { this.addOther(m.id, m.x, m.y); showMsg('A fellow Keeper has joined.'); }
-    else if (m.t === 'pl') { const o = this.others.get(m.id); o?.rig.destroy(); this.others.delete(m.id); }
+    } else if (m.t === 'pj') { this.addOther(m.id, m.x, m.y, m.name); showMsg('A fellow Keeper has joined.'); }
+    else if (m.t === 'pl') {
+      const o = this.others.get(m.id);
+      if (o) { o.label.destroy(); o.rig.destroy(); }
+      this.others.delete(m.id);
+    }
     else if (m.t === 'pos') {
       const o = this.others.get(m.id);
       if (o) {
         const nz = m.z || 0;
         const p = nz !== 0 ? this.iso(m.x, m.y) : this.isoE(m.x, m.y);
         if (nz !== 0) p.y += 16;
-        o.tx = p.x; o.ty = p.y;
-        if (nz !== o.z) { o.z = nz; o.rig.setVisible(o.z === this.z); o.rig.setPosition(p.x, p.y); }
+        o.tx = p.x; o.ty = p.y; o.wx = m.x; o.wy = m.y;
+        if (nz !== o.z) { o.z = nz; o.rig.setVisible(o.z === this.z); o.label.setVisible(o.z === this.z); o.rig.setPosition(p.x, p.y); }
       }
     }
     else if (m.t === 'anim') {
@@ -428,7 +540,11 @@ class Hearth extends Phaser.Scene {
       else o.rig.act(m.a || null);
     }
     else if (m.t === 'eq') { const o = this.others.get(m.id); o?.rig.hold(m.k); }
-    else if (m.t === 'inv') { this.inv = m.inv; this.tools = new Set(m.tools); this.gear = new Set(m.gear); }
+    else if (m.t === 'inv') {
+      this.inv = m.inv; this.tools = new Set(m.tools); this.gear = new Set(m.gear);
+      // Task 4: wornGear from inv update
+      this.wornGear = m.wornGear ?? null;
+    }
     else if (m.t === 'msg') showMsg(m.s);
     else if (m.t === 'node') {
       const s = this.nodeSpr.get(m.i);
@@ -446,7 +562,11 @@ class Hearth extends Phaser.Scene {
       this.sailing = false; this.boatKind = 0;
       this.boatSpr?.destroy(); this.boatSpr = null;
       this.audio.hurt();
-      showMsg('💥 An iceberg shattered your boat! You wash ashore. A Reinforced Boat needs Starmetal.', 6000);
+      // the hull is gone — you're in the water now, swim for it
+      if (this.z === 0 && this.tileAt(this.px, this.py) === T.WATER) this.swimming = true;
+      showMsg(m.r === 'burn'
+        ? '🔥 The scalding sea sets your wooden hull ABLAZE! You plunge into the burning water — swim!'
+        : '💥 An iceberg shattered your boat! You plunge into the freezing sea — swim for land!', 6000);
     }
     else if (m.t === 'berg') {
       this.bergSpr.get(m.i)?.destroy(); this.bergSpr.delete(m.i);
@@ -521,7 +641,16 @@ class Hearth extends Phaser.Scene {
   spawnNode(i: number) {
     const kind = NODE_KEYS[this.world.nodes.get(i)!];
     const p = this.isoE(i % SIZE, (i / SIZE) | 0);
-    const [tex] = NODE_SPR[kind];
+    let tex: string;
+    if (kind === 'tree') {
+      // deterministic variant per tile: tree / pine_tree / autumn_tree
+      const variant = (Math.imul(i, 2654435761) >>> 0) % 3;
+      tex = ['tree', 'pine_tree', 'autumn_tree'][variant];
+    } else if (kind === 'bush' && this.world.tiles[i] === T.MUD) {
+      tex = 'reed_bundle';
+    } else {
+      [tex] = NODE_SPR[kind];
+    }
     const s = this.add.sprite(p.x, p.y + 20, tex).setOrigin(0.5, 0.92).setDepth(p.y + 20).setAlpha(1).setAngle(0);
     this.nodeSpr.set(i, s);
   }
@@ -588,14 +717,64 @@ class Hearth extends Phaser.Scene {
       this.monoSpr.push(s);
     });
 
+    // TASK 2a: mountains
+    if (MOUNTAINS) {
+      for (const m of MOUNTAINS) {
+        const mp2 = this.isoE(m.x, m.y);
+        const ms = this.add.image(mp2.x, mp2.y, m.key).setOrigin(0.5, 0.9).setDepth(this.iso(m.x, m.y).y + 40);
+        this.mountainSpr.push(ms);
+      }
+    }
+
+    // TASK 2b: temple pieces
+    if (TEMPLE_PIECES) {
+      for (const tpc of TEMPLE_PIECES) {
+        const tx2 = tpc.i % SIZE, ty2 = (tpc.i / SIZE) | 0;
+        const tp = this.isoE(tx2, ty2);
+        const isDais = tpc.key === 'core_activation_dais';
+        const ts = isDais
+          ? this.add.image(tp.x, tp.y + 16, tpc.key).setOrigin(0.5, 0.7).setDepth(this.iso(tx2, ty2).y + 4)
+          : this.add.image(tp.x, tp.y + 16, tpc.key).setOrigin(0.5, 0.9).setDepth(this.iso(tx2, ty2).y + 20);
+        this.templeSpr.push(ts);
+      }
+    }
+
+    // TASK 2c: decor sprites
+    if (this.world.decor) {
+      for (const [di, dkey] of this.world.decor) {
+        const dx2 = di % SIZE, dy2 = (di / SIZE) | 0;
+        const dp = this.isoE(dx2, dy2);
+        const ds = this.add.image(dp.x, dp.y, dkey).setOrigin(0.5, 0.92).setDepth(this.iso(dx2, dy2).y + 18);
+        this.decorSpr.set(di, ds);
+      }
+    }
+
     const mp = this.isoE(this.px, this.py);
     this.me = new Rig(this, mp.x, mp.y, 0x3a6ea5);
     this.me.setDepth(mp.y);
     this.cameras.main.startFollow(this.me, true, 0.15, 0.15);
-    this.cameras.main.setBounds(0, -80, W, H + 160);
+
+    // Task 3c: extended camera bounds by PAD=24 tiles
+    const PAD = 24;
+    this.cameras.main.setBounds(
+      0 - PAD * TW,
+      -80 - PAD * TH,
+      W + PAD * 2 * TW,
+      H + 160 + PAD * 2 * TH
+    );
+
     this.ensureChunks();
     this.nightRect = this.add.rectangle(0, 0, this.scale.width, this.scale.height, 0x0a0a2e)
       .setOrigin(0).setScrollFactor(0).setDepth(999990).setAlpha(0);
+
+    // Task 5: create self label after me rig exists
+    this.meLabel = this.add.text(mp.x, mp.y - 58, this.myName, {
+      fontSize: '11px',
+      fontFamily: 'monospace',
+      color: '#cfe8f5',
+      stroke: '#0a0f14',
+      strokeThickness: 3,
+    }).setOrigin(0.5, 1).setDepth(mp.y + 1);
   }
 
   tileAt(x: number, y: number) {
@@ -611,13 +790,16 @@ class Hearth extends Phaser.Scene {
       const ax = this.shelterAnchor % SIZE, ay = (this.shelterAnchor / SIZE) | 0;
       return Math.max(Math.abs((x | 0) - ax), Math.abs((y | 0) - ay)) > this.shelterLvl;
     }
-    if (this.tileAt(x, y) === T.WATER)
-      return !(this.sailing || this.inv.boat > 0 || this.inv.sboat > 0);  // boats open the sea
+    // TASK 4b: water is never blocked at z===0 — swimming is always possible
+    if (this.tileAt(x, y) === T.WATER) return false;
     const climb = this.jumpT >= 0 ? 2 : 1;                               // jumping clears higher ledges
     // you can always drop DOWN a cliff (fall damage applies) — only climbing is limited
     if (this.elevAt(x, y) - this.elevAt(this.px, this.py) > climb) return true;
     const st = this.structSpr.get((y | 0) * SIZE + (x | 0));
-    return !!st && st.kind !== 'shelter';                                // shelters are enterable
+    if (!!st && st.kind !== 'shelter') return true;                       // shelters are enterable
+    // TASK 2d: landmark blocked tiles
+    if (LANDMARK_BLOCK && LANDMARK_BLOCK.has((y | 0) * SIZE + (x | 0))) return true;
+    return false;
   }
 
   nearMineshaft() {
@@ -736,14 +918,14 @@ class Hearth extends Phaser.Scene {
     const k = this.keys;
     let dx = (+(k.D.isDown || k.RIGHT.isDown)) - (+(k.A.isDown || k.LEFT.isDown));
     let dy = (+(k.S.isDown || k.DOWN.isDown)) - (+(k.W.isDown || k.UP.isDown));
-    this.me.moving = !!(dx || dy);
+    this.me.moving = !!(dx || dy) && !this.sailing;   // no leg-walk while seated in a boat
     if (dx || dy) {
       const len = Math.hypot(dx, dy);
       const wx = dx / len + dy / len, wy = dy / len - dx / len;
       this.me.face(dx || wx);
       this.faceX = Math.abs(wx) > Math.abs(wy) ? Math.sign(wx) : 0;
       this.faceY = this.faceX ? 0 : Math.sign(wy);
-      const speed = (this.sailing ? 6.2 : this.z === 0 && this.tileAt(this.px, this.py) === T.MUD ? 2.2 : 4.4) * dt * 0.707;
+      const speed = (this.sailing ? 6.2 : (this.swimming || (this.z === 0 && this.tileAt(this.px, this.py) === T.MUD)) ? 2.2 : 4.4) * dt * 0.707;
       const nx = this.px + wx * speed, ny = this.py + wy * speed;
       if (!this.blockedAt(nx, this.py)) this.px = Math.max(0, Math.min(SIZE - 1, nx));
       if (!this.blockedAt(this.px, ny)) this.py = Math.max(0, Math.min(SIZE - 1, ny));
@@ -760,24 +942,50 @@ class Hearth extends Phaser.Scene {
     // underground is flat — no hill offsets down there
     const p = this.z !== 0 ? this.iso(this.px, this.py) : this.isoE(this.px, this.py);
     if (this.z !== 0) p.y += 16;   // stand on the flat interior/cave floor
+    else if (this.swimming) p.y += 12;  // swimming: sink to head level
     this.me.setPosition(p.x, p.y - hop).setDepth(p.y);
     this.ensureChunks();
 
-    // boarding / disembarking boats at the water's edge
+    // Task 5: update self label position
+    if (this.meLabel) {
+      this.meLabel.setPosition(this.me.x, this.me.y - 58).setDepth(this.me.depth + 1);
+    }
+
+    // TASK 4c: boarding / disembarking boats or swimming at the water's edge
     if (this.z === 0) {
       const onWater = this.tileAt(this.px, this.py) === T.WATER;
-      if (onWater && !this.sailing) {
-        this.sailing = true;
-        this.boatKind = this.inv.sboat > 0 ? 2 : 1;
-        this.boatSpr = this.add.image(p.x, p.y + 4, 'boat').setOrigin(0.5, 0.6);
-        if (this.boatKind === 2) this.boatSpr.setTint(0x9ad4e8);
-        showMsg(this.boatKind === 2 ? '⛵ Sailing — your reinforced hull fears no ice.' : '⛵ You set sail. Beware icebergs near the Frozen Spire!');
-      } else if (!onWater && this.sailing) {
-        this.sailing = false; this.boatKind = 0;
+      if (onWater && !this.sailing && !this.swimming) {
+        if (this.selectedVehicle && this.inv[this.selectedVehicle] > 0) {
+          // sail with selected vehicle
+          this.sailing = true;
+          this.boatKind = this.selectedVehicle === 'sboat' ? 2 : 1;
+          this.boatSpr = this.add.image(p.x, p.y + 4, 'boat').setOrigin(0.5, 0.6);
+          if (this.boatKind === 2) this.boatSpr.setTint(0x9ad4e8);
+          showMsg(this.boatKind === 2 ? '⛵ Sailing — your reinforced hull fears no ice.' : '⛵ You set sail. Beware icebergs near the Frozen Spire!');
+        } else {
+          // TASK 4c: swimming
+          this.swimming = true;
+          this.warnedWaterTemp = false;
+          // TASK 4e: warn once about thermal water
+          const wi = (this.py | 0) * SIZE + (this.px | 0);
+          const wt = this.world.waterTemp?.[wi] ?? 0;
+          if (wt === 1) {
+            showMsg('❄ The water is freezing — a Fur Cloak slows the damage. Boats are safe.', 6000);
+            this.warnedWaterTemp = true;
+          } else if (wt === 2) {
+            showMsg('🔥 Scalding water! The heat is lethal — a Heat Cloak helps, but a boat keeps you safe.', 6000);
+            this.warnedWaterTemp = true;
+          } else {
+            showMsg('🌊 Swimming — very slow. Craft a boat for safer, faster crossings.', 4000);
+          }
+        }
+      } else if (!onWater && (this.sailing || this.swimming)) {
+        this.sailing = false; this.swimming = false; this.boatKind = 0;
         this.boatSpr?.destroy(); this.boatSpr = null;
       }
       if (this.sailing && this.boatSpr) this.boatSpr.setPosition(p.x, p.y + 4).setDepth(p.y - 1);
     }
+    this.me.setSwim(this.z === 0 && this.swimming);
 
     // see-through structures: fade anything standing in front of the player
     if (this.z === 0) {
@@ -792,12 +1000,15 @@ class Hearth extends Phaser.Scene {
     for (const o of this.others.values()) {
       const d = Math.hypot(o.tx - o.rig.x, o.ty - o.rig.y);
       o.rig.moving = d > 2;
+      o.rig.setSwim(o.z === 0 && this.tileAt(o.wx, o.wy) === T.WATER);
       if (d > 0.5) {
         o.rig.face(o.tx - o.rig.x);
         o.rig.x += (o.tx - o.rig.x) * 0.18; o.rig.y += (o.ty - o.rig.y) * 0.18;
         o.rig.setDepth(o.rig.y);
       }
       o.rig.tick(dt);
+      // Task 5: update other player labels
+      o.label.setPosition(o.rig.x, o.rig.y - 58).setDepth(o.rig.depth + 1);
     }
     // creatures & animals: lerp
     for (const s of [...this.creSpr.values(), ...this.aniSpr.values()]) {
@@ -821,6 +1032,7 @@ class Hearth extends Phaser.Scene {
 
     if (t - this.lastSend > 100) {
       this.lastSend = t;
+      // TASK 4d: swimmers send b=0; only sailing sends boatKind
       this.send({ t: 'pos', x: +this.px.toFixed(2), y: +this.py.toFixed(2), z: this.z, b: this.sailing ? this.boatKind : 0 });
     }
 
@@ -845,8 +1057,10 @@ class Hearth extends Phaser.Scene {
       }
     } else this.darkRT.setVisible(false);
 
-    const night = this.wtime > 0.65 || this.wtime < 0.1;
-    const target = night ? 0.55 : this.wtime > 0.55 ? (this.wtime - 0.55) * 5.5 : 0;
+    // Task 2: use isNightTime and NIGHT_START for dusk formula
+    const night = isNightTime(this.wtime);
+    const duskThresh = NIGHT_START - 0.1;
+    const target = night ? 0.55 : this.wtime > duskThresh ? (this.wtime - duskThresh) * 5.5 : 0;
     this.nightRect.setAlpha(Phaser.Math.Linear(this.nightRect.alpha, Math.min(target, 0.55), 0.02));
     this.nightRect.setSize(this.scale.width, this.scale.height);
 
@@ -884,9 +1098,37 @@ class Hearth extends Phaser.Scene {
       else this.growlTimer = 1.5;
     }
 
+    // Task 6: ambient bird system
+    if (this.z === 0) {
+      this.birdTimer -= dt;
+      if (this.birdTimer <= 0 && this.birds.length < 5) {
+        this.birdTimer = 2.5;
+        this.spawnBird();
+      }
+      const cam2 = this.cameras.main.worldView;
+      for (let bi = this.birds.length - 1; bi >= 0; bi--) {
+        const bird = this.birds[bi];
+        bird.bobPhase += dt * 2.5;
+        bird.spr.x += bird.vx * dt;
+        bird.spr.y = bird.baseY + Math.sin(bird.bobPhase) * 6;
+        bird.baseY += bird.vy * dt;
+        // cull when beyond opposite edge
+        const beyond = bird.vx > 0 ? bird.spr.x > cam2.right + 200 : bird.spr.x < cam2.x - 200;
+        if (beyond) {
+          bird.spr.destroy();
+          this.birds.splice(bi, 1);
+        }
+      }
+    } else {
+      // hide birds when underground / in shelter
+      for (const bird of this.birds) bird.spr.setVisible(false);
+    }
+
     this.updateUI({
       hp: this.hp, hunger: this.hunger, thirst: this.thirst,
       inv: this.inv, tools: this.tools, gear: this.gear, equipped: this.equipped,
+      wornGear: this.wornGear,
+      selectedVehicle: this.selectedVehicle,
       mono: this.mono, day: this.day, time: this.wtime, won: this.won,
       nearWorkbench: this.nearKind('workbench'), nearForge: this.nearKind('forge'), nearCampfire: this.nearKind('campfire'),
       structCount: (kind) => { let n = 0; for (const s of this.structSpr.values()) if (s.kind === kind) n++; return n; },
@@ -905,7 +1147,7 @@ new Phaser.Game({
   type: Phaser.AUTO,
   width: window.innerWidth,
   height: window.innerHeight,
-  backgroundColor: '#0d1520',
+  backgroundColor: '#3a7bd5',
   scene: Hearth,
   scale: { mode: Phaser.Scale.RESIZE }
 });
