@@ -14,6 +14,7 @@ export interface UIState {
   hp: number; hunger: number; thirst: number;
   inv: any; tools: Set<string>; gear: Set<string>; equipped: string | null;
   wornGear: string | null;
+  inWater: boolean;
   selectedVehicle: 'boat' | 'sboat' | null;
   mono: boolean[]; day: number; time: number; won: boolean;
   nearWorkbench: boolean; nearForge: boolean; nearCampfire: boolean;
@@ -125,7 +126,7 @@ export function initUI(
 
     // inventory (modal) + quickbar — rebuild only when contents change
     // Task 4: add wornGear + selectedVehicle to signature
-    const sig = JSON.stringify([st.inv, [...st.tools], [...st.gear], selected, st.equipped, st.wornGear, st.selectedVehicle]);
+    const sig = JSON.stringify([st.inv, [...st.tools], [...st.gear], selected, st.equipped, st.wornGear, st.selectedVehicle, st.inWater]);
     if (sig !== invSig) {
       invSig = sig;
       let html = RESOURCES.map((r) => `<span class="slot">${icon(r)} ${st.inv[r] || 0}</span>`).join('');
@@ -135,7 +136,9 @@ export function initUI(
         if (!st.inv[k]) continue;
         if (k === 'boat' || k === 'sboat') {
           const sel = st.selectedVehicle === k;
-          html += `<span class="slot tool ${sel ? 'sel' : ''}" data-veh="${k}" style="cursor:pointer">${icon(k)} ${NAMES[k]} ×${st.inv[k]}${sel ? ' ⛵ selected' : ' (select)'}</span>`;
+          html += st.inWater
+            ? `<span class="slot" style="opacity:0.45">${icon(k)} ${NAMES[k]} ×${st.inv[k]} (reach land)</span>`
+            : `<span class="slot tool ${sel ? 'sel' : ''}" data-veh="${k}" style="cursor:pointer">${icon(k)} ${NAMES[k]} ×${st.inv[k]}${sel ? ' ⛵ selected' : ' (select)'}</span>`;
         } else {
           html += `<span class="slot">${icon(k)} ${NAMES[k]} ×${st.inv[k]}${k === 'torch' ? ' [T]' : ''}</span>`;
         }

@@ -71,7 +71,7 @@ class Hearth extends Phaser.Scene {
   inv: any = emptyInv(); tools = new Set<string>(); gear = new Set<string>(); equipped: string | null = null;
   wornGear: string | null = null;
   mono = [false, false, false, false]; day = 1; wtime = 0.3; won = false; waveEnd = 0;
-  others = new Map<string, { rig: Rig; tx: number; ty: number; wx: number; wy: number; z: number; label: Phaser.GameObjects.Text }>();
+  others = new Map<string, { rig: Rig; tx: number; ty: number; wx: number; wy: number; z: number; b: number; boat: Phaser.GameObjects.Image | null; label: Phaser.GameObjects.Text }>();
   monoSpr: Phaser.GameObjects.Sprite[] = [];
   creSpr = new Map<string, Phaser.GameObjects.Sprite>();
   aniSpr = new Map<string, Phaser.GameObjects.Sprite>();
@@ -181,7 +181,11 @@ class Hearth extends Phaser.Scene {
       (k) => this.setEquip(k),
       (k) => this.setWear(k),
       (k) => {
-        // TASK 4a: toggle selected vehicle
+        // TASK 4a: toggle selected vehicle — but never from the water: boats launch from shore
+        if (this.swimming || this.sailing) {
+          showMsg('You cannot ready a boat in the water — reach land first!', 2500);
+          return;
+        }
         this.selectedVehicle = this.selectedVehicle === k ? null : k;
         showMsg(this.selectedVehicle ? `⛵ ${NAMES[k]} selected — walk into the sea to sail.` : 'Vehicle deselected. You will swim.', 2000);
       }
@@ -447,7 +451,7 @@ class Hearth extends Phaser.Scene {
     for (const s of this.torchSpr.values()) s.setVisible(z === 1);
     for (const s of this.furnSpr.values()) s.setVisible(z === 2);
     for (const s of this.bergSpr.values()) s.setAlpha(surfA);
-    for (const o of this.others.values()) { o.rig.setVisible(o.z === z); o.label.setVisible(o.z === z); }
+    for (const o of this.others.values()) { o.rig.setVisible(o.z === z); o.label.setVisible(o.z === z); o.boat?.setVisible(o.z === z); }
     // hide birds underground
     for (const b of this.birds) b.spr.setVisible(z === 0);
     this.send({ t: 'pos', x: +this.px.toFixed(2), y: +this.py.toFixed(2), z });
@@ -485,7 +489,9 @@ class Hearth extends Phaser.Scene {
   addOther(pid: string, x: number, y: number, name?: string) {
     if (this.others.has(pid) || pid === this.id) return;
     const p = this.isoE(x, y);
-    const rig = new Rig(this, p.x, p.y, colorFor(pid));
+    // color derives from the server-broadcast NAME (same string every client sees),
+    // so a player's color matches on every screen — including their own.
+    const rig = new Rig(this, p.x, p.y, colorFor(name || pid));
     rig.setDepth(p.y);
     const labelText = name || 'Keeper';
     const label = this.add.text(p.x, p.y - 58, labelText, {
@@ -495,12 +501,27 @@ class Hearth extends Phaser.Scene {
       stroke: '#0a0f14',
       strokeThickness: 3,
     }).setOrigin(0.5, 1).setDepth(p.y + 1);
-    this.others.set(pid, { rig, tx: p.x, ty: p.y, wx: x, wy: y, z: 0, label });
+    this.others.set(pid, { rig, tx: p.x, ty: p.y, wx: x, wy: y, z: 0, b: 0, boat: null, label });
+  }
+
+  // server-driven boat state for a remote player (b: 0 none, 1 wooden, 2 reinforced)
+  setOtherBoat(o: { b: number; boat: Phaser.GameObjects.Image | null; rig: Rig }, b: number) {
+    if (o.b === b) return;
+    o.b = b;
+    if (b > 0 && !o.boat) {
+      o.boat = this.add.image(o.rig.x, o.rig.y + 4, 'boat').setOrigin(0.5, 0.6).setVisible(o.rig.visible);
+      if (b === 2) o.boat.setTint(0x9ad4e8);
+    } else if (b > 0 && o.boat) {
+      b === 2 ? o.boat.setTint(0x9ad4e8) : o.boat.clearTint();
+    } else if (b === 0 && o.boat) {
+      o.boat.destroy(); o.boat = null;
+    }
   }
 
   onMsg(m: any) {
     if (m.t === 'init') {
       this.id = m.id; this.px = m.x; this.py = m.y; this.wtime = m.time; this.day = m.day;
+      if (m.name) this.myName = m.name;   // server-sanitized name: the authoritative color/name source
       this.mono = m.mono; this.won = m.won; this.inv = m.inv;
       this.weather = m.weather;
       // Task 4: wornGear from init
@@ -510,17 +531,17 @@ class Hearth extends Phaser.Scene {
       for (const i of m.digs || []) this.addDug(i);
       for (const i of m.torches || []) this.addTorch(i);
       for (const [i, kind] of m.furn || []) this.addFurn(i, kind);
-      for (const [pid, x, y, eq, pz, pname] of m.players) {
+      for (const [pid, x, y, eq, pz, pname, pb] of m.players) {
         this.addOther(pid, x, y, pname);
         const o = this.others.get(pid);
-        if (o) { o.z = pz || 0; o.rig.setVisible(o.z === this.z); o.label.setVisible(o.z === this.z); if (eq) o.rig.hold(eq); }
+        if (o) { o.z = pz || 0; o.rig.setVisible(o.z === this.z); o.label.setVisible(o.z === this.z); if (eq) o.rig.hold(eq); this.setOtherBoat(o, pb | 0); }
       }
       this.ready = true;
       showMsg('You are a Keeper. Follow the objective tracker (top right). Press C to craft.', 6000);
     } else if (m.t === 'pj') { this.addOther(m.id, m.x, m.y, m.name); showMsg('A fellow Keeper has joined.'); }
     else if (m.t === 'pl') {
       const o = this.others.get(m.id);
-      if (o) { o.label.destroy(); o.rig.destroy(); }
+      if (o) { o.label.destroy(); o.boat?.destroy(); o.rig.destroy(); }
       this.others.delete(m.id);
     }
     else if (m.t === 'pos') {
@@ -530,7 +551,8 @@ class Hearth extends Phaser.Scene {
         const p = nz !== 0 ? this.iso(m.x, m.y) : this.isoE(m.x, m.y);
         if (nz !== 0) p.y += 16;
         o.tx = p.x; o.ty = p.y; o.wx = m.x; o.wy = m.y;
-        if (nz !== o.z) { o.z = nz; o.rig.setVisible(o.z === this.z); o.label.setVisible(o.z === this.z); o.rig.setPosition(p.x, p.y); }
+        this.setOtherBoat(o, m.b | 0);
+        if (nz !== o.z) { o.z = nz; o.rig.setVisible(o.z === this.z); o.label.setVisible(o.z === this.z); o.boat?.setVisible(o.z === this.z); o.rig.setPosition(p.x, p.y); }
       }
     }
     else if (m.t === 'anim') {
@@ -750,7 +772,7 @@ class Hearth extends Phaser.Scene {
     }
 
     const mp = this.isoE(this.px, this.py);
-    this.me = new Rig(this, mp.x, mp.y, 0x3a6ea5);
+    this.me = new Rig(this, mp.x, mp.y, colorFor(this.myName));   // same hash others use for us
     this.me.setDepth(mp.y);
     this.cameras.main.startFollow(this.me, true, 0.15, 0.15);
 
@@ -999,8 +1021,10 @@ class Hearth extends Phaser.Scene {
     // remote players: lerp + walk anim
     for (const o of this.others.values()) {
       const d = Math.hypot(o.tx - o.rig.x, o.ty - o.rig.y);
-      o.rig.moving = d > 2;
-      o.rig.setSwim(o.z === 0 && this.tileAt(o.wx, o.wy) === T.WATER);
+      o.rig.moving = d > 2 && o.b === 0;   // seated in a boat: no walk cycle
+      // swim only when the server says they're not boating and they're on water
+      o.rig.setSwim(o.z === 0 && o.b === 0 && this.tileAt(o.wx, o.wy) === T.WATER);
+      if (o.boat) o.boat.setPosition(o.rig.x, o.rig.y + 4).setDepth(o.rig.depth - 1);
       if (d > 0.5) {
         o.rig.face(o.tx - o.rig.x);
         o.rig.x += (o.tx - o.rig.x) * 0.18; o.rig.y += (o.ty - o.rig.y) * 0.18;
@@ -1129,6 +1153,7 @@ class Hearth extends Phaser.Scene {
       inv: this.inv, tools: this.tools, gear: this.gear, equipped: this.equipped,
       wornGear: this.wornGear,
       selectedVehicle: this.selectedVehicle,
+      inWater: this.swimming || this.sailing,
       mono: this.mono, day: this.day, time: this.wtime, won: this.won,
       nearWorkbench: this.nearKind('workbench'), nearForge: this.nearKind('forge'), nearCampfire: this.nearKind('campfire'),
       structCount: (kind) => { let n = 0; for (const s of this.structSpr.values()) if (s.kind === kind) n++; return n; },

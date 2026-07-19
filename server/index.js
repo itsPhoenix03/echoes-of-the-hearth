@@ -146,7 +146,7 @@ wss.on('connection', (ws) => {
         removed: [...removed.keys()], mud: [...mudTiles],
         structures: [...structures].map(([i, s]) => [i, s.kind, s.hp, s.dir || 0, s.lvl || 1]),
         inv: p.inv, tools: [...p.tools], gear: [...p.gear], wornGear: p.wornGear || null,
-        players: [...players].filter(([pid]) => pid !== id).map(([pid, q]) => [pid, q.x, q.y, q.equip, q.z, q.name])
+        players: [...players].filter(([pid]) => pid !== id).map(([pid, q]) => [pid, q.x, q.y, q.equip, q.z, q.name, q.b | 0])
       });
       bcast({ t: 'pj', id, x: p.x, y: p.y, name: p.name });
       console.log(`[hearth] ${id} (${p.name}) joined${prof ? ' (profile restored)' : ''} (${players.size} online)`);
@@ -186,7 +186,7 @@ wss.on('connection', (ws) => {
       p.b = m.b | 0;
       // track last land position for boat-wreck recovery
       if (world.tiles[ti(p.x, p.y)] !== T.WATER) { p.lastLandX = p.x; p.lastLandY = p.y; }
-      bcast({ t: 'pos', id, x: m.x, y: m.y, z: p.z });
+      bcast({ t: 'pos', id, x: m.x, y: m.y, z: p.z, b: p.b });
       // sailing hazards: icebergs and scalding water. Losing the boat leaves the
       // player swimming in place — no teleport.
       const b = p.b;
@@ -648,9 +648,10 @@ setInterval(() => {
           q.thermN = (q.thermN || 0) + 1;
           const protected_ = (wt === 1 && q.wornGear === 'furcloak') || (wt === 2 && q.wornGear === 'heatcloak');
           if (!protected_ || (protected_ && q.thermN % 2 === 0)) {
-            q.hp = Math.max(1, q.hp - 1);
+            q.hp -= 1;
             const msg = wt === 1 ? 'The freezing water saps your life!' : 'The scalding water burns!';
             send(q.ws, { t: 'msg', s: msg });
+            if (q.hp <= 0) { q.hp = 10; q.z = 0; q.hunger = 10; q.thirst = 10; q.thermN = 0; [q.x, q.y] = respawnPoint(pid); }
             send(q.ws, { t: 'hp', hp: q.hp, x: q.x, y: q.y });
           }
         } else { q.thermN = 0; }

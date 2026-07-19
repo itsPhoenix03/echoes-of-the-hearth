@@ -82,6 +82,7 @@ _manifest.push(
   ['fur_cloak',        '/sprites/fur_cloak.svg',         38, 46],
   ['glow_mushroom',    '/sprites/glow_mushroom.svg',     44, 42],
   ['heat_cloak',       '/sprites/heat_cloak.svg',        38, 46],
+  ['ice_crystal_cluster', '/sprites/ice_crystal_cluster.svg', 50, 52],
   ['keeper_hat',       '/sprites/keeper_hat.svg',        42, 28],
   ['lava_vent',        '/sprites/lava_vent.svg',         52, 42],
   ['mangrove_tree',    '/sprites/mangrove_tree.svg',     64, 66],

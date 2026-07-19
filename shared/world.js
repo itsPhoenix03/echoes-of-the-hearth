@@ -3,7 +3,7 @@ import { createNoise2D } from 'simplex-noise';
 import alea from 'alea';
 import { NODE } from './defs.js';
 
-export const WORLD_VERSION = 3;
+export const WORLD_VERSION = 4;   // v4: core mountain moved onto the Core island
 export const SIZE = 1280;
 export const T = { GRASS: 0, SAND: 1, SNOW: 2, MUD: 3, WATER: 4, BLIGHT: 5 };
 export const TILE_KEYS = ['grass', 'sand', 'snow', 'mud', 'water', 'blight'];
@@ -35,7 +35,7 @@ export const MOUNTAINS = [
   { x: 1130, y: 150, key: 'mountain_dunes' },
   { x: 150, y: 1130, key: 'mountain_spire' },
   { x: 1130, y: 1130, key: 'mountain_marsh' },
-  { x: 610, y: 615, key: 'mountain_core_obsidian' },
+  { x: 640, y: 630, key: 'mountain_core_obsidian' },   // on the Core island (R~14), backdrop north of the temple
 ];
 
 export const TEMPLE_PIECES = [
@@ -218,6 +218,23 @@ export function genWorld(seed) {
   for (const [ni] of nodes) {
     const nx = ni % SIZE, ny = (ni / SIZE) | 0;
     if (Math.hypot(nx - CORE[0], ny - CORE[1]) < 7) nodes.delete(ni);
+  }
+
+  // Stamp solid ground under landmark footprints — coast/lake noise must never
+  // strand a mountain in water (seed-independent guarantee).
+  for (const m of MOUNTAINS) {
+    const isCore = Math.hypot(m.x - CORE[0], m.y - CORE[1]) < 20;
+    let k = 0, bd = Infinity;
+    for (let q = 0; q < 4; q++) {
+      const d = Math.hypot(m.x - ISLES[q][0], m.y - ISLES[q][1]);
+      if (d < bd) { bd = d; k = q; }
+    }
+    const ground = isCore ? T.BLIGHT : ISLE_T[k];
+    for (let dy = -1; dy <= 1; dy++)
+      for (let dx = -1; dx <= 1; dx++) {
+        const i = (m.y + dy) * SIZE + (m.x + dx);
+        if (tiles[i] === T.WATER) { tiles[i] = ground; elev[i] = 1; nodes.delete(i); }
+      }
   }
 
   return { tiles, elev, veins, nodes, bergs, waterTemp, tileVis, decor };
