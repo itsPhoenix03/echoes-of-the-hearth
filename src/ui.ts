@@ -193,14 +193,15 @@ export function initUI(
                         'banner', 'stone_path', 'lantern', 'reed_vase', 'rug', 'trophy_antler', 'fence', 'farmplot']) {
         if (!st.inv[k]) continue;
         const r = (RECIPES as any)[k];
-        let disabled = false, hint = '';
-        if (r?.zone === 'in' && st.zone === 'out') { disabled = true; hint = ' (indoors only)'; }
-        if (r?.zone === 'out' && st.zone === 'in') { disabled = true; hint = ' (outdoors only)'; }
-        if (disabled) {
-          html += `<span class="slot" style="opacity:0.45">${icon(k)} ${NAMES[k] || k} ×${st.inv[k]}${hint}</span>`;
-        } else {
-          html += `<span class="slot place ${selected === k ? 'sel' : ''}" data-k="${k}">${icon(k)} ${NAMES[k] || k} ×${st.inv[k]}${r?.place ? ' 🔨' : ''}</span>`;
+        // hide (not grey) placeables that cannot go in the current zone:
+        // interiors (shelter/mine) accept only chest/bed and indoor-eligible decor;
+        // the surface hides indoor-only decor.
+        if (r?.place) {
+          const interiorOk = k === 'chest' || k === 'bed' || (r.decor && (r.zone === 'in' || r.zone === 'both'));
+          if (st.zone === 'in' && !interiorOk) continue;
+          if (st.zone === 'out' && r.zone === 'in') continue;
         }
+        html += `<span class="slot place ${selected === k ? 'sel' : ''}" data-k="${k}">${icon(k)} ${NAMES[k] || k} ×${st.inv[k]}${r?.place ? ' 🔨' : ''}</span>`;
       }
       html += HOTBAR.filter((t) => st.tools.has(t)).map((t) =>
         `<span class="slot tool ${st.equipped === t ? 'eq' : ''}" data-eq="${t}">[${HOTBAR.indexOf(t) + 1}] ${icon(t)} ${NAMES[t]}${st.equipped === t ? ' ✓' : ''}</span>`).join('');

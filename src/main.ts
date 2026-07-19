@@ -893,9 +893,11 @@ class Hearth extends Phaser.Scene {
     const { x, y } = this.unIso(wp.x, wp.y);
     if (x < 0 || y < 0 || x >= SIZE || y >= SIZE) return;
     // FEATURE 2: furniture can also be placed in mines (z===1)
-    if (this.z === 2 || (this.z === 1 && FURNITURE.has(this.placing)))
-      this.send({ t: "furn", i: y * SIZE + x, kind: this.placing });
-    else
+    if (this.z !== 0) {
+      // interiors accept ONLY furniture — never fall through to a surface build
+      if (FURNITURE.has(this.placing)) this.send({ t: "furn", i: y * SIZE + x, kind: this.placing });
+      else { showMsg("That can only be placed outside."); this.setPlacing(null); }
+    } else
       this.send({
         t: "build",
         i: y * SIZE + x,
@@ -2233,7 +2235,7 @@ class Hearth extends Phaser.Scene {
       waveSecs: this.waveEnd
         ? Math.max(0, Math.ceil((this.waveEnd - Date.now()) / 1000))
         : 0,
-      zone: this.z === 2 ? "in" : "out",
+      zone: this.z === 0 ? "out" : "in",   // mines count as interior too
     });
   }
 

@@ -47,8 +47,10 @@ export class Rig extends Phaser.GameObjects.Container {
   tool: Phaser.GameObjects.Image;
   phase = 0; moving = false; acting = 0; holdKind: string | null = null; swim = false;
 
+  shirt: number;
   constructor(scene: Phaser.Scene, x: number, y: number, shirtColor: number) {
     super(scene, x, y);
+    this.shirt = shirtColor;
     const mk = (key: string, px: number, py: number, oy = 0) =>
       scene.add.image(px, py, key).setOrigin(0.5, oy);
     this.legL = mk('p-leg', -3, -11);
@@ -113,7 +115,8 @@ export class Rig extends Phaser.GameObjects.Container {
     const dir = Math.cos(ang) < 0 ? 1 : -1;
     const parts = [this.torso, this.head, this.armL, this.armR, this.legL, this.legR];
     parts.forEach((p) => p.setTintFill(0xff6666));
-    setTimeout(() => parts.forEach((p) => p.clearTint()), 80);
+    // clearTint would wipe the torso's shirt-color tint (body texture is white) — restore it
+    setTimeout(() => { parts.forEach((p) => p.clearTint()); this.torso.setTint(this.shirt); }, 80);
     const origTR = this.torso.rotation, origHR = this.head.rotation;
     this.scene.tweens.addCounter({
       from: 0, to: 1, duration: 200, ease: 'Sine.out',
