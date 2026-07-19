@@ -566,7 +566,7 @@ wss.on('connection', (ws) => {
           if (best.type === 'wisp' || best.type === 'frost_wraith') {
             const di = ti(best.x, best.y);
             if (world.tiles[di] !== T.WATER && !infected.has(di)) {
-              infected.set(di, nowMs + 120000);
+              infected.set(di, now + 120000);
               bcast({ t: 'infect', tiles: [di] });
             }
           }
@@ -578,7 +578,7 @@ wss.on('connection', (ws) => {
             for (const [ddx, ddy] of toCorrupt) {
               const ci = ti(bsx + ddx, bsy + ddy);
               if (ci >= 0 && ci < SIZE * SIZE && world.tiles[ci] !== T.WATER && !infected.has(ci)) {
-                infected.set(ci, nowMs + 120000); corrupted.push(ci);
+                infected.set(ci, now + 120000); corrupted.push(ci);
               }
             }
             if (corrupted.length) bcast({ t: 'infect', tiles: corrupted });
@@ -616,7 +616,7 @@ wss.on('connection', (ws) => {
           best.fleeAng = atkAng + Math.PI;  // flee away from attacker
           const fi = ti(best.x, best.y);
           if (world.tiles[fi] !== T.WATER && !infected.has(fi)) {
-            infected.set(fi, nowMs + 120000);
+            infected.set(fi, now + 120000);
             bcast({ t: 'infect', tiles: [fi] });
           }
         }
