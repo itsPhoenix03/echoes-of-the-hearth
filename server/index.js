@@ -2,7 +2,7 @@
 import { WebSocketServer } from 'ws';
 import { readFileSync, writeFileSync, existsSync } from 'fs';
 import { genWorld, findSpawn, nearestLand, SIZE, T, MONOLITHS, CORE, DIGGABLE, WORLD_VERSION, ACTIVATION_I, ISLES } from '../shared/world.js';
-import { NODE_DEF, RECIPES, STRUCT_HP, WOODEN, NAMES, canAfford, pay, emptyInv } from '../shared/defs.js';
+import { NODE_DEF, RECIPES, STRUCT_HP, WOODEN, NAMES, canAfford, pay, emptyInv, DECOR_NONBLOCKING, CROPS } from '../shared/defs.js';
 import { TICK_MS, DAY_LENGTH_SEC, isNightTime } from '../shared/time.js';
 
 const PORT = 8081;
@@ -17,6 +17,8 @@ const removed = new Map();           // i -> respawn timestamp
 const mudTiles = new Set();
 const sectorChops = {};
 const structures = new Map();        // i -> {kind, hp, owner}
+const farms = new Map();             // i -> {crop, plantedTick, owner}
+const chestInv = new Map();          // i -> {res:count}
 const mono = [false, false, false, false];
 const players = new Map();           // id -> player
 const creatures = new Map();         // id -> {x,y,hp}
@@ -29,7 +31,15 @@ const ANIMAL_TYPES = {
   toad:   [T.MUD,   ISLES[3][0] - 35, ISLES[3][1] - 35, 2, 1, 2.5, 0.25]
 };
 // monster type -> [hp base, hp/strength, speed, contact dmg]
-const CRE_TYPES = { crawler: [1, 1, 0.44, 1], stalker: [2, 1, 0.68, 1], brute: [6, 3, 0.3, 2], wisp: [3, 0, 0.2, 0] };
+const CRE_TYPES = {
+  crawler:      [1, 1, 0.44,  1],
+  stalker:      [2, 1, 0.68,  1],
+  brute:        [6, 3, 0.3,   2],
+  wisp:         [3, 0, 0.2,   0],
+  husk_wolf:    [3, 1, 0.62,  1],
+  bog_shambler: [8, 2, 0.22,  2],
+  frost_wraith: [2, 1, 0.5,   1],
+};
 let weather = { kind: null, until: 0 };
 const infected = new Map();          // tile -> cure timestamp (wisp-spread corruption)
 const digs = new Set();              // underground tiles carved out by players
@@ -52,11 +62,16 @@ function loadSave() {
     for (const [i, rem] of s.removed) removed.set(i, Date.now() + rem);
     s.mud.forEach((i) => mudTiles.add(i));
     Object.assign(sectorChops, s.sectorChops || {});
-    for (const [i, st] of s.structures) structures.set(i, st);
+    for (const [i, st] of s.structures) {
+      if (!RECIPES[st.kind] && !STRUCT_HP[st.kind]) continue;  // unknown kind guard
+      structures.set(i, st);
+    }
     s.digs.forEach((i) => digs.add(i));
     s.torches.forEach((i) => torches.add(i));
     for (const [i, f] of s.furn || []) furn.set(i, f);
     (s.brokenBergs || []).forEach((i) => brokenBergs.add(i));
+    for (const [i, fm] of s.farms || []) farms.set(i, fm);
+    for (const [i, ci] of s.chestInv || []) chestInv.set(i, ci);
     Object.assign(profiles, s.profiles || {});
     console.log(`[hearth] save loaded: day ${day}, ${structures.size} structures, ${Object.keys(profiles).length} profiles`);
   } catch (e) { console.log('[hearth] failed to load save:', e.message); }
@@ -69,7 +84,8 @@ function saveGame() {
     removed: [...removed].map(([i, at]) => [i, Math.max(0, at - Date.now())]),
     mud: [...mudTiles], sectorChops,
     structures: [...structures], digs: [...digs], torches: [...torches],
-    furn: [...furn], brokenBergs: [...brokenBergs], profiles
+    furn: [...furn], brokenBergs: [...brokenBergs],
+    farms: [...farms], chestInv: [...chestInv], profiles
   };
   try { writeFileSync(SAVE_PATH, JSON.stringify(s)); } catch (e) { console.log('[hearth] save failed:', e.message); }
 }
@@ -84,10 +100,15 @@ console.log(`[hearth] server on ws://0.0.0.0:${PORT} seed=${SEED}`);
 const send = (ws, m) => ws.readyState === 1 && ws.send(JSON.stringify(m));
 const bcast = (m) => { const s = JSON.stringify(m); for (const p of players.values()) if (p.ws.readyState === 1) p.ws.send(s); };
 const isNight = () => isNightTime(time);
+const GROW_DIV = process.env.DEV ? 30 : 1;
 const blocked = (x, y) => {
   if (x < 0 || y < 0 || x >= SIZE || y >= SIZE) return true;
   if (world.tiles[ti(x, y)] === T.WATER) return true;
-  return structures.has(ti(x, y));
+  const s = structures.get(ti(x, y));
+  if (!s) return false;
+  // non-blocking decor and farmplots do not obstruct movement
+  if (DECOR_NONBLOCKING.has(s.kind) || s.kind === 'farmplot') return false;
+  return true;
 };
 const nearAnyStruct = (p, r) => {
   for (const [i] of structures)
@@ -142,9 +163,16 @@ wss.on('connection', (ws) => {
         name: p.name,
         weather: weather.kind, infected: [...infected.keys()], digs: [...digs],
         torches: [...torches], brokenBergs: [...brokenBergs],
-        furn: [...furn].map(([i, f]) => [i, f.kind]),
+        furn: [...furn].map(([i, f]) => [i, f.kind, f.z ?? 2]),
         removed: [...removed.keys()], mud: [...mudTiles],
         structures: [...structures].map(([i, s]) => [i, s.kind, s.hp, s.dir || 0, s.lvl || 1]),
+        farms: [...farms].map(([i, fm]) => {
+          const crop = CROPS[fm.crop];
+          if (!crop) return null;
+          const growTicks = (crop.growTicks / GROW_DIV) | 0;
+          const stage = Math.min(2, Math.floor(3 * (tickN - fm.plantedTick) / growTicks));
+          return [i, fm.crop, Math.max(0, stage)];
+        }).filter(Boolean),
         inv: p.inv, tools: [...p.tools], gear: [...p.gear], wornGear: p.wornGear || null,
         players: [...players].filter(([pid]) => pid !== id).map(([pid, q]) => [pid, q.x, q.y, q.equip, q.z, q.name, q.b | 0])
       });
@@ -218,15 +246,30 @@ wss.on('connection', (ws) => {
 
     else if (m.t === 'furn') {
       const kind = m.kind, i = m.i;
-      if (p.z !== 2 || !['chest', 'bed', 'torch'].includes(kind) || !p.inv[kind] || furn.has(i)) return;
+      const r = RECIPES[kind];
+      // allowed: explicit furniture set OR decor with zone 'in' or 'both'
+      const isFurni = ['chest', 'bed', 'torch'].includes(kind) || (r && r.decor && (r.zone === 'in' || r.zone === 'both'));
+      if (!isFurni || !p.inv[kind] || furn.has(i)) return;
+      if (r && r.zone === 'out') return;  // extra safety: zone:out decor never inside
       const x = i % SIZE, y = (i / SIZE) | 0;
-      let room = false;   // tile must be inside a shelter's interior (Chebyshev ≤ its level)
-      for (const [si, s] of structures)
-        if (s.kind === 'shelter' && Math.max(Math.abs((si % SIZE) - x), Math.abs(((si / SIZE) | 0) - y)) <= (s.lvl || 1)) { room = true; break; }
-      if (!room || Math.hypot(x - p.x, y - p.y) > 5) return;
+      if (p.z === 2) {
+        // SHELTER interior: Chebyshev <= lvl + 2 (FIX 1 + FEATURE 1 room expansion)
+        let room = false;
+        for (const [si, s] of structures)
+          if (s.kind === 'shelter' && Math.max(Math.abs((si % SIZE) - x), Math.abs(((si / SIZE) | 0) - y)) <= (s.lvl || 1) + 2) { room = true; break; }
+        if (!room || Math.hypot(x - p.x, y - p.y) > 5) return;
+      } else if (p.z === 1) {
+        // FEATURE 2: furniture in mines — tile must be dug, no torch check (torches use own flow)
+        if (!digs.has(i)) return;
+        if (kind === 'torch') return;   // torches in mines use the 'torch' message
+        if (Math.hypot(x - p.x, y - p.y) > 5) return;
+      } else {
+        return;   // z===0: furn not allowed
+      }
       p.inv[kind]--;
-      furn.set(i, { kind, owner: id });
-      bcast({ t: 'furn', i, kind });
+      furn.set(i, { kind, owner: id, z: p.z });   // remember WHICH layer it lives on
+      if (kind === 'chest' && !chestInv.has(i)) chestInv.set(i, {});
+      bcast({ t: 'furn', i, kind, z: p.z });
       sendInv(id, p);
       if (kind === 'bed') send(ws, { t: 'msg', s: '🛏 You will now respawn at your bed.' });
     }
@@ -329,6 +372,9 @@ wss.on('connection', (ws) => {
     else if (m.t === 'build') {
       const kind = m.kind, i = m.i;
       if (!STRUCT_HP[kind] || !p.inv[kind]) return;
+      const r = RECIPES[kind];
+      // zone enforcement: zone:'in' decor cannot be built outdoors (furn path handles them)
+      if (r && r.zone === 'in') return;
       const x = i % SIZE, y = (i / SIZE) | 0;
       if (Math.hypot(x - p.x, y - p.y) > 6) return;
       const existing = structures.get(i);
@@ -342,9 +388,22 @@ wss.on('connection', (ws) => {
         sendInv(id, p);
         return;
       }
-      if (blocked(x, y) || world.nodes.has(i) && !removed.has(i)) return;
+      // for non-blocking decor and farmplot: allow placement on occupied tile (just no water/existing blocking struct)
+      const isNonBlock = DECOR_NONBLOCKING.has(kind) || kind === 'farmplot';
+      if (isNonBlock) {
+        if (x < 0 || y < 0 || x >= SIZE || y >= SIZE) return;
+        if (world.tiles[ti(x, y)] === T.WATER) return;
+        // can coexist with non-blocking, but not with blocking structures
+        if (existing && !DECOR_NONBLOCKING.has(existing.kind) && existing.kind !== 'farmplot') return;
+      } else {
+        if (blocked(x, y) || (world.nodes.has(i) && !removed.has(i))) return;
+      }
       if (kind === 'mineshaft' && !DIGGABLE(world, i))
         return send(ws, { t: 'msg', s: 'Mines can only be dug in the Woods, Dunes or Spire.' });
+      if (kind === 'shelter')                     // rooms are (lvl+2)-radius: keep them from overlapping
+        for (const [si, s2] of structures)
+          if (s2.kind === 'shelter' && Math.max(Math.abs((si % SIZE) - x), Math.abs(((si / SIZE) | 0) - y)) <= 10)
+            return send(ws, { t: 'msg', s: 'Too close to another shelter — their rooms would overlap.' });
       if (kind === 'engine' && i !== ACTIVATION_I)
         return send(ws, { t: 'msg', s: 'The World Engine must be built on the activation dais at the temple heart.' });
       if (kind === 'engine' && !mono.every(Boolean))
@@ -353,6 +412,8 @@ wss.on('connection', (ws) => {
       const dir = m.dir ? 1 : 0;
       structures.set(i, { kind, hp: STRUCT_HP[kind], owner: id, dir, lvl: 1 });
       bcast({ t: 'build', i, kind, hp: STRUCT_HP[kind], dir, lvl: 1 });
+      // farmplot: create empty chest inv stub not needed, but if chest placed, init chestInv
+      if (kind === 'chest') chestInv.set(i, {});
       sendInv(id, p);
       if (kind === 'engine') {
         wave = { until: Date.now() + 4 * 60 * 1000, engineI: i };
@@ -367,6 +428,80 @@ wss.on('connection', (ws) => {
           }
         if (opened.length) bcast({ t: 'dig', tiles: opened });
       }
+    }
+
+    else if (m.t === 'plant') {
+      const i = m.i, cropName = m.crop;
+      const cropDef = CROPS[cropName];
+      if (!cropDef) return;
+      const s = structures.get(i);
+      if (!s || s.kind !== 'farmplot') return send(ws, { t: 'msg', s: 'No farm plot here.' });
+      if (farms.has(i)) return send(ws, { t: 'msg', s: 'Something is already growing here.' });
+      const x = i % SIZE, y = (i / SIZE) | 0;
+      if (Math.hypot(x - p.x, y - p.y) > 2.5) return;
+      if (!canAfford(p.inv, cropDef.seedCost)) return send(ws, { t: 'msg', s: 'Not enough seeds.' });
+      pay(p.inv, cropDef.seedCost);
+      farms.set(i, { crop: cropName, plantedTick: tickN, owner: id });
+      bcast({ t: 'crop', i, crop: cropName, stage: 0 });
+      sendInv(id, p);
+    }
+
+    else if (m.t === 'harvest') {
+      const i = m.i;
+      const fm = farms.get(i);
+      if (!fm) return send(ws, { t: 'msg', s: 'Nothing to harvest here.' });
+      const cropDef = CROPS[fm.crop];
+      if (!cropDef) return;
+      const growTicks = (cropDef.growTicks / GROW_DIV) | 0;
+      const stage = Math.min(2, Math.floor(3 * (tickN - fm.plantedTick) / growTicks));
+      if (stage < 2) return send(ws, { t: 'msg', s: `Not ready yet (${Math.floor(100 * (tickN - fm.plantedTick) / growTicks)}%).` });
+      const x = i % SIZE, y = (i / SIZE) | 0;
+      if (Math.hypot(x - p.x, y - p.y) > 2.5) return;
+      for (const [res, amt] of Object.entries(cropDef.yield)) p.inv[res] = (p.inv[res] || 0) + amt;
+      farms.delete(i);
+      bcast({ t: 'crop', i, crop: null, stage: 0 });
+      sendInv(id, p);
+      send(ws, { t: 'msg', s: `Harvested ${fm.crop}! +${Object.entries(cropDef.yield).map(([k,v])=>`${v} ${k}`).join(', ')}` });
+    }
+
+    else if (m.t === 'chest_open') {
+      const i = m.i;
+      const f = furn.get(i);
+      if (!f || f.kind !== 'chest') return;
+      if ((f.z ?? 2) !== p.z) return;   // a chest is only reachable from the layer it was placed on
+      const x = i % SIZE, y = (i / SIZE) | 0;
+      if (Math.hypot(x - p.x, y - p.y) > 2.5) return;
+      if (!chestInv.has(i)) chestInv.set(i, {});
+      send(ws, { t: 'chest', i, slots: chestInv.get(i) });
+    }
+
+    else if (m.t === 'chest_move') {
+      const i = m.i, res = m.res, n = m.n | 0;
+      if (!n) return;
+      const f = furn.get(i);
+      if (!f || f.kind !== 'chest') return;
+      if ((f.z ?? 2) !== p.z) return;   // same layer gate as chest_open
+      const x = i % SIZE, y = (i / SIZE) | 0;
+      if (Math.hypot(x - p.x, y - p.y) > 2.5) return;
+      if (!['wood','stone','fiber','crystal','essence','iron','diamond','starmetal'].includes(res)) return;
+      if (!chestInv.has(i)) chestInv.set(i, {});
+      const slot = chestInv.get(i);
+      if (n > 0) {
+        // deposit: clamp to what player has
+        const actual = Math.min(n, p.inv[res] || 0);
+        if (actual <= 0) return;
+        p.inv[res] -= actual;
+        slot[res] = (slot[res] || 0) + actual;
+      } else {
+        // withdraw: clamp to what chest has
+        const actual = Math.min(-n, slot[res] || 0);
+        if (actual <= 0) return;
+        slot[res] = (slot[res] || 0) - actual;
+        if (slot[res] <= 0) delete slot[res];
+        p.inv[res] = (p.inv[res] || 0) + actual;
+      }
+      bcast({ t: 'chest', i, slots: slot });
+      sendInv(id, p);
     }
 
     else if (m.t === 'usecore') {
@@ -418,6 +553,7 @@ wss.on('connection', (ws) => {
         } else bcast({ t: 'sd', i: bsi, hp: s.hp });
         return;
       }
+      const atkAng = Math.atan2(best.y - p.y, best.x - p.x);  // away from attacker (Guide §2.1)
       best.hp -= dmg;
       if (best.hp <= 0) {
         if (isAnimal) {
@@ -426,13 +562,73 @@ wss.on('connection', (ws) => {
           p.inv.meat += drop;
           send(ws, { t: 'msg', s: `+${drop} Raw Meat — cook it at a campfire` });
         } else {
+          // wisp on-death: corrupt tile (Guide §3.6 variant — also on death)
+          if (best.type === 'wisp' || best.type === 'frost_wraith') {
+            const di = ti(best.x, best.y);
+            if (world.tiles[di] !== T.WATER && !infected.has(di)) {
+              infected.set(di, nowMs + 120000);
+              bcast({ t: 'infect', tiles: [di] });
+            }
+          }
+          // bog_shambler on-death: corrupt own tile + 4 neighbors (Guide §4.2 / substitutions)
+          if (best.type === 'bog_shambler') {
+            const bsx = best.x | 0, bsy = best.y | 0;
+            const toCorrupt = [[0,0],[1,0],[-1,0],[0,1],[0,-1]];
+            const corrupted = [];
+            for (const [ddx, ddy] of toCorrupt) {
+              const ci = ti(bsx + ddx, bsy + ddy);
+              if (ci >= 0 && ci < SIZE * SIZE && world.tiles[ci] !== T.WATER && !infected.has(ci)) {
+                infected.set(ci, nowMs + 120000); corrupted.push(ci);
+              }
+            }
+            if (corrupted.length) bcast({ t: 'infect', tiles: corrupted });
+          }
           creatures.delete(bid);
-          const drop = (best.type === 'brute' ? 4 : best.type === 'wisp' ? 3 : 1) + (Math.random() < 0.4 ? 1 : 0);
-          p.inv.essence += drop;
-          send(ws, { t: 'msg', s: `+${drop} Blight Essence` });
+          // husk_wolf drops meat (Guide §4.1 / substitutions)
+          if (best.type === 'husk_wolf') {
+            p.inv.meat += 1;
+            send(ws, { t: 'msg', s: '+1 Raw Meat' });
+          } else {
+            const drop = (best.type === 'brute' || best.type === 'bog_shambler' ? 4 : best.type === 'wisp' || best.type === 'frost_wraith' ? 3 : 1) + (Math.random() < 0.4 ? 1 : 0);
+            p.inv.essence += drop;
+            send(ws, { t: 'msg', s: `+${drop} Blight Essence` });
+          }
+          // pack enrage: on crawler/wolf hit, enrage nearby crawlers (Guide §3.5)
+          if (best.type === 'crawler' || best.type === 'husk_wolf') {
+            for (const [, ec] of creatures) {
+              if ((ec.type === 'crawler' || ec.type === 'husk_wolf') && Math.hypot(ec.x - best.x, ec.y - best.y) <= 10)
+                ec.enraged = 100;
+            }
+          }
         }
         sendInv(id, p);
-      } else bcast({ t: 'chit', id: bid });
+      } else {
+        // surviving hit: knockback + stun (Guide §2.2)
+        const KB = (best.type === 'brute' || best.type === 'bog_shambler') ? 0.3 : 0.9;
+        const knx = best.x + Math.cos(atkAng) * KB, kny = best.y + Math.sin(atkAng) * KB;
+        const kni = ti(knx, kny);
+        if (kni >= 0 && kni < SIZE * SIZE && world.tiles[kni] !== T.WATER && !structures.has(kni))
+          { best.x = knx; best.y = kny; }
+        best.stun = 3;
+        // wisp on-hit flee + corrupt (Guide §3.6)
+        if (best.type === 'wisp' || best.type === 'frost_wraith') {
+          best.fleeTicks = 10;
+          best.fleeAng = atkAng + Math.PI;  // flee away from attacker
+          const fi = ti(best.x, best.y);
+          if (world.tiles[fi] !== T.WATER && !infected.has(fi)) {
+            infected.set(fi, nowMs + 120000);
+            bcast({ t: 'infect', tiles: [fi] });
+          }
+        }
+        // pack enrage on hit (Guide §3.5)
+        if (best.type === 'crawler' || best.type === 'husk_wolf') {
+          for (const [, ec] of creatures) {
+            if ((ec.type === 'crawler' || ec.type === 'husk_wolf') && Math.hypot(ec.x - best.x, ec.y - best.y) <= 10)
+              ec.enraged = 100;
+          }
+        }
+        bcast({ t: 'chit', id: bid, ang: atkAng });
+      }
     }
 
     else if (m.t === 'water') {
@@ -453,6 +649,11 @@ wss.on('connection', (ws) => {
         p.inv.water--; p.thirst = Math.min(10, p.thirst + 4);
       } else if (m.k === 'cookedmeat' && p.inv.cookedmeat > 0) {
         p.inv.cookedmeat--; p.hunger = Math.min(10, p.hunger + 5);
+      } else if (m.k === 'bread' && p.inv.bread > 0) {
+        p.inv.bread--; p.hunger = Math.min(10, p.hunger + 4);
+      } else if (m.k === 'glowcap' && p.inv.glowcap > 0) {
+        p.inv.glowcap--; p.hunger = Math.min(10, p.hunger + 2); p.hp = Math.min(10, p.hp + 1);
+        send(ws, { t: 'hp', hp: p.hp });
       } else return;
       sendInv(id, p);
       send(ws, { t: 'stat', hunger: Math.ceil(p.hunger), thirst: Math.ceil(p.thirst) });
@@ -497,22 +698,88 @@ setInterval(() => {
   }
 
   // monsters: crawlers always; stalkers at night; brutes once 2+ monoliths; rare wisps that infect land
+  // New: husk_wolf (night/GRASS), bog_shambler (MUD/BLIGHT near Marsh), frost_wraith (night/SNOW near Spire)
   const strength = 1 + mono.filter(Boolean).length;
+  // husk_wolf counts 2 toward cap (Guide substitutions); count them double
+  const wolfCount = [...creatures.values()].filter((c) => c.type === 'husk_wolf').length;
+  const effectiveCreatureCount = creatures.size + wolfCount;  // wolves counted twice
   const cap = won ? 0 : wave ? 20 : (isNight() ? 6 + 3 * strength : 2 + strength);
-  if (creatures.size < cap && players.size > 0 && tickN % 3 === 0) {
+  if (effectiveCreatureCount < cap && players.size > 0 && tickN % 3 === 0) {
     const roll = Math.random();
     let type = 'crawler';
     const wisps = [...creatures.values()].filter((c) => c.type === 'wisp').length;
     if (roll > 0.97 && wisps < 2) type = 'wisp';
     else if (strength >= 3 && roll > 0.85) type = 'brute';
+    else if (isNight() && roll < 0.05) type = 'husk_wolf';
+    else if (isNight() && roll < 0.08) type = 'frost_wraith';
+    else if (roll > 0.90 && roll <= 0.93) type = 'bog_shambler';
     else if (isNight() && roll < 0.3) type = 'stalker';
     const a = Math.random() * Math.PI * 2, r = Math.random() * 13;
     let sx = CORE[0] + Math.cos(a) * r, sy = CORE[1] + Math.sin(a) * r, ok = true;
-    if (infected.size && roll < 0.25) {              // corruption breeds crawlers far from the core
+    if (infected.size && roll < 0.25 && type === 'crawler') {  // corruption breeds crawlers far from the core
       const keys = [...infected.keys()];
       const fi = keys[(Math.random() * keys.length) | 0];
-      sx = fi % SIZE; sy = (fi / SIZE) | 0; type = 'crawler';
-    } else if (isNight() && roll < 0.55) {           // islands are distant: night horrors rise near players
+      sx = fi % SIZE; sy = (fi / SIZE) | 0;
+    } else if (type === 'husk_wolf') {
+      // spawn near a random player on GRASS, 2-3 at once (Guide §4.1 / substitutions)
+      const qs = [...players.values()].filter((q) => q.z === 0);
+      if (qs.length) {
+        const q = qs[(Math.random() * qs.length) | 0];
+        let placed = false;
+        for (let attempt = 0; attempt < 20 && !placed; attempt++) {
+          const wa = Math.random() * Math.PI * 2, wr = 9 + Math.random() * 8;
+          const wx = Math.round(q.x + Math.cos(wa) * wr), wy = Math.round(q.y + Math.sin(wa) * wr);
+          if (wx < 0 || wy < 0 || wx >= SIZE || wy >= SIZE) continue;
+          const wi = ti(wx, wy);
+          if (world.tiles[wi] !== T.GRASS) continue;
+          // place 2-3 wolves (cap at 2 each counts 2 toward cap — skip if over)
+          const packN = 2 + (Math.random() < 0.4 ? 1 : 0);
+          for (let pw = 0; pw < packN && effectiveCreatureCount + pw * 2 < cap; pw++) {
+            const offA = (pw / packN) * Math.PI * 2;
+            const px2 = Math.round(wx + Math.cos(offA) * (1 + pw)), py2 = Math.round(wy + Math.sin(offA) * (1 + pw));
+            if (px2 < 0 || py2 < 0 || px2 >= SIZE || py2 >= SIZE) continue;
+            const pi = ti(px2, py2);
+            if (world.tiles[pi] !== T.GRASS) continue;
+            const [hb, hs] = CRE_TYPES['husk_wolf'];
+            creatures.set('c' + nextCre++, { x: px2, y: py2, hp: hb + hs * strength, type: 'husk_wolf', homeI: ti(px2, py2) });
+          }
+          placed = true; ok = false;  // already spawned above
+        }
+        if (!placed) ok = false;
+      } else ok = false;
+    } else if (type === 'bog_shambler') {
+      // spawn on MUD/BLIGHT tiles near Marsh island (ISLES[3]) (Guide §4.2 / substitutions)
+      const [mx, my] = ISLES[3];
+      for (let attempt = 0; attempt < 20 && ok; attempt++) {
+        const ba = Math.random() * Math.PI * 2, br = 5 + Math.random() * 25;
+        const bx = Math.round(mx + Math.cos(ba) * br), by = Math.round(my + Math.sin(ba) * br);
+        if (bx < 0 || by < 0 || bx >= SIZE || by >= SIZE) { continue; }
+        const bi = ti(bx, by);
+        const bt = world.tiles[bi];
+        if (bt !== T.MUD && bt !== T.BLIGHT) continue;
+        // must be ≥9 tiles from any player (Guide substitutions)
+        const tooClose = [...players.values()].some((q) => Math.hypot(q.x - bx, q.y - by) < 9);
+        if (tooClose) continue;
+        sx = bx; sy = by; ok = true; break;
+      }
+      if (ok && world.tiles[ti(sx, sy)] !== T.MUD && world.tiles[ti(sx, sy)] !== T.BLIGHT) ok = false;
+    } else if (type === 'frost_wraith') {
+      // spawn at night on SNOW near Spire island (ISLES[2]) (Guide §4.3 / substitutions)
+      if (!isNight()) { ok = false; } else {
+        const [spx, spy] = ISLES[2];
+        for (let attempt = 0; attempt < 20 && ok; attempt++) {
+          const fa = Math.random() * Math.PI * 2, fr = 5 + Math.random() * 20;
+          const fx = Math.round(spx + Math.cos(fa) * fr), fy = Math.round(spy + Math.sin(fa) * fr);
+          if (fx < 0 || fy < 0 || fx >= SIZE || fy >= SIZE) continue;
+          const fti = ti(fx, fy);
+          if (world.tiles[fti] !== T.SNOW) continue;
+          const tooClose = [...players.values()].some((q) => Math.hypot(q.x - fx, q.y - fy) < 9);
+          if (tooClose) continue;
+          sx = fx; sy = fy; ok = true; break;
+        }
+        if (ok && world.tiles[ti(sx, sy)] !== T.SNOW) ok = false;
+      }
+    } else if (isNight() && roll < 0.55 && type !== 'bog_shambler') {  // islands: night horrors near players
       const qs = [...players.values()].filter((q) => q.z === 0);
       if (qs.length) {
         const q = qs[(Math.random() * qs.length) | 0];
@@ -523,16 +790,83 @@ setInterval(() => {
       }
     }
     const [hb, hs] = CRE_TYPES[type];
-    if (ok) creatures.set('c' + nextCre++, { x: sx, y: sy, hp: hb + hs * strength, type });
+    if (ok) {
+      const homeI = ti(sx, sy);
+      creatures.set('c' + nextCre++, { x: sx, y: sy, hp: hb + hs * strength, type, homeI });
+    }
   }
-  for (const c of creatures.values()) {
+
+  // stalkers + frost_wraith despawn at dawn if no player within 12 (Guide §3.1)
+  if (!isNight()) {
+    for (const [cid, c] of creatures) {
+      if (c.type !== 'stalker' && c.type !== 'frost_wraith') continue;
+      const nearPlayer = [...players.values()].some((q) => Math.hypot(q.x - c.x, q.y - c.y) <= 12);
+      if (!nearPlayer) creatures.delete(cid);
+    }
+  }
+
+  for (const [cid, c] of creatures) {
     const [, , baseSp, cdmg] = CRE_TYPES[c.type || 'crawler'];
+    // stun check (Guide §2.2)
+    if (c.stun > 0) { c.stun--; continue; }
+
+    // enrage decay
+    if (c.enraged > 0) c.enraged--;
+    const enrageBonus = c.enraged > 0 ? 0.2 : 0;   // +20% speed when enraged (Guide §3.5)
+    const enrageRange = c.enraged > 0 ? 6 : 0;       // +6 chase range
+
     let tx, ty;
-    if (c.type === 'wisp') {                          // drifts, corrupting the land
-      c.tw = (c.tw || 0) - 1;
-      if (c.tw <= 0) { const ang = Math.random() * Math.PI * 2; c.dx = Math.cos(ang); c.dy = Math.sin(ang); c.tw = 20 + Math.random() * 30; }
-      const nx = c.x + c.dx * baseSp, ny = c.y + c.dy * baseSp;
-      if (nx > 1 && ny > 1 && nx < SIZE - 1 && ny < SIZE - 1) { c.x = nx; c.y = ny; }
+    // wisp + frost_wraith: drift behavior
+    if (c.type === 'wisp' || c.type === 'frost_wraith') {
+      // frost_wraith: switch to stalker-dart if player ≤10 tiles (Guide §4.3)
+      if (c.type === 'frost_wraith') {
+        let nearP = null, nearD = 10;
+        for (const q of players.values()) {
+          if (q.z !== 0) continue;
+          const d = Math.hypot(q.x - c.x, q.y - c.y);
+          if (d < nearD) { nearD = d; nearP = q; }
+        }
+        if (nearP) {
+          // stalker-dart straight at player (Guide §3.4 simplified for frost_wraith)
+          tx = nearP.x; ty = nearP.y;
+          const dfw = Math.hypot(tx - c.x, ty - c.y) || 0.001;
+          const spfw = Math.min(baseSp * 1.25, dfw);
+          const nxfw = c.x + ((tx - c.x) / dfw) * spfw, nyfw = c.y + ((ty - c.y) / dfw) * spfw;
+          const stifw = ti(nxfw, nyfw);
+          if (stifw >= 0 && stifw < SIZE * SIZE && world.tiles[stifw] !== T.WATER && !structures.has(stifw)) {
+            c.x = nxfw; c.y = nyfw;
+          }
+          // wisp flee ticks override
+          goto_contact: {
+            if (tickN % 5 === 0 && cdmg) {
+              for (const [pid, q] of players) {
+                if (q.z === 0 && Math.hypot(q.x - c.x, q.y - c.y) < 1.1) {
+                  q.hp -= cdmg;
+                  const cAng = Math.atan2(q.y - c.y, q.x - c.x);
+                  if (q.hp <= 0) { q.hp = 10; q.z = 0; [q.x, q.y] = respawnPoint(pid); }
+                  // frost_wraith slow: send {t:'slow', ticks:30} (Guide substitutions)
+                  send(q.ws, { t: 'hp', hp: q.hp, x: q.x, y: q.y, ang: cAng });
+                  send(q.ws, { t: 'slow', ticks: 30 });
+                }
+              }
+            }
+          }
+          continue;
+        }
+      }
+      // wisp flee from attacker (Guide §3.6)
+      if (c.fleeTicks > 0) {
+        c.fleeTicks--;
+        const fspeed = baseSp * 3 / 10;  // 3 tiles over 10 ticks
+        const fnx = c.x + Math.cos(c.fleeAng) * fspeed, fny = c.y + Math.sin(c.fleeAng) * fspeed;
+        const fni = ti(fnx, fny);
+        if (fni >= 0 && fni < SIZE * SIZE && world.tiles[fni] !== T.WATER) { c.x = fnx; c.y = fny; }
+      } else {
+        c.tw = (c.tw || 0) - 1;
+        if (c.tw <= 0) { const ang = Math.random() * Math.PI * 2; c.dx = Math.cos(ang); c.dy = Math.sin(ang); c.tw = 20 + Math.random() * 30; }
+        const nx = c.x + (c.dx || 0) * baseSp, ny = c.y + (c.dy || 0) * baseSp;
+        if (nx > 1 && ny > 1 && nx < SIZE - 1 && ny < SIZE - 1) { c.x = nx; c.y = ny; }
+      }
       if (tickN % 25 === 0) {
         const i = ti(c.x, c.y);
         if (world.tiles[i] !== T.WATER && world.tiles[i] !== T.BLIGHT && !infected.has(i) && !structures.has(i)) {
@@ -540,52 +874,202 @@ setInterval(() => {
           bcast({ t: 'infect', tiles: [i] });
         }
       }
+      // wisp contact damage (cdmg=0 for wisp so this is a no-op unless frost_wraith)
+      if (tickN % 5 === 0 && cdmg) {
+        for (const [pid, q] of players) {
+          if (q.z === 0 && Math.hypot(q.x - c.x, q.y - c.y) < 1.1) {
+            q.hp -= cdmg;
+            const cAng = Math.atan2(q.y - c.y, q.x - c.x);
+            if (q.hp <= 0) { q.hp = 10; q.z = 0; [q.x, q.y] = respawnPoint(pid); }
+            send(q.ws, { t: 'hp', hp: q.hp, x: q.x, y: q.y, ang: cAng });
+            if (c.type === 'frost_wraith') send(q.ws, { t: 'slow', ticks: 30 });
+          }
+        }
+      }
       continue;
     }
-    if (wave) { tx = wave.engineI % SIZE; ty = (wave.engineI / SIZE) | 0; }
-    else if (c.type === 'brute') {                    // siege beast: prefers structures
-      let bd = 45;
-      for (const [si] of structures) {
-        const d = Math.hypot((si % SIZE) - c.x, ((si / SIZE) | 0) - c.y);
-        if (d < bd) { bd = d; tx = si % SIZE; ty = (si / SIZE) | 0; }
+
+    // brute telegraph windup (Guide §3.3)
+    if (c.type === 'brute' || c.type === 'bog_shambler') {
+      if (c.windup > 0) {
+        c.windup--;
+        continue;  // frozen during windup
       }
-      if (tx === undefined) for (const q of players.values()) {
+      // check if a player just came within 2.5 tiles (only set windup once)
+      if (!c.windupTriggered) {
+        for (const q of players.values()) {
+          if (q.z === 0 && Math.hypot(q.x - c.x, q.y - c.y) < 2.5) {
+            c.windup = 8; c.windupTriggered = true;
+            bcast({ t: 'ctel', id: cid });
+            break;
+          }
+        }
+        // reset trigger when player leaves range
+        if (!c.windupTriggered) {
+          const anyNear = [...players.values()].some((q) => q.z === 0 && Math.hypot(q.x - c.x, q.y - c.y) < 2.5);
+          if (!anyNear) c.windupTriggered = false;
+        }
+      } else {
+        // reset trigger after windup completes
+        const anyNear = [...players.values()].some((q) => q.z === 0 && Math.hypot(q.x - c.x, q.y - c.y) < 2.5);
+        if (!anyNear) c.windupTriggered = false;
+      }
+    }
+
+    // leash: walk home if too far and no player near (Guide §3.1)
+    const homeI = c.homeI;
+    if (homeI !== undefined) {
+      const homeX = homeI % SIZE, homeY = (homeI / SIZE) | 0;
+      const distHome = Math.hypot(c.x - homeX, c.y - homeY);
+      if (distHome > 60) {
+        const anyNearLeash = [...players.values()].some((q) => Math.hypot(q.x - c.x, q.y - c.y) <= 20);
+        if (!anyNearLeash) {
+          // walk home at half speed
+          const dhw = distHome || 0.001;
+          const sphw = baseSp * 0.5;
+          const nhx = c.x + ((homeX - c.x) / dhw) * sphw, nhy = c.y + ((homeY - c.y) / dhw) * sphw;
+          const nhI = ti(nhx, nhy);
+          if (nhI >= 0 && nhI < SIZE * SIZE && world.tiles[nhI] !== T.WATER && !structures.has(nhI)) { c.x = nhx; c.y = nhy; }
+          // despawn at home if still no player near
+          if (distHome < 1) {
+            const anyNearHome = [...players.values()].some((q) => Math.hypot(q.x - c.x, q.y - c.y) <= 20);
+            if (!anyNearHome) { creatures.delete(cid); continue; }
+          }
+          continue;
+        }
+      }
+    }
+
+    if (wave) { tx = wave.engineI % SIZE; ty = (wave.engineI / SIZE) | 0; }
+    else if (c.type === 'brute' || c.type === 'bog_shambler') {
+      // bog_shambler ignores structures; brute prefers them (Guide §4.2)
+      if (c.type === 'brute') {
+        let bd = 45;
+        for (const [si, ss] of structures) {
+          // brutes ignore non-blocking decor and farmplots
+          if (DECOR_NONBLOCKING.has(ss.kind) || ss.kind === 'farmplot') continue;
+          const d = Math.hypot((si % SIZE) - c.x, ((si / SIZE) | 0) - c.y);
+          if (d < bd) { bd = d; tx = si % SIZE; ty = (si / SIZE) | 0; }
+        }
+        if (tx === undefined) for (const q of players.values()) {
+          const d = Math.hypot(q.x - c.x, q.y - c.y);
+          if (d < (bd || 45)) { bd = d; tx = q.x; ty = q.y; }
+        }
+      } else {
+        // bog_shambler: targets players only
+        let bd = 45;
+        for (const q of players.values()) {
+          if (q.z !== 0) continue;
+          const d = Math.hypot(q.x - c.x, q.y - c.y);
+          if (d < bd) { bd = d; tx = q.x; ty = q.y; }
+        }
+      }
+    } else if (c.type === 'stalker') {
+      // stalker flanking: orbit within 8 tiles, then dart (Guide §3.4)
+      let nearP = null, nearD = (26 + enrageRange);
+      for (const q of players.values()) {
+        if (q.z !== 0) continue;
+        const rad = q.inv.essence > 0 || q.inv.meat > 0 ? 40 + enrageRange : 26 + enrageRange;
         const d = Math.hypot(q.x - c.x, q.y - c.y);
-        if (d < bd) { bd = d; tx = q.x; ty = q.y; }
+        if (d < Math.min(nearD, rad)) { nearD = d; nearP = q; }
+      }
+      if (nearP) {
+        if (nearD <= 8) {
+          // orbit: steer 90° around player
+          const toPlayer = Math.atan2(nearP.y - c.y, nearP.x - c.x);
+          const orbitAng = toPlayer + Math.PI / 2;
+          // check if "behind" player — dot of (creature→player) with playerFacing (approx as last move dir, or just check angle)
+          // dart if angle difference to player-back ≤90°  (simplified: dart after 3 orbit ticks)
+          c.orbitTicks = (c.orbitTicks || 0) + 1;
+          if (c.orbitTicks >= 3) {
+            // dart straight at 1.25× (Guide §3.4)
+            tx = nearP.x; ty = nearP.y;
+            c.orbitTicks = 0;
+          } else {
+            tx = c.x + Math.cos(orbitAng) * 4;
+            ty = c.y + Math.sin(orbitAng) * 4;
+          }
+        } else {
+          tx = nearP.x; ty = nearP.y;
+          c.orbitTicks = 0;
+        }
       }
     } else {
-      let bd = 26;
+      // crawler / husk_wolf: straight chase
+      const baseRange = 26 + enrageRange;
+      let bd = baseRange;
       for (const q of players.values()) {
-        if (q.z !== 0) continue;      // underground/indoor players are hidden from surface hunters
-        // scent: carrying essence or raw meat attracts hunters from farther away
-        const rad = q.inv.essence > 0 || q.inv.meat > 0 ? 40 : 26;
+        if (q.z !== 0) continue;
+        const rad = q.inv.essence > 0 || q.inv.meat > 0 ? 40 + enrageRange : baseRange;
         const d = Math.hypot(q.x - c.x, q.y - c.y);
         if (d < Math.min(bd, rad)) { bd = d; tx = q.x; ty = q.y; }
       }
+      // husk_wolf pack-link: share widest aggro within 12 tiles of other wolves (Guide §4.1)
+      if (c.type === 'husk_wolf' && tx === undefined) {
+        for (const [, wc] of creatures) {
+          if (wc === c || wc.type !== 'husk_wolf') continue;
+          if (Math.hypot(wc.x - c.x, wc.y - c.y) > 12) continue;
+          // if pack-mate has a target, share it (we can't easily get their target — approximate by checking if enraged)
+          if (wc.enraged > 0) { c.enraged = Math.max(c.enraged || 0, wc.enraged); }
+        }
+      }
     }
+
     if (tx === undefined) continue;
-    const d = Math.hypot(tx - c.x, ty - c.y) || 0.001;
-    const sp = Math.min(baseSp + strength * 0.03, d);
-    const nx = c.x + ((tx - c.x) / d) * sp, ny = c.y + ((ty - c.y) / d) * sp;
-    const si = ti(nx, ny);
-    const s = structures.get(si);
-    if (s && d > 1.2) {                               // structure in the way: attack it
+
+    const distT = Math.hypot(tx - c.x, ty - c.y) || 0.001;
+    const spMult = c.type === 'stalker' && c.orbitTicks === 0 ? 1.25 : 1;
+    const sp = Math.min((baseSp * (1 + enrageBonus) + strength * 0.03) * spMult, distT);
+    let moveAng = Math.atan2(ty - c.y, tx - c.x);
+
+    // water/obstacle steering: try ±35° if blocked (Guide §3.2)
+    const creBlocked = (idx) => {
+      const cs = structures.get(idx);
+      return !cs || (!DECOR_NONBLOCKING.has(cs.kind) && cs.kind !== 'farmplot');
+    };
+    let nx = c.x + Math.cos(moveAng) * sp, ny = c.y + Math.sin(moveAng) * sp;
+    let ni = ti(nx, ny);
+    if (ni < 0 || ni >= SIZE * SIZE || world.tiles[ni] === T.WATER || (structures.has(ni) && creBlocked(ni))) {
+      let moved = false;
+      for (const rot of [35 * Math.PI / 180, -35 * Math.PI / 180]) {
+        const tryAng = moveAng + rot;
+        const tnx = c.x + Math.cos(tryAng) * sp, tny = c.y + Math.sin(tryAng) * sp;
+        const tni = ti(tnx, tny);
+        if (tni >= 0 && tni < SIZE * SIZE && world.tiles[tni] !== T.WATER && (!structures.has(tni) || !creBlocked(tni))) {
+          nx = tnx; ny = tny; ni = tni; moved = true; break;
+        }
+      }
+      if (!moved) { nx = c.x; ny = c.y; }  // stop this tick
+    }
+
+    const s = structures.get(ni);
+    // creatures skip non-blocking decor (not fence — fence is blocking so it won't appear here)
+    if (s && DECOR_NONBLOCKING.has(s.kind)) { c.x = nx; c.y = ny; }
+    else if (s && distT > 1.2 && c.type !== 'bog_shambler') {  // bog_shambler ignores structures
       if (tickN % 5 === 0) {
-        s.hp -= c.type === 'brute' ? 3 : 1;
+        s.hp -= (c.type === 'brute') ? 3 : 1;
         if (s.hp <= 0) {
-          structures.delete(si);
-          bcast({ t: 'sd', i: si, hp: 0 });
-          if (wave && si === wave.engineI) { wave = null; bcast({ t: 'msg', s: 'THE WORLD ENGINE WAS DESTROYED! Rebuild it to try again.' }); }
-        } else bcast({ t: 'sd', i: si, hp: s.hp });
+          structures.delete(ni);
+          bcast({ t: 'sd', i: ni, hp: 0 });
+          if (wave && ni === wave.engineI) { wave = null; bcast({ t: 'msg', s: 'THE WORLD ENGINE WAS DESTROYED! Rebuild it to try again.' }); }
+        } else bcast({ t: 'sd', i: ni, hp: s.hp });
       }
     } else { c.x = nx; c.y = ny; }
-    // contact damage
+
+    // contact damage with ang (Guide §2.1)
     if (tickN % 5 === 0 && cdmg) {
-      for (const [pid, q] of players) {
-        if (q.z === 0 && Math.hypot(q.x - c.x, q.y - c.y) < 1.1) {
-          q.hp -= cdmg;
-          if (q.hp <= 0) { q.hp = 10; q.z = 0; [q.x, q.y] = respawnPoint(pid); }
-          send(q.ws, { t: 'hp', hp: q.hp, x: q.x, y: q.y });
+      // brute: only deal damage after windup (Guide §3.3)
+      const bruteReady = (c.type !== 'brute' && c.type !== 'bog_shambler') || !c.windupTriggered || c.windup === 0;
+      if (bruteReady) {
+        for (const [pid, q] of players) {
+          if (q.z === 0 && Math.hypot(q.x - c.x, q.y - c.y) < 1.1) {
+            // brute: only damage if player still ≤1.1 after windup (already checked above)
+            if ((c.type === 'brute' || c.type === 'bog_shambler') && c.windupTriggered && c.windup > 0) continue;
+            q.hp -= cdmg;
+            const cAng = Math.atan2(q.y - c.y, q.x - c.x);  // away from creature = push direction
+            if (q.hp <= 0) { q.hp = 10; q.z = 0; [q.x, q.y] = respawnPoint(pid); }
+            send(q.ws, { t: 'hp', hp: q.hp, x: q.x, y: q.y, ang: cAng });
+          }
         }
       }
     }
@@ -684,6 +1168,21 @@ setInterval(() => {
         s.hp--;
         if (s.hp <= 0) { structures.delete(i); bcast({ t: 'sd', i, hp: 0 }); }
         else bcast({ t: 'sd', i, hp: s.hp });
+      }
+    }
+  }
+
+  // farm growth check (every 50 ticks)
+  if (tickN % 50 === 0 && farms.size > 0) {
+    for (const [i, fm] of farms) {
+      const cropDef = CROPS[fm.crop];
+      if (!cropDef) continue;
+      const growTicks = (cropDef.growTicks / GROW_DIV) | 0;
+      const stage = Math.min(2, Math.floor(3 * (tickN - fm.plantedTick) / growTicks));
+      const prevStage = fm.lastStage ?? -1;
+      if (stage !== prevStage) {
+        fm.lastStage = stage;
+        bcast({ t: 'crop', i, crop: fm.crop, stage });
       }
     }
   }

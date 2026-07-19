@@ -33,7 +33,19 @@ export const RECIPES = {
   shelter:   { cost: { wood: 20, stone: 10 }, station: 'workbench', place: true },
   isword:    { cost: { iron: 6, wood: 4 }, station: 'forge', tool: true },
   core:      { cost: { crystal: 8, essence: 4 }, station: 'forge' },
-  engine:    { cost: { wood: 40, stone: 40, crystal: 15, essence: 10 }, station: 'forge', place: true, engineOnly: true }
+  engine:    { cost: { wood: 40, stone: 40, crystal: 15, essence: 10 }, station: 'forge', place: true, engineOnly: true },
+  // --- decor items ---
+  banner:       { cost: { fiber: 4, wood: 1 }, station: 'workbench', place: true, decor: true, zone: 'both', rot: true },
+  stone_path:   { cost: { stone: 2 }, station: 'workbench', place: true, decor: true, zone: 'out', flat: true },
+  lantern:      { cost: { iron: 1, wood: 1 }, station: 'forge', place: true, decor: true, zone: 'both' },
+  reed_vase:    { cost: { fiber: 3 }, station: 'workbench', place: true, decor: true, zone: 'in' },
+  rug:          { cost: { fiber: 5 }, station: 'workbench', place: true, decor: true, zone: 'in', flat: true },
+  trophy_antler:{ cost: { wood: 2, stone: 1 }, station: 'workbench', place: true, decor: true, zone: 'in' },
+  fence:        { cost: { wood: 2 }, station: null, place: true, decor: true, zone: 'out', rot: true },
+  // --- farming ---
+  farmplot:     { cost: { wood: 4, fiber: 2 }, station: null, place: true },
+  // --- consumables ---
+  bread:        { cost: { grain: 2 }, station: 'campfire' },
 };
 
 export const NAMES = {
@@ -44,15 +56,28 @@ export const NAMES = {
   water: 'Water', meat: 'Raw Meat', cookedmeat: 'Cooked Meat',
   iron: 'Iron', diamond: 'Diamond', mineshaft: 'Mine Entrance', shelter: 'Shelter', isword: 'Iron Sword',
   starmetal: 'Starmetal', boat: 'Boat', sboat: 'Reinforced Boat', torch: 'Torch',
-  chest: 'Chest', bed: 'Bed'
+  chest: 'Chest', bed: 'Bed',
+  // decor
+  banner: 'Banner', stone_path: 'Stone Path', lantern: 'Lantern', reed_vase: 'Reed Vase',
+  rug: 'Woven Rug', trophy_antler: 'Trophy Antler', fence: 'Fence',
+  // farming
+  farmplot: 'Farm Plot', grain: 'Grain', glowcap: 'Glowcap',
+  // consumables
+  bread: 'Bread',
 };
-export const FURNITURE = new Set(['chest', 'bed', 'torch']);   // placeable only inside shelters (torch also in mines)
+export const FURNITURE = new Set(['chest', 'bed', 'torch', 'reed_vase', 'rug', 'trophy_antler', 'banner', 'lantern']);   // placeable only inside shelters (torch also in mines)
 
-export const STRUCT_HP = { wall: 20, campfire: 10, workbench: 15, forge: 30, engine: 120, mineshaft: 25, shelter: 40 };
+export const STRUCT_HP = { wall: 20, campfire: 10, workbench: 15, forge: 30, engine: 120, mineshaft: 25, shelter: 40, banner: 5, stone_path: 5, lantern: 5, reed_vase: 5, rug: 5, trophy_antler: 5, fence: 8, farmplot: 10 };
 export const WOODEN = new Set(['wall', 'workbench']);   // erode in Blight Storms w/o campfire
 export const RESOURCES = ['wood', 'stone', 'fiber', 'crystal', 'essence', 'iron', 'diamond', 'starmetal'];
 export const PLACEABLES = ['wall', 'campfire', 'workbench', 'forge', 'engine', 'mineshaft', 'shelter'];
+// decor kinds that do NOT block movement (fence is blocking, farmplot is walkable)
+export const DECOR_NONBLOCKING = new Set(['banner', 'stone_path', 'lantern', 'reed_vase', 'rug', 'trophy_antler']);
+export const CROPS = {
+  wheat:   { seedCost: { fiber: 2 },    growTicks: 1800, yield: { grain: 3 } },
+  glowcap: { seedCost: { essence: 1 },  growTicks: 2700, yield: { glowcap: 2 } },
+};
 
-export const emptyInv = () => ({ wood: 0, stone: 0, fiber: 0, crystal: 0, essence: 0, iron: 0, diamond: 0, starmetal: 0, water: 0, meat: 0, cookedmeat: 0, wall: 0, campfire: 0, workbench: 0, forge: 0, engine: 0, core: 0, mineshaft: 0, shelter: 0, boat: 0, sboat: 0, torch: 0, chest: 0, bed: 0 });
+export const emptyInv = () => ({ wood: 0, stone: 0, fiber: 0, crystal: 0, essence: 0, iron: 0, diamond: 0, starmetal: 0, water: 0, meat: 0, cookedmeat: 0, wall: 0, campfire: 0, workbench: 0, forge: 0, engine: 0, core: 0, mineshaft: 0, shelter: 0, boat: 0, sboat: 0, torch: 0, chest: 0, bed: 0, banner: 0, stone_path: 0, lantern: 0, reed_vase: 0, rug: 0, trophy_antler: 0, fence: 0, farmplot: 0, grain: 0, glowcap: 0, bread: 0 });
 export const canAfford = (inv, cost) => Object.entries(cost).every(([k, v]) => inv[k] >= v);
 export const pay = (inv, cost) => Object.entries(cost).forEach(([k, v]) => inv[k] -= v);

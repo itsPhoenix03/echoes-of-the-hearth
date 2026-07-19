@@ -142,6 +142,54 @@ _manifest.push(
   ['packed_ice',     '/tiles/packed_ice.svg',     64, 40],
   ['water_freezing', '/tiles/water_freezing.svg', 64, 40],
   ['water_hot',      '/tiles/water_hot.svg',      64, 40],
+  // --- decor & farming sprites ---
+  ['farmplot',       '/sprites/farmplot.svg',                          64, 40],
+  ['crop',           '/sprites/crop.svg',                              30, 34],
+  ['mod_banner_blank','/sprites/building_materials/mod_banner_blank.svg', 34, 54],
+  ['mod_floor_stone', '/sprites/building_materials/mod_floor_stone.svg',  64, 40],
+  ['mod_railing',    '/sprites/building_materials/mod_railing.svg',    64, 38],
+  ['cloth_roll',     '/sprites/building_materials/cloth_roll.svg',     50, 36],
 );
+
+// --- remaining staged assets (registered so future wiring can never hit a missing texture) ---
+_manifest.push(
+  ['lantern',        '/sprites/lantern.svg',        24, 52],   // WIRED: lantern decor item
+  ['ladder',         '/sprites/ladder.svg',         26, 56],   // WIRED: mine exit marker
+  ['lava',           '/tiles/lava.svg',             64, 40],
+  ['blightedtree',   '/sprites/blightedtree.svg',   48, 64],
+  ['blightheart',    '/sprites/blightheart.svg',    42, 46],
+  ['bridge',         '/sprites/bridge.svg',         64, 44],
+  ['fire',           '/sprites/fire.svg',           36, 42],
+  ['fish',           '/sprites/fish.svg',           30, 16],
+  ['golem',          '/sprites/golem.svg',          72, 76],
+  ['keeper',         '/sprites/keeper.svg',         32, 48],
+  ['obsidian',       '/sprites/obsidian.svg',       38, 32],
+  ['ruins',          '/sprites/ruins.svg',          56, 52],
+  ['shaman',         '/sprites/shaman.svg',         36, 52],
+  ['tribal',         '/sprites/tribal.svg',         36, 50],
+  ['villager',       '/sprites/villager.svg',       32, 48],
+  ['villager2',      '/sprites/villager2.svg',      32, 48],
+);
+const _BM: [string, number, number][] = [
+  ['clay_bricks', 56, 38], ['crystal_lattice', 54, 44], ['glass_pane', 44, 46], ['iron_beam', 60, 34],
+  ['mod_arch', 64, 58], ['mod_bridge_segment', 74, 44], ['mod_door', 42, 52],
+  ['mod_floor_thatch', 64, 40], ['mod_floor_wood', 64, 40], ['mod_lantern_hook', 38, 54],
+  ['mod_pillar_stone', 38, 64], ['mod_pillar_wood', 36, 62],
+  ['mod_roof_metal', 70, 48], ['mod_roof_shingle', 70, 48], ['mod_roof_thatch', 70, 48],
+  ['mod_stairs', 62, 44], ['mod_wall_crystal', 64, 58], ['mod_wall_stone', 64, 54], ['mod_wall_wood', 64, 54],
+  ['mod_window', 42, 46], ['reed_thatch', 58, 36], ['rope_coil', 44, 38],
+  ['starmetal_plate', 56, 38], ['stone_blocks', 56, 40], ['wood_planks', 52, 36],
+];
+for (const [k, w, h] of _BM) _manifest.push([k, `/sprites/building_materials/${k}.svg`, w, h]);
+const _RAW: [string, number, number][] = [
+  ['ingot_bronze', 46, 30], ['ingot_copper', 46, 30], ['ingot_iron', 46, 30], ['ingot_starmetal', 46, 30],
+  ['raw_ash', 42, 30], ['raw_beeswax', 42, 34], ['raw_bone', 46, 30], ['raw_clay', 42, 34], ['raw_coal', 42, 34],
+  ['raw_copper_ore', 44, 38], ['raw_crystal_shard', 40, 42],
+  ['raw_dye_blue', 34, 38], ['raw_dye_green', 34, 38], ['raw_dye_red', 34, 38],
+  ['raw_fiber_bundle', 44, 36], ['raw_hide', 48, 38], ['raw_iron_ore', 44, 38], ['raw_lime', 42, 32],
+  ['raw_obsidian_shard', 40, 42], ['raw_oil_pot', 38, 42], ['raw_resin', 36, 40], ['raw_sand', 42, 30],
+  ['raw_starmetal_nugget', 42, 36], ['raw_tin_ore', 44, 38],
+];
+for (const [k, w, h] of _RAW) _manifest.push([k, `/sprites/building_materials/raw/${k}.svg`, w, h]);
 
 export const ASSET_MANIFEST: [string, string, number, number][] = _manifest;

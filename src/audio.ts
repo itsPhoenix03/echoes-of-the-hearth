@@ -89,6 +89,26 @@ export class GameAudio {
   }
   build() { this.burst(0.15, 500, 0.18); this.tone('triangle', 300, 220, 0.15, 0.08, 1200); }
 
+  // Combat feel sounds (Guide §2.5)
+  thud() {
+    // punchy layer under hurt(): noise burst lowpass 300 Hz + sine 90→40 Hz
+    this.burst(0.06, 300, 0.3, 'lowpass');
+    this.tone('sine', 90, 40, 0.15, 0.12, 300);
+  }
+  killmob() {
+    // sawtooth 220→30 Hz over 350 ms + noise burst bandpass 600 Hz
+    this.tone('sawtooth', 220, 30, 0.35, 0.2, 600);
+    this.burst(0.12, 600, 0.15, 'bandpass');
+  }
+  whoosh() {
+    // noise burst bandpass 1400 Hz, volume 0.12, 90 ms
+    this.burst(0.09, 1400, 0.12, 'bandpass');
+  }
+  telegraph() {
+    // reuse growl at full closeness but +30 Hz pitch shift
+    this.tone('sawtooth', 90 + Math.random() * 25, 68, 0.9, 0.12, 250);
+  }
+
   private tone(type: OscillatorType, f0: number, f1: number, dur: number, vol: number, filterF: number) {
     if (!this.started || this.muted) return;
     const t = this.ctx.currentTime;

@@ -108,6 +108,25 @@ export class Rig extends Phaser.GameObjects.Container {
     });
   }
 
+  // hurt pose: torso/head rotate away from hit, tint 80 ms (Guide §2.4)
+  hurt(ang: number) {
+    const dir = Math.cos(ang) < 0 ? 1 : -1;
+    const parts = [this.torso, this.head, this.armL, this.armR, this.legL, this.legR];
+    parts.forEach((p) => p.setTintFill(0xff6666));
+    setTimeout(() => parts.forEach((p) => p.clearTint()), 80);
+    const origTR = this.torso.rotation, origHR = this.head.rotation;
+    this.scene.tweens.addCounter({
+      from: 0, to: 1, duration: 200, ease: 'Sine.out',
+      onUpdate: (tw) => {
+        const v = tw.getValue();
+        const lean = -0.35 * dir * (1 - v);
+        this.torso.rotation = origTR + lean;
+        this.head.rotation = origHR + lean;
+      },
+      onComplete: () => { this.torso.rotation = origTR; this.head.rotation = origHR; }
+    });
+  }
+
   tick(dt: number) {
     if (this.moving) {
       this.phase += dt * 11;
