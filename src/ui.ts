@@ -23,6 +23,7 @@ export interface UIState {
   nearWorkbench: boolean; nearForge: boolean; nearCampfire: boolean;
   structCount: (kind: string) => number;
   waveSecs: number;
+  engineHp: number | null;
   zone: 'in' | 'out';
 }
 
@@ -151,6 +152,7 @@ export function initUI(
       `Day ${st.day} · ${String(hour).padStart(2, '0')}:00 ${night ? '🌙 <b style="color:#b98ef0">BLIGHT STORM</b>' : '☀'}` +
       ` · 🗿 ${st.mono.filter(Boolean).length}/4` +
       (st.waveSecs > 0 ? `<br><b style="color:#ff6a6a">⚔ DEFEND THE ENGINE: ${st.waveSecs}s</b>` : '') +
+      (st.engineHp != null ? `<br>💠 <b style="color:${st.engineHp > 60 ? '#6dd6c8' : st.engineHp > 30 ? '#ffd97a' : '#ff6a6a'}">Engine: ${st.engineHp}/120 HP</b>` : '') +
       (st.won ? '<br>✨ <b style="color:#6dd6c8">THE BLIGHT IS PURGED — VICTORY</b>' : '');
 
     let obj = '';

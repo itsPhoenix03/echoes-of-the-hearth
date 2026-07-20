@@ -39,7 +39,9 @@ const CRE_TYPES = {
   husk_wolf:    [3, 1, 0.62,  1],
   bog_shambler: [8, 2, 0.22,  2],
   frost_wraith: [2, 1, 0.5,   1],
+  drowned:      [1, 1, 0.4,   1],   // early amphibious hunter — punishes hiding in the shallows
 };
+const CAN_SWIM = new Set(['stalker', 'drowned']);   // only these may chase onto water
 let weather = { kind: null, until: 0 };
 const infected = new Map();          // tile -> cure timestamp (wisp-spread corruption)
 const digs = new Set();              // underground tiles carved out by players
@@ -714,9 +716,24 @@ setInterval(() => {
     else if (isNight() && roll < 0.08) type = 'frost_wraith';
     else if (roll > 0.90 && roll <= 0.93) type = 'bog_shambler';
     else if (isNight() && roll < 0.3) type = 'stalker';
+    else if (roll >= 0.32 && roll < 0.45) type = 'drowned';   // early-tier share, like crawlers
     const a = Math.random() * Math.PI * 2, r = Math.random() * 13;
     let sx = CORE[0] + Math.cos(a) * r, sy = CORE[1] + Math.sin(a) * r, ok = true;
-    if (infected.size && roll < 0.25 && type === 'crawler') {  // corruption breeds crawlers far from the core
+    if (type === 'drowned') {
+      // rises from the water near a player's coast
+      const qs = [...players.values()].filter((q) => q.z === 0);
+      ok = false;
+      if (qs.length) {
+        const q = qs[(Math.random() * qs.length) | 0];
+        for (let att = 0; att < 20; att++) {
+          const da = Math.random() * Math.PI * 2, dr = 10 + Math.random() * 8;
+          const dx2 = Math.round(q.x + Math.cos(da) * dr), dy2 = Math.round(q.y + Math.sin(da) * dr);
+          if (dx2 > 0 && dy2 > 0 && dx2 < SIZE && dy2 < SIZE && world.tiles[ti(dx2, dy2)] === T.WATER) {
+            sx = dx2; sy = dy2; ok = true; break;
+          }
+        }
+      }
+    } else if (infected.size && roll < 0.25 && type === 'crawler') {  // corruption breeds crawlers far from the core
       const keys = [...infected.keys()];
       const fi = keys[(Math.random() * keys.length) | 0];
       sx = fi % SIZE; sy = (fi / SIZE) | 0;
@@ -940,7 +957,23 @@ setInterval(() => {
       }
     }
 
-    if (wave) { tx = wave.engineI % SIZE; ty = (wave.engineI / SIZE) | 0; }
+    if (wave) {
+      tx = wave.engineI % SIZE; ty = (wave.engineI / SIZE) | 0;
+      // adjacent to the Engine: gnaw it down (the d>1.2 path-attack never fires at the target itself)
+      if (Math.hypot(tx - c.x, ty - c.y) <= 1.6 && tickN % 5 === 0) {
+        const es = structures.get(wave.engineI);
+        if (es) {
+          es.hp -= c.type === 'brute' || c.type === 'bog_shambler' ? 3 : 1;
+          if (es.hp <= 0) {
+            structures.delete(wave.engineI);
+            bcast({ t: 'sd', i: wave.engineI, hp: 0 });
+            wave = null;
+            bcast({ t: 'msg', s: 'THE WORLD ENGINE WAS DESTROYED! Rebuild it to try again.' });
+          } else bcast({ t: 'sd', i: wave.engineI, hp: es.hp });
+        }
+        continue;
+      }
+    }
     else if (c.type === 'brute' || c.type === 'bog_shambler') {
       // bog_shambler ignores structures; brute prefers them (Guide §4.2)
       if (c.type === 'brute') {
@@ -1029,13 +1062,14 @@ setInterval(() => {
     };
     let nx = c.x + Math.cos(moveAng) * sp, ny = c.y + Math.sin(moveAng) * sp;
     let ni = ti(nx, ny);
-    if (ni < 0 || ni >= SIZE * SIZE || world.tiles[ni] === T.WATER || (structures.has(ni) && creBlocked(ni))) {
+    const swims = CAN_SWIM.has(c.type);
+    if (ni < 0 || ni >= SIZE * SIZE || (world.tiles[ni] === T.WATER && !swims) || (structures.has(ni) && creBlocked(ni))) {
       let moved = false;
       for (const rot of [35 * Math.PI / 180, -35 * Math.PI / 180]) {
         const tryAng = moveAng + rot;
         const tnx = c.x + Math.cos(tryAng) * sp, tny = c.y + Math.sin(tryAng) * sp;
         const tni = ti(tnx, tny);
-        if (tni >= 0 && tni < SIZE * SIZE && world.tiles[tni] !== T.WATER && (!structures.has(tni) || !creBlocked(tni))) {
+        if (tni >= 0 && tni < SIZE * SIZE && (world.tiles[tni] !== T.WATER || swims) && (!structures.has(tni) || !creBlocked(tni))) {
           nx = tnx; ny = tny; ni = tni; moved = true; break;
         }
       }
@@ -1055,6 +1089,23 @@ setInterval(() => {
         } else bcast({ t: 'sd', i: ni, hp: s.hp });
       }
     } else { c.x = nx; c.y = ny; }
+
+    // brute: lobs a blight bolt at players hiding in water it cannot enter (ranged only, no swimming)
+    if (c.type === 'brute' && tickN % 5 === 0) {
+      c.shotCd = Math.max(0, (c.shotCd || 0) - 1);
+      if (c.shotCd === 0) for (const [pid, q] of players) {
+        const d = Math.hypot(q.x - c.x, q.y - c.y);
+        if (q.z === 0 && d > 1.5 && d < 7 && world.tiles[ti(q.x, q.y)] === T.WATER) {
+          c.shotCd = 3;   // one bolt every ~3s
+          q.hp -= 1;
+          const cAng = Math.atan2(q.y - c.y, q.x - c.x);
+          bcast({ t: 'shot', fx: +c.x.toFixed(1), fy: +c.y.toFixed(1), tx: +q.x.toFixed(1), ty: +q.y.toFixed(1) });
+          if (q.hp <= 0) { q.hp = 10; q.z = 0; [q.x, q.y] = respawnPoint(pid); }
+          send(q.ws, { t: 'hp', hp: q.hp, x: q.x, y: q.y, ang: cAng });
+          break;
+        }
+      }
+    }
 
     // contact damage with ang (Guide §2.1)
     if (tickN % 5 === 0 && cdmg) {

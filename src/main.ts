@@ -50,6 +50,7 @@ const CRE_TEX: Record<string, string> = {
   husk_wolf: "wolf",
   bog_shambler: "creature",
   frost_wraith: "wisp",
+  drowned: "creature",
 };
 // decor/furniture kind -> texture key. SINGLE source of truth — ghost preview,
 // addStruct (outdoor) and addFurn (indoor) must all use this map.
@@ -194,6 +195,7 @@ class Hearth extends Phaser.Scene {
   faceY = 0;
   zToggleAt = 0;
   chestReqI = -1;   // chest we asked to open — broadcasts for other chests must not pop our panel
+  engineI = -1; engineHp: number | null = null;   // World Engine health for the HUD
   sailing = false;
   swimming = false;
   boatKind = 0;
@@ -1148,6 +1150,7 @@ class Hearth extends Phaser.Scene {
         }
       }
     } else if (m.t === "sd") {
+      if (m.i === this.engineI) this.engineHp = m.hp > 0 ? m.hp : null;
       const s = this.structSpr.get(m.i);
       if (!s) return;
       if (m.hp <= 0) {
@@ -1265,6 +1268,12 @@ class Hearth extends Phaser.Scene {
     } else if (m.t === "stat") {
       this.hunger = m.hunger;
       this.thirst = m.thirst;
+    } else if (m.t === "shot") {
+      // brute blight-bolt: quick projectile from shooter to target
+      const a = this.iso(m.fx, m.fy), b = this.iso(m.tx, m.ty);
+      const pr = this.add.image(a.x, a.y - 24, "blight_spore").setScale(0.35).setDepth(999970);
+      this.tweens.add({ targets: pr, x: b.x, y: b.y - 8, duration: 220, onComplete: () => pr.destroy() });
+      this.audio.whoosh();
     } else if (m.t === "chit") {
       this.audio.hitmob();
       this.audio.whoosh();
@@ -1310,6 +1319,7 @@ class Hearth extends Phaser.Scene {
             s.setTint(0x557755);
             s.setScale(1.3);
           }
+          if (type === "drowned") s.setTint(0x4a9ad5);   // waterlogged blue
           if (type === "frost_wraith") {
             s.setTint(0xbfe8ff);
             s.setAlpha(0.8);
@@ -1483,6 +1493,7 @@ class Hearth extends Phaser.Scene {
         .setVisible(this.z === 1);
       this.exitSpr.set(i, es);
     }
+    if (kind === "engine") { this.engineI = i; this.engineHp = hp; }
     // structures placed by OTHER players while we're in a shelter/mine must arrive faded
     const sa = this.z !== 0 ? 0.15 : 1;
     entry.spr.setAlpha(sa);
@@ -2235,6 +2246,7 @@ class Hearth extends Phaser.Scene {
       waveSecs: this.waveEnd
         ? Math.max(0, Math.ceil((this.waveEnd - Date.now()) / 1000))
         : 0,
+      engineHp: this.engineHp,
       zone: this.z === 0 ? "out" : "in",   // mines count as interior too
     });
   }
