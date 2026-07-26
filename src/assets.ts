@@ -155,6 +155,8 @@ _manifest.push(
 _manifest.push(
   ['lantern',        '/sprites/lantern.svg',        24, 52],   // WIRED: lantern decor item
   ['ladder',         '/sprites/ladder.svg',         26, 56],   // WIRED: mine exit marker
+  ['drowned',        '/sprites/drowned.svg',        42, 38],   // WIRED: amphibious enemy
+  ['blight_lancer',  '/sprites/blight_lancer.svg',  52, 72],   // WIRED: slow siege beam-caster
   ['lava',           '/tiles/lava.svg',             64, 40],
   ['blightedtree',   '/sprites/blightedtree.svg',   48, 64],
   ['blightheart',    '/sprites/blightheart.svg',    42, 46],

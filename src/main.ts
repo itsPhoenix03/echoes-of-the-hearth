@@ -50,7 +50,8 @@ const CRE_TEX: Record<string, string> = {
   husk_wolf: "wolf",
   bog_shambler: "creature",
   frost_wraith: "wisp",
-  drowned: "creature",
+  drowned: "drowned",
+  blight_lancer: "blight_lancer",
 };
 // decor/furniture kind -> texture key. SINGLE source of truth — ghost preview,
 // addStruct (outdoor) and addFurn (indoor) must all use this map.
@@ -64,6 +65,11 @@ const DECOR_TEX: Record<string, string> = {
 };
 const CHW = 1024,
   CHH = 512;
+// Max world area a player may ever see. Zooming the browser out enlarges the canvas in CSS
+// pixels, which would otherwise reveal the whole island — camera zoom scales to compensate so
+// the visible slice of world stays fixed regardless of page zoom or window size.
+const VIEW_W = 1408,
+  VIEW_H = 792;
 
 // Hidden clue notes — each island's note hints at the next, never with exact coordinates.
 const NOTE_DEFS: [number, number, string][] = [
@@ -323,7 +329,15 @@ class Hearth extends Phaser.Scene {
       if (e.key === "m" || e.key === "M")
         showMsg(this.audio.toggleMute() ? "🔇 Muted" : "🔊 Sound on", 1000);
       if (e.key === "F9") this.send({ t: "dev" });
+      if (e.key === "F10") {
+        e.preventDefault();
+        const d = document.getElementById("devPanel")!;
+        d.style.display = d.style.display === "block" ? "none" : "block";
+      }
     });
+    this.buildDevPanel();
+    // re-clamp the view whenever the canvas changes size (window resize OR browser zoom)
+    this.scale.on("resize", () => this.applyViewClamp(0));
     this.input.on("pointerdown", () => this.audio.start());
     this.input.on("pointerdown", (ptr: Phaser.Input.Pointer) =>
       this.onClick(ptr),
@@ -378,6 +392,95 @@ class Hearth extends Phaser.Scene {
   // Task 4: send wear request
   setWear(k: string | null) {
     this.send({ t: "wear", k });
+  }
+
+  // keep the visible world area capped at VIEW_W x VIEW_H regardless of page zoom / window size
+  baseZoom = 1;
+  applyViewClamp(dur = 0) {
+    const fit = Math.max(1, this.scale.width / VIEW_W, this.scale.height / VIEW_H);
+    const z = this.baseZoom * fit;
+    if (dur > 0) this.cameras.main.zoomTo(z, dur);
+    else this.cameras.main.setZoom(z);
+    // counter-scale the DOM interface by the same factor, so HUD/panels keep a constant
+    // on-screen size while the browser is zoomed in or out
+    document.documentElement.style.setProperty("--uiz", String(fit));
+  }
+
+  buildDevPanel() {
+    if (document.getElementById("devPanel")) return;
+    const SPOTS: [string, number, number][] = [
+      ["Woods", ISLES[0][0], ISLES[0][1]], ["Dunes", ISLES[1][0], ISLES[1][1]],
+      ["Spire", ISLES[2][0], ISLES[2][1]], ["Marsh", ISLES[3][0], ISLES[3][1]],
+      ["Core", CORE[0], CORE[1]],
+    ];
+    const d = document.createElement("div");
+    d.id = "devPanel";
+    d.style.cssText =
+      "position:fixed;top:8px;right:8px;z-index:30;display:none;background:rgba(10,15,20,.95);" +
+      "border:1px solid #b96;border-radius:8px;padding:10px 12px;color:#fff;font:12px monospace;max-width:220px;";
+    d.innerHTML =
+      `<b style="color:#ffb96a">🛠 DEV TESTER</b> <span style="color:#889">(F10)</span><br>` +
+      `<div style="color:#9ab;margin:4px 0">Fast travel</div>` +
+      SPOTS.map(([n, x, y]) => `<button data-tp="${x},${y}">${n}</button>`).join("") +
+      `<div style="color:#9ab;margin:6px 0 4px">Activate Monolith</div>` +
+      [0, 1, 2, 3].map((i) => `<button data-mono="${i}">M${i + 1}</button>`).join("") +
+      `<div style="color:#9ab;margin:6px 0 4px">Weather (biome-specific)</div>` +
+      `<button data-wx="rain">🌧 Rain</button>` +
+      `<button data-wx="sandstorm">🌪 Sand</button>` +
+      `<button data-wx="snowstorm">❄ Blizzard</button>` +
+      `<button data-wx="clear">☀ Clear</button>` +
+      `<div style="color:#9ab;margin:6px 0 4px">Time of day</div>` +
+      `<button data-time="0.3">☀ Day</button>` +
+      `<button data-time="0.8">🌙 Night</button>` +
+      `<div style="color:#9ab;margin:6px 0 4px">Spawn enemy (one at a time)</div>` +
+      `<select id="devSpawnSel">` +
+      `<optgroup label="Melee — early">` +
+      `<option value="crawler">Crawler · fodder</option>` +
+      `<option value="drowned">Drowned · swims</option>` +
+      `</optgroup>` +
+      `<optgroup label="Melee — night">` +
+      `<option value="stalker">Stalker · fast, swims, flanks</option>` +
+      `<option value="husk_wolf">Husk Wolf · pack, enrages</option>` +
+      `<option value="frost_wraith">Frost Wraith · slows you</option>` +
+      `</optgroup>` +
+      `<optgroup label="Siege — tanky">` +
+      `<option value="brute">Brute · telegraph, water bolt</option>` +
+      `<option value="bog_shambler">Bog Shambler · corrupts on death</option>` +
+      `<option value="blight_lancer">Blight Lancer · beam vaporises walls</option>` +
+      `</optgroup>` +
+      `<optgroup label="Spirit">` +
+      `<option value="wisp">Wisp · infects land, flees</option>` +
+      `</optgroup>` +
+      `</select>` +
+      `<div><button data-cmd="spawn">👾 Spawn</button>` +
+      `<button data-cmd="clearcre">🧹 Clear all</button></div>` +
+      `<div style="margin-top:6px">` +
+      `<button data-cmd="god">🛡 God toggle</button>` +
+      `<button data-cmd="kill">💀 Kill</button>` +
+      `<button data-cmd="kit">🎁 Full kit</button></div>` +
+      `<style>#devPanel button{background:#2a3a4a;color:#fff;border:1px solid #57a;border-radius:4px;` +
+      `margin:2px;padding:3px 7px;cursor:pointer;font:12px monospace}#devPanel button:hover{background:#3a5a4a}` +
+      `#devSpawnSel{width:100%;background:#1a222c;color:#fff;border:1px solid #57a;border-radius:4px;` +
+      `font:12px monospace;padding:3px}</style>`;
+    document.body.appendChild(d);
+    d.addEventListener("click", (e) => {
+      const b = (e.target as HTMLElement).closest("button") as HTMLButtonElement | null;
+      if (!b) return;
+      if (b.dataset.tp) {
+        const [x, y] = b.dataset.tp.split(",").map(Number);
+        this.send({ t: "devcmd", cmd: "tp", x, y });
+      } else if (b.dataset.wx) {
+        this.send({ t: "devcmd", cmd: "wx", kind: b.dataset.wx === "clear" ? null : b.dataset.wx });
+      } else if (b.dataset.time) {
+        this.send({ t: "devcmd", cmd: "time", v: +b.dataset.time });
+      } else if (b.dataset.mono) this.send({ t: "devcmd", cmd: "mono", i: +b.dataset.mono });
+      else if (b.dataset.cmd === "kit") this.send({ t: "dev" });
+      else if (b.dataset.cmd === "spawn") {
+        const sel = document.getElementById("devSpawnSel") as HTMLSelectElement | null;
+        this.send({ t: "devcmd", cmd: "spawn", type: sel?.value || "crawler" });
+      }
+      else if (b.dataset.cmd) this.send({ t: "devcmd", cmd: b.dataset.cmd });
+    });
   }
 
   send(m: any) {
@@ -800,8 +903,9 @@ class Hearth extends Phaser.Scene {
     if (this.z === z) return;
     this.z = z;
     const surfA = z !== 0 ? 0.15 : 1;
-    // FEATURE 1: camera zoom per layer
-    this.cameras.main.zoomTo(z === 2 || z === 1 ? 1.15 : 1, 400);
+    // FEATURE 1: camera zoom per layer (clamped so the view area never grows)
+    this.baseZoom = z === 2 || z === 1 ? 1.05 : 1;
+    this.applyViewClamp(400);
     // shelter interior floor — FEATURE 1: room half-width = shelterLvl + 2
     this.intFloor.forEach((s) => s.destroy());
     this.intFloor = [];
@@ -1187,6 +1291,13 @@ class Hearth extends Phaser.Scene {
         5000,
       );
     } else if (m.t === "wave") {
+      if (!m.secs) {
+        // wave cancelled (Engine destroyed) — clear the countdown and engine HP readout
+        this.waveEnd = 0;
+        this.engineHp = null;
+        this.engineI = -1;
+        return;
+      }
       this.waveEnd = Date.now() + m.secs * 1000;
       showMsg("⚔ THE FINAL ASSAULT BEGINS — DEFEND THE WORLD ENGINE!", 8000);
     } else if (m.t === "win") {
@@ -1251,6 +1362,9 @@ class Hearth extends Phaser.Scene {
       ) {
         this.px = m.x;
         this.py = m.y;
+        // a long-range teleport (e.g. dev fast-travel) always lands on the surface —
+        // never leave the player stranded on the mine/shelter layer of the new spot
+        if (this.z !== 0) this.setZ(0);
       }
       this.hp = m.hp;
     } else if (m.t === "slow") {
@@ -1269,10 +1383,41 @@ class Hearth extends Phaser.Scene {
       this.hunger = m.hunger;
       this.thirst = m.thirst;
     } else if (m.t === "shot") {
-      // brute blight-bolt: quick projectile from shooter to target
+      // brute blight-bolt: vibrant flashing beam + glowing bolt
       const a = this.iso(m.fx, m.fy), b = this.iso(m.tx, m.ty);
-      const pr = this.add.image(a.x, a.y - 24, "blight_spore").setScale(0.35).setDepth(999970);
-      this.tweens.add({ targets: pr, x: b.x, y: b.y - 8, duration: 220, onComplete: () => pr.destroy() });
+      const lance = m.kind === "lance";   // siege beam: heavier, hotter, longer-lasting
+      const ax = a.x, ay = a.y - (lance ? 40 : 24), bx = b.x, by = b.y - 8;
+      const beam = this.add.graphics().setDepth(999969).setBlendMode(Phaser.BlendModes.ADD);
+      let flash = 0;
+      const strobe = this.time.addEvent({
+        delay: lance ? 40 : 45, repeat: lance ? 9 : 5,
+        callback: () => {
+          flash++;
+          beam.clear();
+          const col = lance
+            ? (flash % 2 ? 0xffa63d : 0xff4ff0)
+            : (flash % 2 ? 0xff4ff0 : 0x9ef0ff);
+          beam.lineStyle(lance ? 16 : 9, col, 0.3); beam.lineBetween(ax, ay, bx, by);
+          beam.lineStyle(lance ? 7 : 4, col, 0.9); beam.lineBetween(ax, ay, bx, by);
+          beam.lineStyle(lance ? 2.5 : 1.5, 0xffffff, 1); beam.lineBetween(ax, ay, bx, by);
+        },
+      });
+      this.time.delayedCall(lance ? 440 : 300, () => { strobe.remove(); beam.destroy(); });
+      if (lance) this.cameras.main.shake(120, 0.005);
+      // bolt travelling the beam, pulsing and glowing
+      const pr = this.add.image(ax, ay, "blight_spore")
+        .setScale(0.55).setTint(0xff6ef5).setDepth(999970).setBlendMode(Phaser.BlendModes.ADD);
+      this.tweens.add({ targets: pr, scale: 0.85, duration: 110, yoyo: true, repeat: 1 });
+      this.tweens.add({
+        targets: pr, x: bx, y: by, duration: 220,
+        onComplete: () => {
+          // impact flash at the target
+          const fx = this.add.image(bx, by, "blight_spore")
+            .setScale(0.5).setTint(0xffffff).setDepth(999971).setBlendMode(Phaser.BlendModes.ADD);
+          this.tweens.add({ targets: fx, scale: 1.5, alpha: 0, duration: 200, onComplete: () => fx.destroy() });
+          pr.destroy();
+        },
+      });
       this.audio.whoosh();
     } else if (m.t === "chit") {
       this.audio.hitmob();
@@ -1280,7 +1425,9 @@ class Hearth extends Phaser.Scene {
       const s = this.creSpr.get(m.id) || this.aniSpr.get(m.id);
       if (s) {
         s.setTintFill(0xffffff);
-        setTimeout(() => s.clearTint(), 80);
+        // restore any base tint (shambler/wraith) — clearTint alone would revert them to base art
+        const baseTint = s.getData("baseTint");
+        setTimeout(() => { s.clearTint(); if (baseTint) s.setTint(baseTint); }, 80);
         // tween toward pushed position over 90ms with Back.easeOut (Guide §2.2)
         if (m.ang !== undefined) {
           const tx2 = s.getData("tx"),
@@ -1315,13 +1462,14 @@ class Hearth extends Phaser.Scene {
             .setVisible(this.z === 0);
           this.creSpr.set(cid, s);
           if (type === "brute") s.setScale(1.15);
+          if (type === "blight_lancer") s.setScale(1.1);
           if (type === "bog_shambler") {
-            s.setTint(0x557755);
+            s.setTint(0x557755).setData("baseTint", 0x557755);
             s.setScale(1.3);
           }
-          if (type === "drowned") s.setTint(0x4a9ad5);   // waterlogged blue
+          // drowned has its own art — no tint, so the hit flash can't wipe its colour
           if (type === "frost_wraith") {
-            s.setTint(0xbfe8ff);
+            s.setTint(0xbfe8ff).setData("baseTint", 0xbfe8ff);
             s.setAlpha(0.8);
           }
           if (type === "wisp" || type === "frost_wraith") {
@@ -2094,43 +2242,33 @@ class Hearth extends Phaser.Scene {
     // mine darkness: black veil with light pools around you, torches and the shaft
     if (this.z === 1) {
       const cam = this.cameras.main;
-      if (
-        this.darkRT.width !== this.scale.width ||
-        this.darkRT.height !== this.scale.height
-      )
-        this.darkRT.setSize(this.scale.width, this.scale.height);
+      // the RT has scrollFactor 0, so Phaser scales it BY the camera zoom: size it in
+      // pre-zoom space and map world→RT coords without a zoom factor, or the light
+      // pools drift away from their sources as zoom changes.
+      const zoom = cam.zoom || 1;
+      const rtW = Math.ceil(this.scale.width / zoom) + 8;
+      const rtH = Math.ceil(this.scale.height / zoom) + 8;
+      if (this.darkRT.width !== rtW || this.darkRT.height !== rtH)
+        this.darkRT.setSize(rtW, rtH);
       this.darkRT.setVisible(true).clear();
       this.darkRT.fill(0x02020a, 0.93);
-      // FEATURE 1: darkness erase must account for camera zoom
-      // sx = (worldX - worldView.x) * zoom; same for y
       const wv = cam.worldView;
-      const zoom = cam.zoom;
-      const toSx = (wx: number) => (wx - wv.x) * zoom;
-      const toSy = (wy: number) => (wy - wv.y) * zoom;
+      const toSx = (wx: number) => wx - wv.x;
+      const toSy = (wy: number) => wy - wv.y;
       const psx = toSx(p.x),
         psy = toSy(p.y);
       this.darkRT.erase("glow-s", psx - 110, psy - 110);
       for (const [, s] of this.torchSpr) {
         const sx = toSx(s.x),
           sy = toSy(s.y);
-        if (
-          sx > -200 &&
-          sy > -200 &&
-          sx < this.scale.width + 200 &&
-          sy < this.scale.height + 200
-        )
+        if (sx > -200 && sy > -200 && sx < rtW + 200 && sy < rtH + 200)
           this.darkRT.erase("glow-l", sx - 190, sy - 190);
       }
       for (const [, e] of this.structSpr) {
         if (e.kind !== "mineshaft") continue;
         const sx = toSx(e.spr.x),
           sy = toSy(e.spr.y); // daylight spills down the shaft
-        if (
-          sx > -200 &&
-          sy > -200 &&
-          sx < this.scale.width + 200 &&
-          sy < this.scale.height + 200
-        )
+        if (sx > -200 && sy > -200 && sx < rtW + 200 && sy < rtH + 200)
           this.darkRT.erase("glow-l", sx - 190, sy - 190);
       }
     } else this.darkRT.setVisible(false);
@@ -2146,7 +2284,9 @@ class Hearth extends Phaser.Scene {
     this.nightRect.setAlpha(
       Phaser.Math.Linear(this.nightRect.alpha, Math.min(target, 0.55), 0.02),
     );
-    this.nightRect.setSize(this.scale.width, this.scale.height);
+    // scrollFactor-0 overlays are still scaled by camera zoom — oversize to stay full-screen
+    const zdiv = this.cameras.main.zoom || 1;
+    this.nightRect.setSize(this.scale.width / zdiv + 8, this.scale.height / zdiv + 8);
 
     // weather visuals depend on which biome the player stands in (none underground)
     const zt = this.tileAt(this.px, this.py);
