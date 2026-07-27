@@ -375,7 +375,6 @@ class Hearth extends Phaser.Scene {
     this.vignetteRect = this.add
       .rectangle(0, 0, 4000, 3000, 0xaa2222)
       .setOrigin(0)
-      .setScrollFactor(0)
       .setDepth(9999)
       .setAlpha(0);
 
@@ -392,6 +391,23 @@ class Hearth extends Phaser.Scene {
   // Task 4: send wear request
   setWear(k: string | null) {
     this.send({ t: "wear", k });
+  }
+
+  // Full-screen FX (weather, night, vignette, mine darkness) live in WORLD space and are
+  // re-anchored to the camera view every frame. Screen-space (scrollFactor 0) breaks under
+  // camera zoom, because Phaser scales such objects about the camera centre — at zoom > 1
+  // an object at (0,0) sized to the canvas no longer covers the visible area.
+  layoutScreenFx() {
+    const wv = this.cameras.main.worldView;
+    const w = Math.ceil(wv.width) + 4, h = Math.ceil(wv.height) + 4;
+    this.vignetteRect.setPosition(wv.x, wv.y).setSize(w, h);
+    this.nightRect.setPosition(wv.x, wv.y).setSize(w, h);
+    this.sandOverlay.setPosition(wv.x, wv.y).setSize(w, h);
+    this.blizOverlay.setPosition(wv.x, wv.y).setSize(w, h);
+    this.rainFx.setPosition(wv.x, wv.y);
+    this.snowFx.setPosition(wv.x, wv.y);
+    this.sandFx.setPosition(wv.x, wv.y);
+    this.blizFx.setPosition(wv.x, wv.y);
   }
 
   // keep the visible world area capped at VIEW_W x VIEW_H regardless of page zoom / window size
@@ -513,7 +529,6 @@ class Hearth extends Phaser.Scene {
     this.darkRT = this.add
       .renderTexture(0, 0, this.scale.width, this.scale.height)
       .setOrigin(0)
-      .setScrollFactor(0)
       .setDepth(999993)
       .setVisible(false);
   }
@@ -547,7 +562,6 @@ class Hearth extends Phaser.Scene {
         alpha: { min: 0.4, max: 0.8 },
         emitting: false,
       })
-      .setScrollFactor(0)
       .setDepth(999995);
     this.snowFx = this.add
       .particles(0, 0, "fx-snow", {
@@ -561,7 +575,6 @@ class Hearth extends Phaser.Scene {
         scale: { min: 0.4, max: 1 },
         emitting: false,
       })
-      .setScrollFactor(0)
       .setDepth(999995);
     this.sandFx = this.add
       .particles(0, 0, "fx-sand", {
@@ -574,12 +587,10 @@ class Hearth extends Phaser.Scene {
         alpha: { min: 0.3, max: 0.7 },
         emitting: false,
       })
-      .setScrollFactor(0)
       .setDepth(999995);
     this.sandOverlay = this.add
       .rectangle(0, 0, 4000, 3000, 0xcc8833)
       .setOrigin(0)
-      .setScrollFactor(0)
       .setDepth(999994)
       .setAlpha(0);
     // blizzard: hard diagonal snow driven by wind + white-out haze
@@ -596,12 +607,10 @@ class Hearth extends Phaser.Scene {
         rotate: 17,
         emitting: false,
       })
-      .setScrollFactor(0)
       .setDepth(999995);
     this.blizOverlay = this.add
       .rectangle(0, 0, 4000, 3000, 0xdce8f5)
       .setOrigin(0)
-      .setScrollFactor(0)
       .setDepth(999994)
       .setAlpha(0);
   }
@@ -1772,7 +1781,6 @@ class Hearth extends Phaser.Scene {
     this.nightRect = this.add
       .rectangle(0, 0, this.scale.width, this.scale.height, 0x0a0a2e)
       .setOrigin(0)
-      .setScrollFactor(0)
       .setDepth(999990)
       .setAlpha(0);
 
@@ -2242,14 +2250,13 @@ class Hearth extends Phaser.Scene {
     // mine darkness: black veil with light pools around you, torches and the shaft
     if (this.z === 1) {
       const cam = this.cameras.main;
-      // the RT has scrollFactor 0, so Phaser scales it BY the camera zoom: size it in
-      // pre-zoom space and map world→RT coords without a zoom factor, or the light
-      // pools drift away from their sources as zoom changes.
-      const zoom = cam.zoom || 1;
-      const rtW = Math.ceil(this.scale.width / zoom) + 8;
-      const rtH = Math.ceil(this.scale.height / zoom) + 8;
+      // world-space overlay anchored to the camera view: light pools map 1:1 with world coords
+      const wv0 = cam.worldView;
+      const rtW = Math.ceil(wv0.width) + 8;
+      const rtH = Math.ceil(wv0.height) + 8;
       if (this.darkRT.width !== rtW || this.darkRT.height !== rtH)
         this.darkRT.setSize(rtW, rtH);
+      this.darkRT.setPosition(wv0.x, wv0.y);
       this.darkRT.setVisible(true).clear();
       this.darkRT.fill(0x02020a, 0.93);
       const wv = cam.worldView;
@@ -2284,9 +2291,7 @@ class Hearth extends Phaser.Scene {
     this.nightRect.setAlpha(
       Phaser.Math.Linear(this.nightRect.alpha, Math.min(target, 0.55), 0.02),
     );
-    // scrollFactor-0 overlays are still scaled by camera zoom — oversize to stay full-screen
-    const zdiv = this.cameras.main.zoom || 1;
-    this.nightRect.setSize(this.scale.width / zdiv + 8, this.scale.height / zdiv + 8);
+    this.layoutScreenFx();   // keep all full-screen FX pinned to the camera view
 
     // weather visuals depend on which biome the player stands in (none underground)
     const zt = this.tileAt(this.px, this.py);
