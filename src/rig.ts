@@ -111,22 +111,24 @@ export class Rig extends Phaser.GameObjects.Container {
   }
 
   // hurt pose: torso/head rotate away from hit, tint 80 ms (Guide §2.4)
+  hurting = false;
   hurt(ang: number) {
+    if (this.hurting) return;   // overlapping hurts would read a mid-lean as rest → torso twists
+    this.hurting = true;
     const dir = Math.cos(ang) < 0 ? 1 : -1;
     const parts = [this.torso, this.head, this.armL, this.armR, this.legL, this.legR];
     parts.forEach((p) => p.setTintFill(0xff6666));
     // clearTint would wipe the torso's shirt-color tint (body texture is white) — restore it
     setTimeout(() => { parts.forEach((p) => p.clearTint()); this.torso.setTint(this.shirt); }, 80);
-    const origTR = this.torso.rotation, origHR = this.head.rotation;
     this.scene.tweens.addCounter({
       from: 0, to: 1, duration: 200, ease: 'Sine.out',
       onUpdate: (tw) => {
         const v = tw.getValue();
-        const lean = -0.35 * dir * (1 - v);
-        this.torso.rotation = origTR + lean;
-        this.head.rotation = origHR + lean;
+        const lean = -0.35 * dir * (1 - v);   // rest rotation is always 0
+        this.torso.rotation = lean;
+        this.head.rotation = lean;
       },
-      onComplete: () => { this.torso.rotation = origTR; this.head.rotation = origHR; }
+      onComplete: () => { this.torso.rotation = 0; this.head.rotation = 0; this.hurting = false; }
     });
   }
 

@@ -6,6 +6,11 @@
   <title>Echoes of the Hearth</title>
   <style>
     body { margin: 0; background: #111; overflow: hidden; font-family: monospace; }
+    /* --uiz is set from main.ts: keeps the interface a constant on-screen size while the
+       browser page zoom changes (the camera clamps the world view by the same factor). */
+    #hud, #objective, #msg, #quickbar, #btns, #craftPanel, #chestPanel, #devPanel, .modal {
+      zoom: var(--uiz, 1);
+    }
     #hud { position: fixed; top: 8px; left: 8px; color: #fff; background: rgba(0,0,0,.55);
            padding: 8px 12px; border-radius: 6px; font-size: 14px; line-height: 1.6; pointer-events: none; z-index: 10; }
     #objective { position: fixed; top: 8px; right: 8px; max-width: 320px; color: #ffd97a; background: rgba(0,0,0,.55);

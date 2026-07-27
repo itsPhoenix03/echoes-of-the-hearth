@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="52" height="72" viewBox="0 0 52 72">
+<ellipse cx="26" cy="68" rx="18" ry="4.5" fill="#000" opacity="0.35"/>
+<path d="M14 66 l6 -22 M38 66 l-6 -22 M26 68 l0 -24" stroke="#3a2a42" stroke-width="5" stroke-linecap="round"/>
+<path d="M12 44 q-4 -18 14 -22 q18 4 14 22 q-6 8 -14 7 q-8 1 -14 -7 z" fill="#4a2f52"/>
+<path d="M17 41 q-3 -13 9 -16 q12 3 9 16 q-4 6 -9 5.5 q-5 0.5 -9 -5.5 z" fill="#63406e"/>
+<circle cx="26" cy="30" r="8" fill="#1b1020"/>
+<circle cx="26" cy="30" r="6" fill="#ff4ff0" opacity="0.55"/>
+<circle cx="26" cy="30" r="3.4" fill="#ffd0fb"/>
+<circle cx="26" cy="30" r="1.4" fill="#ffffff"/>
+<path d="M18 18 l-5 -13 M26 15 l0 -14 M34 18 l5 -13" stroke="#b96dd6" stroke-width="2.6" stroke-linecap="round"/>
+<circle cx="13" cy="4" r="1.8" fill="#ff8cf5"/>
+<circle cx="26" cy="1.6" r="1.8" fill="#ff8cf5"/>
+<circle cx="39" cy="4" r="1.8" fill="#ff8cf5"/>
+<path d="M12 50 q14 6 28 0" stroke="#2c1c33" fill="none" stroke-width="2.4"/>
+<path d="M20 22 l4 4 M32 22 l-4 4" stroke="#8a5bb0" stroke-width="1.6"/>
+</svg>

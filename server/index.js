@@ -40,6 +40,7 @@ const CRE_TYPES = {
   bog_shambler: [8, 2, 0.22,  2],
   frost_wraith: [2, 1, 0.5,   1],
   drowned:      [1, 1, 0.4,   1],   // early amphibious hunter — punishes hiding in the shallows
+  blight_lancer:[14, 4, 0.13, 1],   // slow, tanky siege caster — its beam one-shots defences
 };
 const CAN_SWIM = new Set(['stalker', 'drowned']);   // only these may chase onto water
 let weather = { kind: null, until: 0 };
@@ -506,6 +507,56 @@ wss.on('connection', (ws) => {
       sendInv(id, p);
     }
 
+    else if (m.t === 'devcmd') {
+      if (!process.env.DEV) return send(ws, { t: 'msg', s: 'Dev mode off — start with: npm run server:dev' });
+      const c = m.cmd;
+      if (c === 'tp' && typeof m.x === 'number' && typeof m.y === 'number') {
+        p.x = m.x; p.y = m.y; p.z = 0; p.b = 0;
+        bcast({ t: 'pos', id, x: p.x, y: p.y, z: 0 });
+        send(ws, { t: 'hp', hp: p.hp, x: p.x, y: p.y });
+      } else if (c === 'mono' && m.i >= 0 && m.i < 4 && !mono[m.i]) {
+        mono[m.i] = true; bcast({ t: 'mono', i: m.i });
+        if (mono.every(Boolean) && !won && !wave) send(ws, { t: 'msg', s: 'All Monoliths lit — build the Engine at the Core.' });
+      } else if (c === 'god') {
+        p.god = !p.god; if (p.god) p.hp = 10;
+        send(ws, { t: 'hp', hp: p.hp, x: p.x, y: p.y });
+        send(ws, { t: 'msg', s: `🛡 God mode ${p.god ? 'ON — you cannot die' : 'OFF'}` });
+      } else if (c === 'wx') {
+        const kinds = ['rain', 'sandstorm', 'snowstorm'];
+        weather.kind = kinds.includes(m.kind) ? m.kind : null;
+        weather.until = weather.kind ? Date.now() + 180000 : 0;   // 3 min for testing
+        bcast({ t: 'wx', kind: weather.kind });
+      } else if (c === 'time' && typeof m.v === 'number') {
+        time = Math.max(0, Math.min(0.999, m.v));   // broadcast automatically by the sim tick
+        send(ws, { t: 'msg', s: `🕐 Time set to ${isNightTime(time) ? 'night' : 'day'}` });
+      } else if (c === 'spawn' && CRE_TYPES[m.type]) {
+        // spawn exactly one of the requested type a few tiles away, on terrain it can occupy
+        const [hb, hs] = CRE_TYPES[m.type];
+        const wantWater = m.type === 'drowned';
+        let sx2 = p.x, sy2 = p.y, found = false;
+        for (let att = 0; att < 40 && !found; att++) {
+          const a2 = Math.random() * Math.PI * 2, r2 = 4 + Math.random() * 4;
+          const cx2 = Math.round(p.x + Math.cos(a2) * r2), cy2 = Math.round(p.y + Math.sin(a2) * r2);
+          if (cx2 <= 0 || cy2 <= 0 || cx2 >= SIZE || cy2 >= SIZE) continue;
+          const isW = world.tiles[ti(cx2, cy2)] === T.WATER;
+          if (wantWater === isW) { sx2 = cx2; sy2 = cy2; found = true; }
+        }
+        const st2 = 1 + mono.filter(Boolean).length;
+        // no homeI → no leash, so the test subject always commits to the chase
+        creatures.set('c' + nextCre++, { x: sx2, y: sy2, hp: hb + hs * st2, type: m.type });
+        send(ws, { t: 'msg', s: `🧪 Spawned ${m.type} (${hb + hs * st2} hp)${found ? '' : ' — no valid tile, placed on you'}` });
+      } else if (c === 'clearcre') {
+        const n = creatures.size;
+        creatures.clear();
+        send(ws, { t: 'msg', s: `🧹 Cleared ${n} monsters` });
+      } else if (c === 'kill') {
+        p.god = false; p.hp = 10; p.z = 0; p.hunger = 10; p.thirst = 10;
+        [p.x, p.y] = respawnPoint(id);
+        send(ws, { t: 'hp', hp: 10, x: p.x, y: p.y });
+        send(ws, { t: 'msg', s: '💀 Killed — respawned.' });
+      }
+    }
+
     else if (m.t === 'usecore') {
       const i = m.i;
       if (i < 0 || i > 3 || mono[i] || p.inv.core < 1) return;
@@ -551,7 +602,7 @@ wss.on('connection', (ws) => {
           bcast({ t: 'sd', i: bsi, hp: 0 });
           sendInv(id, p);
           send(ws, { t: 'msg', s: `Demolished ${s.kind}${back.length ? ' — recovered ' + back.join(', ') : ''}` });
-          if (wave && bsi === wave.engineI) { wave = null; bcast({ t: 'msg', s: 'You destroyed your own World Engine!' }); }
+          if (wave && bsi === wave.engineI) { wave = null; bcast({ t: 'wave', secs: 0 }); bcast({ t: 'msg', s: 'You destroyed your own World Engine!' }); }
         } else bcast({ t: 'sd', i: bsi, hp: s.hp });
         return;
       }
@@ -672,6 +723,9 @@ wss.on('connection', (ws) => {
 // --- sim tick TICK_MS ---
 setInterval(() => {
   tickN++;
+  // dev god mode: heal any protected player back to full each tick (single choke point,
+  // safe because max single hit < 10 so hp never reaches the respawn threshold)
+  for (const gp of players.values()) if (gp.god && gp.hp < 10) { gp.hp = 10; send(gp.ws, { t: 'hp', hp: 10, x: gp.x, y: gp.y }); }
   const prev = time;
   time = (time + (TICK_MS / 1000) / DAY_LENGTH_SEC) % 1;
   if (time < prev) { day++; bcast({ t: 'msg', s: `Day ${day} dawns over The Hearth.` }); }
@@ -717,6 +771,7 @@ setInterval(() => {
     else if (roll > 0.90 && roll <= 0.93) type = 'bog_shambler';
     else if (isNight() && roll < 0.3) type = 'stalker';
     else if (roll >= 0.32 && roll < 0.45) type = 'drowned';   // early-tier share, like crawlers
+    else if (strength >= 2 && roll >= 0.45 && roll < 0.5) type = 'blight_lancer';   // siege caster, mid-game on
     const a = Math.random() * Math.PI * 2, r = Math.random() * 13;
     let sx = CORE[0] + Math.cos(a) * r, sy = CORE[1] + Math.sin(a) * r, ok = true;
     if (type === 'drowned') {
@@ -968,6 +1023,7 @@ setInterval(() => {
             structures.delete(wave.engineI);
             bcast({ t: 'sd', i: wave.engineI, hp: 0 });
             wave = null;
+            bcast({ t: 'wave', secs: 0 });   // stop the client countdown
             bcast({ t: 'msg', s: 'THE WORLD ENGINE WAS DESTROYED! Rebuild it to try again.' });
           } else bcast({ t: 'sd', i: wave.engineI, hp: es.hp });
         }
@@ -1085,10 +1141,51 @@ setInterval(() => {
         if (s.hp <= 0) {
           structures.delete(ni);
           bcast({ t: 'sd', i: ni, hp: 0 });
-          if (wave && ni === wave.engineI) { wave = null; bcast({ t: 'msg', s: 'THE WORLD ENGINE WAS DESTROYED! Rebuild it to try again.' }); }
+          if (wave && ni === wave.engineI) { wave = null; bcast({ t: 'wave', secs: 0 }); bcast({ t: 'msg', s: 'THE WORLD ENGINE WAS DESTROYED! Rebuild it to try again.' }); }
         } else bcast({ t: 'sd', i: ni, hp: s.hp });
       }
     } else { c.x = nx; c.y = ny; }
+
+    // blight lancer: slow siege caster. Its beam reaches players anywhere on land and
+    // ANY defence caught in the way is annihilated in a single shot (the Engine only takes heavy damage).
+    if (c.type === 'blight_lancer' && tickN % 5 === 0) {
+      c.shotCd = Math.max(0, (c.shotCd || 0) - 1);
+      if (c.shotCd === 0) for (const [pid, q] of players) {
+        const d = Math.hypot(q.x - c.x, q.y - c.y);
+        if (q.z !== 0 || d < 1.5 || d > 9) continue;
+        c.shotCd = 4;                                  // ~4s between beams
+        // walk the line: the first blocking structure eats the beam instead of the player
+        let hitI = -1;
+        const steps = Math.ceil(d * 2);
+        for (let st = 1; st <= steps; st++) {
+          const li = ti(c.x + ((q.x - c.x) * st) / steps, c.y + ((q.y - c.y) * st) / steps);
+          const ls = structures.get(li);
+          if (ls && !DECOR_NONBLOCKING.has(ls.kind) && ls.kind !== 'farmplot') { hitI = li; break; }
+        }
+        const bx = hitI >= 0 ? hitI % SIZE : q.x, by = hitI >= 0 ? (hitI / SIZE) | 0 : q.y;
+        bcast({ t: 'shot', kind: 'lance', fx: +c.x.toFixed(1), fy: +c.y.toFixed(1), tx: +bx.toFixed(1), ty: +by.toFixed(1) });
+        if (hitI >= 0) {
+          const ls = structures.get(hitI);
+          if (ls.kind === 'engine') {                  // never one-shot the finale objective
+            ls.hp -= 20;
+            if (ls.hp <= 0) {
+              structures.delete(hitI); bcast({ t: 'sd', i: hitI, hp: 0 });
+              if (wave && hitI === wave.engineI) { wave = null; bcast({ t: 'wave', secs: 0 }); bcast({ t: 'msg', s: 'THE WORLD ENGINE WAS DESTROYED! Rebuild it to try again.' }); }
+            } else bcast({ t: 'sd', i: hitI, hp: ls.hp });
+          } else {
+            structures.delete(hitI);
+            bcast({ t: 'sd', i: hitI, hp: 0 });
+            bcast({ t: 'msg', s: '⚡ A Blight Lancer\'s beam vaporised a structure!' });
+          }
+        } else {
+          q.hp -= 2;
+          const lAng = Math.atan2(q.y - c.y, q.x - c.x);
+          if (q.hp <= 0) { q.hp = 10; q.z = 0; [q.x, q.y] = respawnPoint(pid); }
+          send(q.ws, { t: 'hp', hp: q.hp, x: q.x, y: q.y, ang: lAng });
+        }
+        break;
+      }
+    }
 
     // brute: lobs a blight bolt at players hiding in water it cannot enter (ranged only, no swimming)
     if (c.type === 'brute' && tickN % 5 === 0) {
