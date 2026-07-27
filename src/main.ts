@@ -2360,6 +2360,7 @@ class Hearth extends Phaser.Scene {
       }
     }
     this.me.setSwim(this.z === 0 && this.swimming);
+    this.me.setSeated(this.z === 0 && this.sailing);   // braced legs + lean while boating
 
     // see-through structures: fade anything standing in front of the player
     if (this.z === 0) {
@@ -2385,6 +2386,7 @@ class Hearth extends Phaser.Scene {
       o.rig.setSwim(
         o.z === 0 && o.b === 0 && this.tileAt(o.wx, o.wy) === T.WATER,
       );
+      o.rig.setSeated(o.z === 0 && o.b > 0);   // server-driven boat state
       if (o.boat) {
         // same hull-bob/wake treatment as the local boat, phase-offset per remote player
         o.boatPhase += dt * 3.2;
