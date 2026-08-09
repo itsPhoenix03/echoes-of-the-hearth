@@ -139,6 +139,9 @@ interface BirdEntry {
 
 class Hearth extends Phaser.Scene {
   ws!: WebSocket;
+  // set by quitToMenu() before the socket is closed, so the onclose handler knows the
+  // disconnect was intentional and must NOT raise the 60s "server down" toast
+  quitting = false;
   id = "";
   world!: {
     tiles: Uint8Array;
@@ -300,6 +303,8 @@ class Hearth extends Phaser.Scene {
   }
 
   create() {
+    activeScene = this;
+    this.quitting = false;
     makePartTextures(this);
     this.makeWeatherFx();
     this.makeGlowTextures();
@@ -318,18 +323,18 @@ class Hearth extends Phaser.Scene {
         this.myName = urlName;
         localStorage.setItem("hearth-name", urlName);
       } else {
-        let stored = localStorage.getItem("hearth-name");
-        if (!stored) {
-          stored = "Keeper-" + Math.floor(1000 + Math.random() * 9000);
-          localStorage.setItem("hearth-name", stored);
-        }
-        this.myName = stored;
+        this.myName = localStorage.getItem("hearth-name") || "Keeper";
       }
       this.send({ t: "hello", tok, name: this.myName });
     };
-    this.ws.onmessage = (e) => this.onMsg(JSON.parse(e.data));
-    this.ws.onclose = () =>
+    this.ws.onmessage = (e) => {
+      if (this.quitting) return;
+      this.onMsg(JSON.parse(e.data));
+    };
+    this.ws.onclose = () => {
+      if (this.quitting) return; // intentional quit — stay silent
       showMsg("Disconnected. Is the server running? (npm run server)", 60000);
+    };
 
     this.keys = this.input.keyboard!.addKeys(
       "W,A,S,D,UP,LEFT,DOWN,RIGHT,E,SPACE",
@@ -371,34 +376,11 @@ class Hearth extends Phaser.Scene {
     this.input.on("pointerdown", (ptr: Phaser.Input.Pointer) =>
       this.onClick(ptr),
     );
-    const uiApi = initUI(
-      (r) => this.send({ t: "craft", r }),
-      (k) => this.setPlacing(k),
-      (k) => this.send({ t: "use", k }),
-      (k) => this.setEquip(k),
-      (k) => this.setWear(k),
-      (k) => {
-        // TASK 4a: toggle selected vehicle — but never from the water: boats launch from shore
-        if (this.swimming || this.sailing) {
-          showMsg(
-            "You cannot ready a boat in the water — reach land first!",
-            2500,
-          );
-          return;
-        }
-        this.selectedVehicle = this.selectedVehicle === k ? null : k;
-        showMsg(
-          this.selectedVehicle
-            ? `⛵ ${NAMES[k]} selected — walk into the sea to sail.`
-            : "Vehicle deselected. You will swim.",
-          2000,
-        );
-      },
-      (i, res, n) => this.send({ t: "chest_move", i, res, n }),
-      (medicId, offerId) =>
-        this.send({ t: "medic", medicId, action: "accept", offerId }),
-      (medicId) => this.send({ t: "medic", medicId, action: "decline" }),
-    );
+    // initUI() registers delegated listeners on #inv/#quickbar/#craftPanel/#chestPanel/#medicPanel
+    // and on document keydown. Those elements survive a quit, so calling it again on re-join would
+    // double-register every one of them (craft firing twice, etc). It is therefore built exactly
+    // once per page and its callbacks are routed to whichever scene is currently live.
+    const uiApi = getUiApi();
     this.updateUI = uiApi;
     this.uiApi = uiApi;
     showMsg("Connecting to The Hearth...");
@@ -1905,6 +1887,10 @@ class Hearth extends Phaser.Scene {
       W + PAD * 2 * TW,
       H + 160 + PAD * 2 * TH,
     );
+    // establish the clamped baseline on first load — without this the opening view sits at
+    // Phaser's default zoom of 1 (and --uiz unset), so entering a mine was the FIRST time the
+    // clamp ever applied and surfacing could never look like the view you started with
+    this.applyViewClamp(0);
 
     this.ensureChunks();
     this.nightRect = this.add
@@ -2776,11 +2762,181 @@ class Hearth extends Phaser.Scene {
   }
 }
 
-new Phaser.Game({
-  type: Phaser.AUTO,
-  width: window.innerWidth,
-  height: window.innerHeight,
-  backgroundColor: "#3a7bd5",
-  scene: Hearth,
-  scale: { mode: Phaser.Scale.RESIZE },
+/* ─────────────────────────── game lifecycle ───────────────────────────
+ * A page can boot the world, quit back to the menu, and boot it again any number of
+ * times. Everything that outlives a single Phaser.Game lives here and is either reused
+ * (the DOM UI wiring) or explicitly torn down (socket, audio context, dev panel).
+ * `localStorage['hearth-tok']` is deliberately never touched — it is the save key.
+ */
+
+let gameStarted = false;
+let game: Phaser.Game | null = null;
+/** the scene of the currently running game; UI callbacks route through this */
+let activeScene: Hearth | null = null;
+let uiApiSingleton: ReturnType<typeof initUI> | null = null;
+
+/** In-game DOM that must disappear when the player returns to the menu. */
+const GAME_DOM_IDS = [
+  "hud",
+  "objective",
+  "msg",
+  "quickbar",
+  "btns",
+  "craftPanel",
+  "chestPanel",
+  "medicPanel",
+];
+
+function gameDomEls(): HTMLElement[] {
+  const els: HTMLElement[] = [];
+  for (const id of GAME_DOM_IDS) {
+    const el = document.getElementById(id);
+    if (el) els.push(el);
+  }
+  // any open in-game modal (#invModal, #helpModal, …) — never one belonging to the menu
+  document.querySelectorAll<HTMLElement>(".modal").forEach((m) => {
+    if (!m.closest("#menu")) els.push(m);
+  });
+  return els;
+}
+
+/**
+ * Built once per page — see the note at the call site in create(). The callbacks read
+ * `activeScene` at call time instead of closing over one scene instance, so a re-joined
+ * world drives the same DOM without re-registering a single listener.
+ */
+function getUiApi(): ReturnType<typeof initUI> {
+  if (uiApiSingleton) return uiApiSingleton;
+  uiApiSingleton = initUI(
+    (r) => activeScene?.send({ t: "craft", r }),
+    (k) => activeScene?.setPlacing(k),
+    (k) => activeScene?.send({ t: "use", k }),
+    (k) => activeScene?.setEquip(k),
+    (k) => activeScene?.setWear(k),
+    (k) => {
+      const s = activeScene;
+      if (!s) return;
+      // TASK 4a: toggle selected vehicle — but never from the water: boats launch from shore
+      if (s.swimming || s.sailing) {
+        showMsg("You cannot ready a boat in the water — reach land first!", 2500);
+        return;
+      }
+      s.selectedVehicle = s.selectedVehicle === k ? null : k;
+      showMsg(
+        s.selectedVehicle
+          ? `⛵ ${NAMES[k]} selected — walk into the sea to sail.`
+          : "Vehicle deselected. You will swim.",
+        2000,
+      );
+    },
+    (i, res, n) => activeScene?.send({ t: "chest_move", i, res, n }),
+    (medicId, offerId) =>
+      activeScene?.send({ t: "medic", medicId, action: "accept", offerId }),
+    (medicId) => activeScene?.send({ t: "medic", medicId, action: "decline" }),
+  );
+  return uiApiSingleton;
+}
+
+/**
+ * Leave the world and hand control back to the main menu.
+ * Teardown order matters: quiesce the socket before the game dies (so no message can
+ * reach a half-destroyed scene), then the game, then the DOM.
+ */
+export function quitToMenu(opts: { confirm?: boolean } = {}) {
+  if (!gameStarted) return;
+  if (opts.confirm !== false && !confirm("Leave the world and return to the main menu?"))
+    return;
+
+  const sc = activeScene;
+
+  // 1. Let ui.ts drop its own panel/selection state through the handler it already owns
+  //    (no import coupling): its Escape branch closes the modals + chest and clears any
+  //    pending placement. Phaser's own keydown-ESC (setPlacing(null)) also sees this and
+  //    clears the placement ghost — both while the scene is still alive.
+  document.dispatchEvent(
+    new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+  );
+  uiApiSingleton?.closeChest();
+
+  // 2. Socket down, silently. Handlers are nulled *and* the scene flag is set, so neither
+  //    a late frame nor the close event can raise the "Disconnected" toast.
+  if (sc) {
+    sc.quitting = true;
+    const ws = sc.ws;
+    if (ws) {
+      ws.onopen = null;
+      ws.onmessage = null;
+      ws.onclose = null;
+      ws.onerror = null;
+      try {
+        if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)
+          ws.close(1000, "quit");
+      } catch {
+        /* already closing */
+      }
+    }
+    // 3. Web Audio is not owned by Phaser: without this every re-join opens another
+    //    AudioContext (browsers cap these) and the old weather loops keep running.
+    try {
+      const a = sc.audio;
+      if (a?.started && a.ctx && a.ctx.state !== "closed")
+        a.ctx.close().catch(() => {});
+    } catch {
+      /* context already gone */
+    }
+  }
+
+  // 4. Kill the game: scene systems, tweens, scene timers, the RESIZE listener the
+  //    ScaleManager owns, the keyboard plugin's window listeners and the canvas.
+  if (game) {
+    const g = game;
+    game = null;
+    g.destroy(true, false);
+    // destroy() is deferred to the next frame; run it now so a fast re-join can never
+    // overlap two live Phaser.Game instances. runDestroy() clears pendingDestroy itself,
+    // so the game loop's own deferred call becomes a no-op. (Both are internal-only in
+    // the Phaser typings, hence the cast.)
+    const gi = g as unknown as { pendingDestroy: boolean; runDestroy(): void };
+    if (gi.pendingDestroy) gi.runDestroy();
+  }
+  activeScene = null;
+
+  // 5. The dev panel is created by the scene with document.body.appendChild and a click
+  //    listener bound to that scene — leaving it in the DOM would both leak and make
+  //    buildDevPanel() short-circuit on re-join, wiring F10 to a dead scene.
+  document.getElementById("devPanel")?.remove();
+
+  // 6. Cancel any in-flight showMsg timer (e.g. a long error toast) and hide the HUD.
+  showMsg("", 1);
+  for (const el of gameDomEls()) el.style.display = "none";
+
+  // 7. The camera clamp counter-scales the DOM; the menu must not inherit that factor.
+  document.documentElement.style.setProperty("--uiz", "1");
+
+  // 8. Allow startGame() to boot a fresh world, then let the menu take over.
+  gameStarted = false;
+  window.dispatchEvent(new Event("hearth:quit"));
+}
+
+// Delegated so it survives the menu re-rendering the #btns row, and so it can only ever
+// be registered once no matter how many times the world is entered.
+document.addEventListener("click", (e) => {
+  const t = e.target as HTMLElement | null;
+  if (t?.closest?.("#quitBtn")) quitToMenu();
 });
+
+export function startGame() {
+  if (gameStarted) return;
+  gameStarted = true;
+  // Restore whatever the previous quit hid; CSS supplies each element's real default
+  // (flex for #btns, none for the panels/modals).
+  for (const el of gameDomEls()) el.style.display = "";
+  game = new Phaser.Game({
+    type: Phaser.AUTO,
+    width: window.innerWidth,
+    height: window.innerHeight,
+    backgroundColor: "#3a7bd5",
+    scene: Hearth,
+    scale: { mode: Phaser.Scale.RESIZE },
+  });
+}
