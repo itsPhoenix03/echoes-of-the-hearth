@@ -1,5 +1,8 @@
 // Shared game definitions — recipes, nodes, structures. Used by client UI and server validation.
 
+export const MAX_HP = 10;
+export const MEDICINE_HEAL = 3;
+
 export const NODE_KEYS = ['tree', 'boulder', 'bush', 'stone', 'crystal', 'starmetal'];
 export const NODE = { TREE: 0, BOULDER: 1, BUSH: 2, STONE: 3, CRYSTAL: 4, STARMETAL: 5 };
 // [hp, tool required (null=hand), yield resource, yield amount, respawn seconds]
@@ -46,6 +49,7 @@ export const RECIPES = {
   farmplot:     { cost: { wood: 4, fiber: 2 }, station: null, place: true },
   // --- consumables ---
   bread:        { cost: { grain: 2 }, station: 'campfire' },
+  medicine:     { cost: { fiber: 4, water: 1 }, station: 'campfire' },
 };
 
 export const NAMES = {
@@ -63,7 +67,7 @@ export const NAMES = {
   // farming
   farmplot: 'Farm Plot', grain: 'Grain', glowcap: 'Glowcap',
   // consumables
-  bread: 'Bread',
+  bread: 'Bread', medicine: 'Herbal Medicine',
 };
 export const FURNITURE = new Set(['chest', 'bed', 'torch', 'reed_vase', 'rug', 'trophy_antler', 'banner', 'lantern']);   // placeable only inside shelters (torch also in mines)
 
@@ -78,6 +82,33 @@ export const CROPS = {
   glowcap: { seedCost: { essence: 1 },  growTicks: 2700, yield: { glowcap: 2 } },
 };
 
-export const emptyInv = () => ({ wood: 0, stone: 0, fiber: 0, crystal: 0, essence: 0, iron: 0, diamond: 0, starmetal: 0, water: 0, meat: 0, cookedmeat: 0, wall: 0, campfire: 0, workbench: 0, forge: 0, engine: 0, core: 0, mineshaft: 0, shelter: 0, boat: 0, sboat: 0, torch: 0, chest: 0, bed: 0, banner: 0, stone_path: 0, lantern: 0, reed_vase: 0, rug: 0, trophy_antler: 0, fence: 0, farmplot: 0, grain: 0, glowcap: 0, bread: 0 });
+export const emptyInv = () => ({ wood: 0, stone: 0, fiber: 0, crystal: 0, essence: 0, iron: 0, diamond: 0, starmetal: 0, water: 0, meat: 0, cookedmeat: 0, wall: 0, campfire: 0, workbench: 0, forge: 0, engine: 0, core: 0, mineshaft: 0, shelter: 0, boat: 0, sboat: 0, torch: 0, chest: 0, bed: 0, banner: 0, stone_path: 0, lantern: 0, reed_vase: 0, rug: 0, trophy_antler: 0, fence: 0, farmplot: 0, grain: 0, glowcap: 0, bread: 0, medicine: 0 });
+
+// island id -> weighted resource pool a medic on that island may request in a bargain.
+// Only 'woods' and 'spire' host a medic in this release; 'dunes'/'marsh' are kept for a later expansion.
+export const MEDIC_TRADE_POOLS = {
+  woods: [
+    { resource: 'wood',  min: 6, max: 10, weight: 4 },
+    { resource: 'fiber', min: 4, max: 7,  weight: 4 },
+    { resource: 'stone', min: 3, max: 5,  weight: 2 },
+    { resource: 'meat',  min: 1, max: 2,  weight: 2 },
+  ],
+  dunes: [
+    { resource: 'stone', min: 5, max: 8,  weight: 5 },
+    { resource: 'meat',  min: 1, max: 2,  weight: 3 },
+    { resource: 'iron',  min: 1, max: 2,  weight: 1 },
+  ],
+  spire: [
+    { resource: 'stone',   min: 4, max: 7, weight: 3 },
+    { resource: 'crystal', min: 1, max: 3, weight: 5 },
+    { resource: 'meat',    min: 1, max: 2, weight: 2 },
+    { resource: 'iron',    min: 1, max: 2, weight: 1 },
+  ],
+  marsh: [
+    { resource: 'fiber',   min: 5, max: 8, weight: 5 },
+    { resource: 'crystal', min: 1, max: 2, weight: 2 },
+    { resource: 'meat',    min: 1, max: 2, weight: 3 },
+  ],
+};
 export const canAfford = (inv, cost) => Object.entries(cost).every(([k, v]) => inv[k] >= v);
 export const pay = (inv, cost) => Object.entries(cost).forEach(([k, v]) => inv[k] -= v);

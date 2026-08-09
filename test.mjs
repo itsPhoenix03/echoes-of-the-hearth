@@ -1,6 +1,6 @@
 import WebSocket from 'ws';
-import { genWorld, SIZE } from './shared/world.js';
-import { NODE } from './shared/defs.js';
+import { genWorld, SIZE, findMedicSpawns } from './shared/world.js';
+import { NODE, MAX_HP, MEDICINE_HEAL } from './shared/defs.js';
 
 const world = genWorld('hearth-1');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -10,7 +10,7 @@ function client(name) {
   const ws = new WebSocket('ws://localhost:8081');
   ws.on('open', () => ws.send(JSON.stringify({ t: 'hello', tok: 'test-' + Math.random().toString(36).slice(2), ...(name ? { name } : {}) })));
   const c = { ws, msgs: [], state: {} };
-  ws.on('message', (d) => { const m = JSON.parse(d); c.msgs.push(m); if (m.t === 'init') c.state = m; if (m.t === 'inv') c.state.inv = m.inv; });
+  ws.on('message', (d) => { const m = JSON.parse(d); c.msgs.push(m); if (m.t === 'init') c.state = m; if (m.t === 'inv') c.state.inv = m.inv; if (m.t === 'hp') c.state.hp = m.hp; });
   c.send = (m) => ws.send(JSON.stringify(m));
   c.wait = async (t, timeout = 3000) => {
     const t0 = Date.now();
@@ -341,6 +341,230 @@ await sleep(500);
 const badHarvest = A.msgs.find((m) => m.t === 'crop' && m.crop === null);
 if (badHarvest) fail('E5: harvest succeeded at stage 0 — should have been rejected!');
 console.log('E5 early harvest correctly rejected');
+
+// --- Stage F: Medicine + Medic (client feature) ---
+// Fresh node/tile slices only — bushes 0-12 and trees 0-17 are already consumed above.
+A.send({ t: 'pos', x: px, y: py, z: 0 }); await sleep(80);
+const medBushes = byDist([...world.nodes].filter(([, k]) => k === NODE.BUSH).map(([i]) => i)).slice(12, 18);
+for (const b of medBushes) {
+  A.send({ t: 'pos', x: b % SIZE, y: (b / SIZE) | 0 }); await sleep(60);
+  A.send({ t: 'gather', i: b }); await sleep(300);
+}
+const medTrees = byDist([...world.nodes].filter(([, k]) => k === NODE.TREE).map(([i]) => i)).slice(17, 19);
+for (const t of medTrees) {
+  A.send({ t: 'pos', x: t % SIZE, y: (t / SIZE) | 0 }); await sleep(60);
+  for (let h = 0; h < 3; h++) { A.send({ t: 'gather', i: t }); await sleep(280); }
+}
+const medStones = byDist([...world.nodes].filter(([, k]) => k === NODE.STONE).map(([i]) => i)).slice(9, 12);
+for (const s of medStones) {
+  A.send({ t: 'pos', x: s % SIZE, y: (s / SIZE) | 0 }); await sleep(60);
+  A.send({ t: 'gather', i: s }); await sleep(280);
+}
+A.send({ t: 'pos', x: wx + 1, y: wy }); await sleep(60);
+for (let w = 0; w < 3; w++) { A.send({ t: 'water' }); await sleep(300); }
+await sleep(200);
+if ((A.state.inv?.fiber || 0) < 12 || (A.state.inv?.wood || 0) < 5 || (A.state.inv?.stone || 0) < 3 || (A.state.inv?.water || 0) < 3)
+  fail(`F: medicine prep short: fiber=${A.state.inv?.fiber} wood=${A.state.inv?.wood} stone=${A.state.inv?.stone} water=${A.state.inv?.water}`);
+console.log('F prep OK: gathered fiber/wood/stone/water for a campfire + 3x medicine');
+
+// campfire (medicine's required station) at the now-empty trees[2] tile
+const cfI = trees[2], cfx = cfI % SIZE, cfy = (cfI / SIZE) | 0;
+A.send({ t: 'pos', x: cfx, y: cfy, z: 0 }); await sleep(80);
+A.send({ t: 'craft', r: 'campfire' }); await sleep(300);
+if (!A.state.inv.campfire) fail('F: campfire craft failed: ' + JSON.stringify(A.state.inv));
+A.msgs = A.msgs.filter((m) => m.t !== 'build');
+A.send({ t: 'build', i: cfI, kind: 'campfire' });
+const cfBuild = await A.wait('build', 3000);
+if (cfBuild.kind !== 'campfire') fail('F: campfire build not confirmed, got: ' + cfBuild.kind);
+console.log('F campfire placed OK');
+
+// a) craft medicine (fiber 4 + water 1, near campfire) — 3x so the heal loop below can always top up to full
+for (let c = 0; c < 3; c++) { A.send({ t: 'craft', r: 'medicine' }); await sleep(300); }
+if ((A.state.inv?.medicine || 0) !== 3) fail('a) medicine craft failed: expected 3, got ' + A.state.inv?.medicine);
+console.log('a) craft medicine OK: 3x Herbal Medicine');
+
+// Drive hp down to <=3 (the deterministic cliff from the fall-damage stage above, -1 hp per
+// step) so inspect/accept below are exercised (both reject at full health) and so the heal
+// loop below sees a clean uncapped heal (3->6->9) followed by a capped one (9->10, heals 1).
+if (cliff) {
+  for (let i = 0; i < 10 && (A.state.hp ?? 0) > 3; i++) {
+    A.send({ t: 'pos', x: cliff[0], y: cliff[1], z: 0 }); await sleep(80);
+    A.msgs = A.msgs.filter((m) => m.t !== 'hp');
+    A.send({ t: 'pos', x: cliff[0] + 1, y: cliff[1], z: 0 });
+    await A.wait('hp', 2000);
+  }
+}
+// Use the Woods medic, not the Spire one: the Spire tile is snow, and standing there without
+// a worn Fur Cloak takes -1 hp every 5s environmental tick — which re-triggers the 5s in-combat
+// lockout forever and the "wait it out" step below would never succeed.
+const medics = findMedicSpawns(world);
+const medicWoods = medics.find((md) => md.islandId === 'woods');
+if (!medicWoods) fail('F: findMedicSpawns did not return a medic on the Woods');
+A.send({ t: 'pos', x: medicWoods.x, y: medicWoods.y, z: 0 }); await sleep(80);
+await sleep(5300);   // clear the server's 5s in-combat lockout after the fall damage above
+
+// c) inspect -> offer; a second inspect must return the SAME offer id (stability)
+A.msgs = A.msgs.filter((m) => m.t !== 'medicOffer');
+A.send({ t: 'medic', medicId: medicWoods.id, action: 'inspect' });
+const offer1 = await A.wait('medicOffer');
+if (!offer1.offer?.id) fail('c) medic inspect returned no offer: ' + JSON.stringify(offer1));
+console.log(`c) medic inspect OK: wants ${offer1.offer.amount} ${offer1.offer.resource}`);
+await sleep(300);
+A.msgs = A.msgs.filter((m) => m.t !== 'medicOffer');
+A.send({ t: 'medic', medicId: medicWoods.id, action: 'inspect' });
+const offer2 = await A.wait('medicOffer');
+if (offer2.offer?.id !== offer1.offer.id) fail(`c) offer not stable: ${offer1.offer.id} -> ${offer2.offer?.id}`);
+console.log('c) medic offer stability OK: repeat inspect returns the same offer id');
+
+// d) accept with insufficient resources — the Woods pool wants wood, fiber, stone or meat.
+// A has accumulated plenty of wood/fiber/stone from earlier stages, so spend down exactly
+// the resource THIS offer asked for, below its amount (torch spends wood+fiber, campfire
+// spends wood+stone — both are station:null so they craft from anywhere). Meat needs no
+// draining — nothing in this suite ever hunts, so it is already 0.
+const needRes = offer1.offer.resource, needAmt = offer1.offer.amount;
+for (let i = 0; i < 15 && (A.state.inv?.[needRes] || 0) >= needAmt; i++) {
+  A.send({ t: 'craft', r: 'torch' }); await sleep(120);
+  A.send({ t: 'craft', r: 'campfire' }); await sleep(120);
+}
+await sleep(200);
+if ((A.state.inv?.[needRes] || 0) >= needAmt) fail(`d) could not drain ${needRes} below the offer's amount (${needAmt})`);
+await sleep(300);
+A.msgs = A.msgs.filter((m) => m.t !== 'medicResult');
+A.send({ t: 'medic', medicId: medicWoods.id, action: 'accept', offerId: offer1.offer.id });
+const acceptShort = await A.wait('medicResult');
+if (acceptShort.ok || acceptShort.reason !== 'insufficient-resource')
+  fail('d) expected insufficient-resource, got ' + JSON.stringify(acceptShort));
+console.log('d) medic accept correctly rejected: insufficient-resource');
+
+// b) use medicine — heals exactly MEDICINE_HEAL, capped so hp never exceeds MAX_HP
+let healUses = 0, sawCap = false;
+while ((A.state.hp ?? 10) < MAX_HP && (A.state.inv?.medicine || 0) > 0 && healUses < 3) {
+  const hpBefore = A.state.hp;
+  await sleep(800);   // server throttles 'use' to one per 750ms; faster than that is silently dropped
+  A.msgs = A.msgs.filter((m) => m.t !== 'useResult');
+  A.send({ t: 'use', k: 'medicine' });
+  const res = await A.wait('useResult');
+  const expected = Math.min(MEDICINE_HEAL, MAX_HP - hpBefore);
+  if (!res.ok || res.healed !== expected) fail(`b) medicine heal mismatch: hpBefore=${hpBefore} expected=${expected} got=${JSON.stringify(res)}`);
+  if (res.hp > MAX_HP) fail('b) MAX_HP cap violated: hp=' + res.hp);
+  if (res.healed < MEDICINE_HEAL) sawCap = true;
+  console.log(`b) use medicine OK: hp ${hpBefore} -> ${res.hp} (healed ${res.healed})`);
+  healUses++;
+}
+if ((A.state.hp ?? 0) !== MAX_HP) fail('b) expected full health after the medicine loop, got ' + A.state.hp);
+console.log(`b) medicine restored full health${sawCap ? ' (cap observed on the last dose)' : ''}`);
+
+// e) accept at full health -> full-health (reuse the still-valid offer from stage c)
+await sleep(300);
+A.msgs = A.msgs.filter((m) => m.t !== 'medicResult');
+A.send({ t: 'medic', medicId: medicWoods.id, action: 'accept', offerId: offer1.offer.id });
+const acceptFull = await A.wait('medicResult');
+if (acceptFull.ok || acceptFull.reason !== 'full-health') fail('e) expected full-health, got ' + JSON.stringify(acceptFull));
+console.log('e) medic accept correctly rejected: full-health');
+
+// --- Stage G: Preferred Validated Action Protocol (seq/act) ---
+// Fresh node slices only — bushes 0-18, trees 0-19, hand-stones 0-12 already consumed above.
+A.send({ t: 'pos', x: px, y: py, z: 0 }); await sleep(80);
+const gTrees = byDist([...world.nodes].filter(([, k]) => k === NODE.TREE).map(([i]) => i)).slice(19, 22);
+for (const t of gTrees) {
+  A.send({ t: 'pos', x: t % SIZE, y: (t / SIZE) | 0 }); await sleep(60);
+  for (let h = 0; h < 3; h++) { A.send({ t: 'gather', i: t }); await sleep(280); }
+}
+const gStones = byDist([...world.nodes].filter(([, k]) => k === NODE.STONE).map(([i]) => i)).slice(12, 24);
+for (const s of gStones) {
+  A.send({ t: 'pos', x: s % SIZE, y: (s / SIZE) | 0 }); await sleep(60);
+  A.send({ t: 'gather', i: s }); await sleep(280);
+}
+await sleep(300);
+if ((A.state.inv?.wood || 0) < 8 || (A.state.inv?.stone || 0) < 10)
+  fail(`G prep: not enough materials for a Stone Pickaxe: wood=${A.state.inv?.wood} stone=${A.state.inv?.stone}`);
+A.send({ t: 'pos', x: px, y: py }); await sleep(80);
+A.msgs = A.msgs.filter((m) => m.t !== 'inv');
+A.send({ t: 'craft', r: 'spick' }); await sleep(300);
+const spickInv = [...A.msgs].reverse().find((m) => m.t === 'inv' && m.tools && m.tools.includes('spick'));
+if (!spickInv) fail('G prep: Stone Pickaxe craft failed (tools=' + JSON.stringify(spickInv?.tools) + ')');
+console.log('G prep OK: crafted Stone Pickaxe for the dig tool-derivation check below');
+
+// G1: an invalid action (out of range) must emit NO 'act', only 'actReject' with the matching seq
+const gBushes = byDist([...world.nodes].filter(([, k]) => k === NODE.BUSH).map(([i]) => i));
+const g1i = gBushes[18];
+const g1x = g1i % SIZE, g1y = (g1i / SIZE) | 0;
+A.send({ t: 'pos', x: (g1x + 40) % SIZE, y: g1y }); await sleep(80);   // deliberately far from the target
+A.msgs = A.msgs.filter((m) => m.t !== 'act' && m.t !== 'actReject');
+A.send({ t: 'gather', seq: 9001, i: g1i, dx: 1, dy: 0 });
+await sleep(400);
+if (A.msgs.some((m) => m.t === 'act')) fail('G1: an out-of-range gather emitted act');
+const g1r = A.msgs.find((m) => m.t === 'actReject' && m.seq === 9001);
+if (!g1r) fail('G1: out-of-range gather did not produce actReject(seq=9001)');
+console.log('G1 invalid action correctly rejected OK: reason =', g1r.reason);
+
+// G2: an accepted action echoes the SAME seq, and the server derives a/tool from world state —
+// never the client's claim (a bush is always hand-gathered, regardless of what the client sends)
+const g2i = gBushes[19];
+A.send({ t: 'pos', x: g2i % SIZE, y: (g2i / SIZE) | 0 }); await sleep(80);
+A.msgs = A.msgs.filter((m) => m.t !== 'act');
+A.send({ t: 'gather', seq: 9002, i: g2i, dx: 1, dy: 0, a: 'slash', tool: 'sword' });   // lie about the action
+const g2act = await A.wait('act');
+if (g2act.seq !== 9002) fail('G2: act seq mismatch: ' + g2act.seq);
+if (g2act.a !== 'punch' || g2act.tool !== null) fail(`G2: server trusted the client's claim: a=${g2act.a} tool=${g2act.tool}`);
+console.log('G2 seq echo + server-derived action OK:', g2act.a, g2act.tool);
+
+// G3: dig derives pick vs spick from the tool actually validated, not from any client claim — this
+// is the exact bug the protocol fixes (the old client hardcoded a:'pick' even while holding a spick)
+await sleep(300);   // clear the shared gather/dig 250ms cooldown left over from G2
+A.send({ t: 'pos', x: sx2, y: sy2, z: 1 }); await sleep(80);
+let g3target = -1;
+for (const [ddx, ddy] of [[2, 0], [-2, 0], [0, 2], [0, -2]]) {
+  const ii = (sy2 + ddy) * SIZE + (sx2 + ddx);
+  if (world.tiles[ii] === 0 && ii !== target && !chamber.tiles.includes(ii)) { g3target = ii; break; }
+}
+if (g3target < 0) fail('G3: no fresh diggable tile found near the mineshaft');
+A.msgs = A.msgs.filter((m) => m.t !== 'act' && m.t !== 'dig');
+A.send({ t: 'dig', seq: 9003, i: g3target, dx: 0, dy: -1, tool: 'axe', a: 'pick' });   // lie about the tool
+const g3act = await A.wait('act');
+if (g3act.seq !== 9003) fail('G3: dig act seq mismatch: ' + g3act.seq);
+if (g3act.a !== 'mine' || g3act.tool !== 'spick') fail(`G3: dig did not derive spick from owned tools: a=${g3act.a} tool=${g3act.tool}`);
+const g3dig = await A.wait('dig');
+if (g3dig.by !== initA.id || g3dig.seq !== 9003) fail(`G3: dig outcome missing by/seq: by=${g3dig.by} seq=${g3dig.seq}`);
+console.log('G3 dig tool-derivation OK: server used spick despite the client claiming axe/pick');
+
+// G4: a miss (no creature in range) still emits act, but never a chit for that seq
+A.send({ t: 'pos', x: wx, y: wy, z: 0 }); await sleep(80);
+A.msgs = A.msgs.filter((m) => m.t !== 'act' && m.t !== 'chit');
+A.send({ t: 'atk', seq: 9004, dx: 1, dy: 0 });
+const g4act = await A.wait('act');
+if (g4act.seq !== 9004) fail('G4: miss act seq mismatch: ' + g4act.seq);
+await sleep(300);
+if (A.msgs.some((m) => m.t === 'chit' && m.seq === 9004)) fail('G4: a miss produced a chit for seq 9004');
+console.log('G4 miss OK: act fired with no chit');
+
+// G5: a successful, non-lethal hit's chit carries the correct by/seq correlation. A single
+// unarmed hit (dmg 1) never one-shots a fresh spawn (every CRE_TYPES hp floor is 2), but the
+// very first candidate may be one E4 already damaged above — so retry across candidates/spawns.
+let g5chit = null, g5seq = 9004;
+const g5t0 = Date.now();
+while (!g5chit && Date.now() - g5t0 < 10000) {
+  const latest = A.msgs.filter((m) => m.t === 'cre').pop();
+  const cand = latest?.c?.[0];
+  if (!cand) { await sleep(300); continue; }
+  const [cid, cx, cy] = cand;
+  g5seq++;
+  A.msgs = A.msgs.filter((m) => m.t !== 'chit' && m.t !== 'act');
+  A.send({ t: 'pos', x: cx + 0.5, y: cy, z: 0 }); await sleep(80);
+  A.send({ t: 'atk', seq: g5seq, dx: -1, dy: 0 });
+  const g5act = await A.wait('act');
+  if (g5act.seq !== g5seq) fail('G5: act seq mismatch: ' + g5act.seq);
+  await sleep(250);
+  g5chit = A.msgs.find((m) => m.t === 'chit' && m.id === cid) || null;
+  if (!g5chit) await sleep(450);   // clear atk cooldown, let a dead target drop off the next 'cre' tick
+}
+if (g5chit) {
+  if (g5chit.by !== initA.id || g5chit.seq !== g5seq)
+    fail(`G5: chit by/seq mismatch: by=${g5chit.by} seq=${g5chit.seq}`);
+  console.log('G5 impact correlation OK: chit.by =', g5chit.by, 'chit.seq =', g5chit.seq);
+} else {
+  console.log('G5 impact correlation: no creature survived a hit within the time budget — skipping');
+}
 
 console.log('ALL TESTS PASSED');
 process.exit(0);

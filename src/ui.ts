@@ -25,6 +25,7 @@ export interface UIState {
   waveSecs: number;
   engineHp: number | null;
   zone: 'in' | 'out';
+  medicOffer: { medicId: string; offerId: string; resource: string; amount: number; expiresAt: number } | null;
 }
 
 const icon = (k: string) =>
@@ -34,7 +35,7 @@ const icon = (k: string) =>
      iron: '🔩', diamond: '🔷', mineshaft: '🕳', shelter: '🏠', isword: '⚔',
      starmetal: '✨', boat: '🛶', sboat: '🚤', torch: '🕯', chest: '📦', bed: '🛏',
      banner: '🚩', stone_path: '🪨', lantern: '🏮', reed_vase: '🌾', rug: '🟫', trophy_antler: '🦌',
-     fence: '🪵', farmplot: '🌱', grain: '🌾', glowcap: '✨', bread: '🍞' } as any)[k] || '▪';
+     fence: '🪵', farmplot: '🌱', grain: '🌾', glowcap: '✨', bread: '🍞', medicine: '🧪' } as any)[k] || '▪';
 
 const HOTBAR = ['axe', 'pick', 'spick', 'sword', 'isword'];
 const CLOAKS = ['heatcloak', 'furcloak'];
@@ -46,13 +47,17 @@ export function initUI(
   onEquip: (k: string) => void,
   onWear: (k: string | null) => void,
   onVehicle: (k: 'boat' | 'sboat') => void,
-  onChestMove: (i: number, res: string, n: number) => void
+  onChestMove: (i: number, res: string, n: number) => void,
+  onMedicAccept: (medicId: string, offerId: string) => void,
+  onMedicDecline: (medicId: string) => void
 ) {
   let selected: string | null = null;
   let invSig = '', panelSig = '';
   let chestOpenI = -1;
   let chestSlots: Record<string, number> = {};
   let chestSig = '';
+  let medicOffer: UIState['medicOffer'] = null;
+  let medicSig = '';
 
   const closeChestPanel = () => {
     chestOpenI = -1;
@@ -123,6 +128,13 @@ export function initUI(
     const b = (e.target as HTMLElement).closest('button') as HTMLButtonElement | null;
     if (b && !b.disabled && b.dataset.r) onCraft(b.dataset.r);
   });
+  // Delegated medic panel buttons — same rebuild-safe pattern as craftPanel/chestPanel above.
+  $('medicPanel').addEventListener('click', (e) => {
+    const b = (e.target as HTMLElement).closest('button') as HTMLButtonElement | null;
+    if (!b || !medicOffer) return;
+    if (b.dataset.medicAccept !== undefined && !b.disabled) onMedicAccept(medicOffer.medicId, medicOffer.offerId);
+    else if (b.dataset.medicDecline !== undefined) onMedicDecline(medicOffer.medicId);
+  });
 
   // Public surface for chest panel management (called from main.ts)
   const api = {
@@ -175,9 +187,9 @@ export function initUI(
     if (sig !== invSig) {
       invSig = sig;
       let html = RESOURCES.map((r) => `<span class="slot">${icon(r)} ${st.inv[r] || 0}</span>`).join('');
-      for (const k of ['water', 'meat', 'cookedmeat', 'grain', 'glowcap', 'bread'])
+      for (const k of ['water', 'meat', 'cookedmeat', 'grain', 'glowcap', 'bread', 'medicine'])
         if (st.inv[k]) {
-          const useable = ['water', 'cookedmeat', 'glowcap', 'bread'].includes(k);
+          const useable = ['water', 'cookedmeat', 'glowcap', 'bread', 'medicine'].includes(k);
           html += `<span class="slot ${useable ? 'use' : ''}" ${useable ? `data-use="${k}"` : ''}>${icon(k)} ${NAMES[k] || k} ×${st.inv[k]}${useable ? ' (click)' : ''}</span>`;
         }
       for (const k of ['boat', 'sboat', 'torch']) {
@@ -219,6 +231,7 @@ export function initUI(
       if (st.inv.cookedmeat) qb += `<span class="slot use" data-use="cookedmeat">${icon('cookedmeat')}${st.inv.cookedmeat}</span>`;
       if (st.inv.bread) qb += `<span class="slot use" data-use="bread">${icon('bread')}${st.inv.bread}</span>`;
       if (st.inv.glowcap) qb += `<span class="slot use" data-use="glowcap">${icon('glowcap')}${st.inv.glowcap}</span>`;
+      if (st.inv.medicine) qb += `<span class="slot use" data-use="medicine">${icon('medicine')}${st.inv.medicine}</span>`;
       // Task 4: cloaks in quickbar
       for (const t of CLOAKS) {
         if (st.gear.has(t)) {
@@ -251,6 +264,32 @@ export function initUI(
         cHtml += '</table>';
         $('chestPanel').querySelector('.chest-body')!.innerHTML = cHtml;
       }
+    }
+
+    // medic offer panel — rebuild is gated on offer id + affordability (never the countdown),
+    // so the live "expires in Ns" text is patched into an existing node every frame instead
+    // of tearing down the buttons (that pattern is what made the craft panel unclickable once).
+    medicOffer = st.medicOffer;
+    const medicEl = $('medicPanel');
+    if (medicOffer) {
+      medicEl.style.display = 'block';
+      const canPay = (st.inv[medicOffer.resource] || 0) >= medicOffer.amount;
+      const msig = `${medicOffer.medicId}:${medicOffer.offerId}:${canPay}`;
+      if (msig !== medicSig) {
+        medicSig = msig;
+        medicEl.innerHTML =
+          `<b>🩺 A medic's offer</b><br>` +
+          `Full healing for ${icon(medicOffer.resource)} ${medicOffer.amount} ${NAMES[medicOffer.resource] || medicOffer.resource}<br>` +
+          `<span id="medicCountdown" style="color:#9ab;font-size:12px"></span><br><br>` +
+          `<button data-medic-accept ${canPay ? '' : 'disabled'}>Accept</button> ` +
+          `<button data-medic-decline>Decline</button>`;
+      }
+      const secsLeft = Math.max(0, Math.ceil((medicOffer.expiresAt - Date.now()) / 1000));
+      const cdEl = document.getElementById('medicCountdown');
+      if (cdEl) cdEl.textContent = `Expires in ${secsLeft}s`;
+    } else {
+      medicEl.style.display = 'none';
+      medicSig = '';
     }
 
     // craft panel — rebuild only when relevant state changes
