@@ -172,6 +172,8 @@ class Hearth extends Phaser.Scene {
       z: number;
       b: number;
       boat: Phaser.GameObjects.Image | null;
+      boatPhase: number;
+      wakeT: number;
       label: Phaser.GameObjects.Text;
     }
   >();
@@ -206,6 +208,8 @@ class Hearth extends Phaser.Scene {
   swimming = false;
   boatKind = 0;
   boatSpr: Phaser.GameObjects.Image | null = null;
+  boatBobT = 0; // local boat hull-bob phase (visual only — never touches px/py)
+  wakeTimer = 0; // local boat wake-spawn cadence
   selectedVehicle: "boat" | "sboat" | null = null;
   warnedWaterTemp = false;
   decorSpr: Map<number, Phaser.GameObjects.Image> = new Map();
@@ -233,6 +237,7 @@ class Hearth extends Phaser.Scene {
   growlTimer = 1;
   lastSend = 0;
   lastGather = 0;
+  flickerT = 0; // shared clock for campfire/lantern/torch flicker (per-frame, no tweens-per-object)
   ready = false;
   meLabel: Phaser.GameObjects.Text | null = null;
   myName = "Keeper";
@@ -903,8 +908,16 @@ class Hearth extends Phaser.Scene {
       .image(p.x, p.y + 16, tex)
       .setOrigin(0.5, 0.92)
       .setDepth(p.y + 21)
-      .setScale(scale)
+      .setScale(scale * 1.3)
       .setAlpha(alpha);
+    // crop growth pop: brief scale pulse settling into the target stage scale
+    this.tweens.add({
+      targets: s,
+      scaleX: scale,
+      scaleY: scale,
+      duration: 220,
+      ease: "Back.easeOut",
+    });
     this.cropSpr.set(i, s);
   }
 
@@ -943,7 +956,8 @@ class Hearth extends Phaser.Scene {
     for (const e of this.structSpr.values()) {
       e.spr.setAlpha(surfA);
       e.extra.forEach((s) => s.setAlpha(surfA));
-      e.glow?.setAlpha(z === 1 ? 0.03 : 0.13);
+      const glowA2 = z === 1 ? 0.03 : 0.13;
+      e.glow?.setAlpha(glowA2).setData("baseA", glowA2);
     }
     this.monoSpr.forEach((s) => s.setAlpha(surfA));
     for (const s of this.decorSpr.values()) s.setAlpha(surfA);
@@ -1053,6 +1067,8 @@ class Hearth extends Phaser.Scene {
       z: 0,
       b: 0,
       boat: null,
+      boatPhase: Math.random() * 10,
+      wakeT: 0,
       label,
     });
   }
@@ -1470,35 +1486,27 @@ class Hearth extends Phaser.Scene {
             .setOrigin(0.5, 0.9)
             .setVisible(this.z === 0);
           this.creSpr.set(cid, s);
-          if (type === "brute") s.setScale(1.15);
-          if (type === "blight_lancer") s.setScale(1.1);
+          // per-creature gait is driven per-frame from the position-lerp loop in update()
+          // (see creatureGaitTick) instead of one infinite tween per spawned creature —
+          // this also removes the old conflict where the wisp/frost_wraith hover tween and
+          // the lerp loop both wrote sprite.y every frame.
+          let base = 1;
+          if (type === "brute") base = 1.15;
+          if (type === "blight_lancer") base = 1.1;
           if (type === "bog_shambler") {
             s.setTint(0x557755).setData("baseTint", 0x557755);
-            s.setScale(1.3);
+            base = 1.3;
           }
           // drowned has its own art — no tint, so the hit flash can't wipe its colour
           if (type === "frost_wraith") {
             s.setTint(0xbfe8ff).setData("baseTint", 0xbfe8ff);
-            s.setAlpha(0.8);
           }
-          if (type === "wisp" || type === "frost_wraith") {
+          if (type === "wisp" || type === "frost_wraith")
             s.setAlpha(type === "frost_wraith" ? 0.8 : 0.85);
-            this.tweens.add({
-              targets: s,
-              y: "-=6",
-              duration: 900,
-              yoyo: true,
-              repeat: -1,
-              ease: "Sine.inOut",
-            });
-          } else
-            this.tweens.add({
-              targets: s,
-              scaleY: s.scaleY * 0.92,
-              duration: type === "stalker" || type === "husk_wolf" ? 180 : 300,
-              yoyo: true,
-              repeat: -1,
-            });
+          s.setScale(base);
+          s.setData("ctype", type)
+            .setData("gBase", base)
+            .setData("gPhase", Math.random() * 10);
         }
         s.setData("tx", p.x).setData("ty", p.y);
       }
@@ -1597,6 +1605,17 @@ class Hearth extends Phaser.Scene {
         .setDepth(existing.spr.depth + lvl - 1)
         .setFlipX(existing.spr.flipX)
         .setAlpha(this.z !== 0 ? 0.15 : 1);
+      // structure pop-in: new story appears with weight instead of snapping in
+      const stFinalY = s.y;
+      s.setScale(0.6).setY(stFinalY - 12);
+      this.tweens.add({
+        targets: s,
+        scaleX: 1,
+        scaleY: 1,
+        y: stFinalY,
+        duration: 180,
+        ease: "Back.easeOut",
+      });
       existing.extra.push(s);
       return;
     }
@@ -1626,6 +1645,17 @@ class Hearth extends Phaser.Scene {
     }
     if ((kind === "wall" || r?.rot) && dir) spr.setFlipX(true);
     if (this.z === 1) spr.setAlpha(0.15);
+    // structure pop-in: scale 0.6->1 with a small y drop instead of snapping into place
+    const structFinalY = spr.y;
+    spr.setScale(0.6).setY(structFinalY - 12);
+    this.tweens.add({
+      targets: spr,
+      scaleX: 1,
+      scaleY: 1,
+      y: structFinalY,
+      duration: 180,
+      ease: "Back.easeOut",
+    });
     const entry: any = { spr, extra: [], kind, hp, lvl };
     if (kind === "campfire") {
       entry.glow = this.add
@@ -1654,7 +1684,8 @@ class Hearth extends Phaser.Scene {
     // structures placed by OTHER players while we're in a shelter/mine must arrive faded
     const sa = this.z !== 0 ? 0.15 : 1;
     entry.spr.setAlpha(sa);
-    entry.glow?.setAlpha(this.z !== 0 ? 0.03 : 0.1);
+    const glowA = this.z !== 0 ? 0.03 : 0.1;
+    entry.glow?.setAlpha(glowA).setData("baseA", glowA);
     this.structSpr.set(i, entry);
   }
 
@@ -2043,6 +2074,164 @@ class Hearth extends Phaser.Scene {
     this.send({ t: "atk" });
   }
 
+  // Per-creature procedural gait — called once per frame per creature sprite from the
+  // position-lerp loop in update(). Reads/writes only sprite-local data (setData), so no
+  // extra timers or tweens are needed and state is naturally cleared when the sprite is
+  // destroyed via the existing death/removal path.
+  creatureGaitTick(
+    s: Phaser.GameObjects.Sprite,
+    type: string,
+    dt: number,
+    moving: boolean,
+    near: boolean,
+  ) {
+    const base = s.getData("gBase") ?? 1;
+    let phase = s.getData("gPhase") ?? 0;
+    if (type === "crawler" || type === "drowned") {
+      // low, fast squash-stretch bob + a slight forward pitch while moving
+      phase += dt * (moving ? 13 : 4);
+      const bob = Math.sin(phase);
+      s.setScale(base * (1 - bob * 0.06), base * (1 + bob * 0.1));
+      s.setRotation(moving ? Math.sin(phase * 0.5) * 0.06 * (s.flipX ? -1 : 1) : 0);
+    } else if (type === "stalker" || type === "husk_wolf") {
+      // smooth low prowl, faster bob, small crouch when close to the local player
+      phase += dt * (moving ? 9 : 3);
+      const bob = Math.sin(phase);
+      const crouch = near ? 0.86 : 1;
+      s.setScale(base * (1 + bob * 0.02), base * crouch * (1 - Math.abs(bob) * 0.05));
+    } else if (type === "brute" || type === "bog_shambler") {
+      // heavy 2-beat stomp cadence with a footfall dust puff
+      phase += dt * (moving ? 3.2 : 0.5);
+      const beat = Math.abs(Math.sin(phase));
+      s.setScale(base * (1 + (1 - beat) * 0.05), base * (1 - (1 - beat) * 0.13));
+      const footDown = beat < 0.12 ? 1 : 0;
+      if (moving && footDown && !s.getData("gFoot")) this.spawnDust(s.x, s.y + 2);
+      s.setData("gFoot", footDown);
+    } else if (type === "wisp" || type === "frost_wraith") {
+      // continuous hover (additive visual offset only — never written to the lerp base)
+      // plus a slow alpha/scale pulse
+      phase += dt * 1.4;
+      s.setData("gHoverY", Math.sin(phase) * 6);
+      const pulse = (Math.sin(phase * 0.6) + 1) / 2;
+      s.setAlpha((type === "frost_wraith" ? 0.72 : 0.78) + pulse * 0.16);
+      s.setScale(base * (1 + pulse * 0.06));
+    } else if (type === "blight_lancer") {
+      // slow sway + a gentle constant charge-up pulse (no server telegraph exists for this
+      // type — 'ctel' only fires for brute/bog_shambler — so this is the cosmetic fallback)
+      phase += dt;
+      s.setRotation(Math.sin(phase) * 0.05);
+      const pulse = (Math.sin(phase * 1.6) + 1) / 2;
+      const charge = Math.pow(pulse, 3);
+      s.setScale(base * (1 + charge * 0.06));
+      if (charge > 0.05) {
+        const c = Phaser.Display.Color.Interpolate.ColorWithColor(
+          Phaser.Display.Color.IntegerToColor(0xffffff),
+          Phaser.Display.Color.IntegerToColor(0xffb3ff),
+          100,
+          Math.min(100, charge * 100),
+        );
+        s.setTint(Phaser.Display.Color.GetColor(c.r, c.g, c.b));
+      } else s.clearTint();
+    }
+    s.setData("gPhase", phase);
+  }
+
+  // One-shot dust puff reusing the already-generated 'glow-s' soft-circle texture
+  // (no new asset files) — spawned discretely on footfall events, not per frame.
+  spawnDust(x: number, y: number) {
+    const d = this.add
+      .image(x, y, "glow-s")
+      .setScale(0.1)
+      .setAlpha(0.32)
+      .setTint(0x8a6a3a)
+      .setDepth(y + 1);
+    this.tweens.add({
+      targets: d,
+      scale: 0.22,
+      alpha: 0,
+      y: y - 5,
+      duration: 260,
+      onComplete: () => d.destroy(),
+    });
+  }
+
+  // Short-lived fading wake ellipse behind a moving boat — a plain vector shape, no texture.
+  spawnWake(x: number, y: number) {
+    const e = this.add.ellipse(x, y, 18, 8, 0xdff3ff, 0.35).setDepth(y - 2);
+    this.tweens.add({
+      targets: e,
+      scaleX: 1.8,
+      scaleY: 1.4,
+      alpha: 0,
+      duration: 500,
+      onComplete: () => e.destroy(),
+    });
+  }
+
+  // Tree/bush sway: only sprites currently on-screen are touched, phase derived
+  // deterministically from tile index (stable + varied across reloads), amplitude rises
+  // during rain/sandstorm/snowstorm and settles otherwise.
+  updateVegetationSway(dt: number) {
+    const wv = this.cameras.main.worldView;
+    const stormy =
+      this.weather === "rain" ||
+      this.weather === "sandstorm" ||
+      this.weather === "snowstorm";
+    for (const [i, s] of this.nodeSpr) {
+      if (
+        s.x < wv.x - 60 ||
+        s.x > wv.right + 60 ||
+        s.y < wv.y - 60 ||
+        s.y > wv.bottom + 60
+      )
+        continue;
+      let swOk = s.getData("swOk");
+      if (swOk === undefined) {
+        const kind = NODE_KEYS[this.world.nodes.get(i) as number];
+        swOk = kind === "tree" || kind === "bush" ? 1 : 0;
+        s.setData("swOk", swOk);
+      }
+      if (!swOk) continue;
+      const h = Math.imul(i, 2654435761) >>> 0;
+      let phase = s.getData("swPhase");
+      if (phase === undefined) {
+        phase = ((h % 1000) / 1000) * Math.PI * 2;
+        s.setData("swSpeed", 0.5 + ((h >>> 8) % 700) / 1000);
+      }
+      const speed = s.getData("swSpeed") ?? 0.7;
+      phase += dt * speed;
+      s.setData("swPhase", phase);
+      const baseAmp = 0.02 + (((h >>> 16) % 21) / 1000); // 0.02–0.04 rad
+      const amp = baseAmp * (stormy ? 1.9 : 1);
+      s.setRotation(Math.sin(phase) * amp);
+    }
+  }
+
+  // Campfire/lantern glow + torch flicker — subtle alpha/scale noise driven once per frame
+  // from a shared clock instead of a tween per light source.
+  updateFlicker(dt: number) {
+    this.flickerT += dt;
+    for (const [i, e] of this.structSpr) {
+      if (!e.glow) continue;
+      const seed = ((Math.imul(i, 2654435761) >>> 0) % 1000) / 1000;
+      const base = e.glow.getData("baseA") ?? e.glow.alpha;
+      const n =
+        Math.sin(this.flickerT * (5 + seed * 4) + seed * 30) * 0.6 +
+        Math.sin(this.flickerT * (11 + seed * 6) + seed * 17) * 0.4;
+      e.glow.setAlpha(Math.max(0, base * (1 + n * 0.22)));
+      e.glow.setScale(1 + n * 0.05);
+    }
+    for (const [i, s] of this.torchSpr) {
+      if (!s.visible) continue;
+      const seed = ((Math.imul(i, 2654435761) >>> 0) % 1000) / 1000;
+      const n =
+        Math.sin(this.flickerT * (6 + seed * 5) + seed * 25) * 0.6 +
+        Math.sin(this.flickerT * (14 + seed * 7) + seed * 9) * 0.4;
+      s.setAlpha(0.85 + n * 0.15);
+      s.setScale(1 + n * 0.04, 1 - n * 0.03);
+    }
+  }
+
   update(t: number, dtMs: number) {
     if (!this.ready) return;
     const dt = Math.min(dtMs / 1000, 0.05);
@@ -2096,6 +2285,8 @@ class Hearth extends Phaser.Scene {
     else if (this.swimming) p.y += 12; // swimming: sink to head level
     this.me.setPosition(p.x, p.y - hop).setDepth(p.y);
     this.ensureChunks();
+    this.updateVegetationSway(dt);
+    this.updateFlicker(dt);
 
     // Task 5: update self label position
     if (this.meLabel) {
@@ -2154,10 +2345,22 @@ class Hearth extends Phaser.Scene {
         this.boatSpr?.destroy();
         this.boatSpr = null;
       }
-      if (this.sailing && this.boatSpr)
-        this.boatSpr.setPosition(p.x, p.y + 4).setDepth(p.y - 1);
+      if (this.sailing && this.boatSpr) {
+        // gentle hull bob — purely visual y offset on the boat sprite, never on px/py
+        this.boatBobT += dt;
+        const bob = Math.sin(this.boatBobT * 3.2) * 3;
+        this.boatSpr.setPosition(p.x, p.y + 4 + bob).setDepth(p.y - 1);
+        if (dx || dy) {
+          this.wakeTimer -= dt;
+          if (this.wakeTimer <= 0) {
+            this.wakeTimer = 0.18;
+            this.spawnWake(this.boatSpr.x, this.boatSpr.y + 6);
+          }
+        }
+      }
     }
     this.me.setSwim(this.z === 0 && this.swimming);
+    this.me.setSeated(this.z === 0 && this.sailing);   // braced legs + lean while boating
 
     // see-through structures: fade anything standing in front of the player
     if (this.z === 0) {
@@ -2183,8 +2386,20 @@ class Hearth extends Phaser.Scene {
       o.rig.setSwim(
         o.z === 0 && o.b === 0 && this.tileAt(o.wx, o.wy) === T.WATER,
       );
-      if (o.boat)
-        o.boat.setPosition(o.rig.x, o.rig.y + 4).setDepth(o.rig.depth - 1);
+      o.rig.setSeated(o.z === 0 && o.b > 0);   // server-driven boat state
+      if (o.boat) {
+        // same hull-bob/wake treatment as the local boat, phase-offset per remote player
+        o.boatPhase += dt * 3.2;
+        const bob = Math.sin(o.boatPhase) * 3;
+        o.boat.setPosition(o.rig.x, o.rig.y + 4 + bob).setDepth(o.rig.depth - 1);
+        if (d > 0.5) {
+          o.wakeT -= dt;
+          if (o.wakeT <= 0) {
+            o.wakeT = 0.18;
+            this.spawnWake(o.boat.x, o.boat.y + 6);
+          }
+        }
+      }
       if (d > 0.5) {
         o.rig.face(o.tx - o.rig.x);
         o.rig.x += (o.tx - o.rig.x) * 0.18;
@@ -2195,8 +2410,31 @@ class Hearth extends Phaser.Scene {
       // Task 5: update other player labels
       o.label.setPosition(o.rig.x, o.rig.y - 58).setDepth(o.rig.depth + 1);
     }
-    // creatures & animals: lerp
-    for (const s of [...this.creSpr.values(), ...this.aniSpr.values()]) {
+    // creatures: lerp toward server tx/ty, plus per-type procedural gait applied on top of
+    // a separately tracked base position (gvx/gvy) so gait's y/scale offsets never feed back
+    // into the interpolation itself.
+    for (const s of this.creSpr.values()) {
+      const tx = s.getData("tx"),
+        ty = s.getData("ty");
+      if (tx === undefined) continue;
+      let vx = s.getData("gvx");
+      if (vx === undefined) vx = s.x;
+      let vy = s.getData("gvy");
+      if (vy === undefined) vy = s.y;
+      vx += (tx - vx) * 0.15;
+      vy += (ty - vy) * 0.15;
+      const pvx = s.getData("gpvx") ?? vx,
+        pvy = s.getData("gpvy") ?? vy;
+      const moving = Math.hypot(vx - pvx, vy - pvy) > 0.12;
+      s.setData("gvx", vx).setData("gvy", vy).setData("gpvx", vx).setData("gpvy", vy);
+      const near = Math.hypot(vx - this.me.x, vy - this.me.y) < 130;
+      this.creatureGaitTick(s, s.getData("ctype"), dt, moving, near);
+      s.x = vx;
+      s.y = vy + (s.getData("gHoverY") || 0);
+      s.setDepth(vy);
+    }
+    // animals: plain lerp (gait not in scope here — only the listed creature types)
+    for (const s of this.aniSpr.values()) {
       const tx = s.getData("tx"),
         ty = s.getData("ty");
       if (tx !== undefined) {
