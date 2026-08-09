@@ -42,6 +42,8 @@
     #btns { position: fixed; bottom: 8px; right: 8px; z-index: 10; display: flex; gap: 6px; }
     #btns button { background: #2a3a4a; color: #fff; border: 1px solid #57a; border-radius: 6px;
                    padding: 8px 14px; font-family: monospace; font-size: 14px; cursor: pointer; }
+    #quitBtn { border-color: #a5626a; color: #f0c2c2; }
+    #quitBtn:hover { background: #3a2a30; }
     #craftPanel { position: fixed; bottom: 52px; right: 8px; width: 300px; max-height: 60vh; overflow-y: auto;
                   background: rgba(10,15,20,.92); color: #fff; border: 1px solid #57a; border-radius: 8px;
                   padding: 12px; font-size: 13px; z-index: 12; display: none; }
@@ -68,9 +70,442 @@
     #medicPanel button { background: #2a3a4a; color: #fff; border: 1px solid #57a; border-radius: 4px;
                          padding: 5px 12px; font-family: monospace; cursor: pointer; margin-top: 4px; }
     #medicPanel button:disabled { opacity: 0.4; cursor: default; }
+
+    /* ================================================================
+       TITLE SCREEN — "a cold night, one warm fire"
+       Palette lifted straight from the game's own sprite art:
+       ember #f5883a / hearth gold #ffd166 / spark #fff4d0 (campfire.svg)
+       slate #4a5568 (monolith.svg) · rune teal #6dd6c8 (engine.svg)
+       ================================================================ */
+    #menu {
+      position: fixed; inset: 0; z-index: 1000; display: none;
+      align-items: center; justify-content: center; overflow: hidden;
+      color: #ddd6c6;
+      font-family: ui-monospace, "Cascadia Mono", "Segoe UI Mono", Consolas, monospace;
+      background:
+        radial-gradient(120% 80% at 50% 96%, rgba(245,136,58,.22) 0%, rgba(245,136,58,0) 58%),
+        radial-gradient(100% 78% at 50% 26%, #18222f 0%, #0c131c 52%, #05080d 100%);
+      -webkit-user-select: none; user-select: none;
+    }
+    /* Isometric lattice — the game's own geometry, faint, as ground */
+    #menu::before {
+      content: ""; position: absolute; inset: -20%; z-index: 0; pointer-events: none;
+      background-image:
+        repeating-linear-gradient(26.57deg, rgba(109,214,200,.055) 0 1px, transparent 1px 46px),
+        repeating-linear-gradient(-26.57deg, rgba(109,214,200,.055) 0 1px, transparent 1px 46px);
+      -webkit-mask-image: radial-gradient(72% 62% at 50% 58%, #000 18%, transparent 76%);
+      mask-image: radial-gradient(72% 62% at 50% 58%, #000 18%, transparent 76%);
+    }
+    /* Vignette, above the scenery but below the panels */
+    #menu::after {
+      content: ""; position: absolute; inset: 0; z-index: 2; pointer-events: none;
+      background: radial-gradient(78% 66% at 50% 50%, transparent 42%, rgba(3,5,9,.82) 100%);
+    }
+
+    .menu-scenery { position: absolute; inset: 0; z-index: 1; pointer-events: none; }
+    .menu-scenery img {
+      position: absolute; opacity: .5;
+      filter: saturate(.7) brightness(.8) drop-shadow(0 6px 9px rgba(0,0,0,.65));
+    }
+    .menu-scenery img.lit { opacity: 1; filter: drop-shadow(0 0 16px rgba(245,136,58,.55)); }
+    .menu-hearth-flare {
+      position: absolute; z-index: 1; pointer-events: none; width: 300px; height: 300px;
+      transform: translate(-50%, 50%);
+      background: radial-gradient(circle, rgba(245,136,58,.34) 0%, rgba(245,136,58,0) 66%);
+      animation: hearth-breathe 5.5s ease-in-out infinite;
+    }
+    @keyframes hearth-breathe { 0%,100% { opacity: .72; } 50% { opacity: 1; } }
+
+    .menu-embers { position: absolute; inset: 0; z-index: 1; pointer-events: none; overflow: hidden; }
+    .menu-embers i {
+      position: absolute; bottom: -12px; width: 3px; height: 3px; border-radius: 50%;
+      background: #ffb45c; box-shadow: 0 0 7px 2px rgba(245,136,58,.5); opacity: 0;
+      animation: ember-rise var(--t,16s) linear infinite var(--d,0s);
+    }
+    @keyframes ember-rise {
+      0%   { transform: translate(0,0) scale(.5); opacity: 0; }
+      14%  { opacity: .85; }
+      72%  { opacity: .4; }
+      100% { transform: translate(var(--x,20px), -78vh) scale(1); opacity: 0; }
+    }
+
+    .menu-scrim {
+      position: absolute; inset: 0; z-index: 2; pointer-events: none;
+      background: rgba(4,7,12,.66); opacity: 0; transition: opacity .22s ease;
+    }
+    #menu:not([data-screen="home"]) .menu-scrim { opacity: 1; }
+    #menu:not([data-screen="home"]) .menu-scenery { opacity: .4; }
+    #menu:not([data-screen="home"]) .menu-corner { opacity: 0; pointer-events: none; transform: translateY(6px); }
+
+    .menu-screen { display: none; }
+    .menu-screen.active { display: flex; flex-direction: column; }
+    #menu [hidden] { display: none !important; }
+
+    /* ---- Home: full-bleed, no panel ---- */
+    #menu-home.active {
+      position: absolute; inset: 0; z-index: 3;
+      align-items: center; justify-content: center; padding: 4vh 4vw;
+    }
+    .home-inner { display: flex; flex-direction: column; align-items: center; width: 100%; }
+    .wordmark { width: min(88vw, 880px); line-height: 0; }
+    .wordmark svg {
+      width: 100%; height: auto; display: block;
+      /* just enough to seat it on the backdrop — a tall soft shadow made the wordmark
+         read as floating above the page rather than printed on it */
+      filter: drop-shadow(0 6px 10px rgba(0,0,0,.55));
+    }
+    .menu-user {
+      margin: 22px 0 0; font-size: 11px; letter-spacing: .34em; text-transform: uppercase;
+      color: #7d8797;
+    }
+    .menu-user span { color: #ffd166; letter-spacing: .2em; }
+    .home-actions { display: flex; flex-direction: column; gap: 12px; margin-top: 26px; width: min(340px, 82vw); }
+
+    /* ---- Plaque buttons: hard bottom edge, same extrusion logic as the logo ---- */
+    #menu button {
+      display: flex; align-items: center; justify-content: center; gap: 10px;
+      font-family: inherit; font-size: 13px; letter-spacing: .18em; text-transform: uppercase;
+      color: #d9d2c2; padding: 13px 18px; border-radius: 3px;
+      background: linear-gradient(180deg, #26323f 0%, #18212c 100%);
+      border: 1px solid #3b4c5e; border-bottom-color: #24313d;
+      box-shadow: 0 4px 0 #0b1119, 0 7px 16px rgba(0,0,0,.5), inset 0 1px 0 rgba(255,255,255,.07);
+      transition: transform .07s ease, box-shadow .07s ease, color .16s ease, border-color .16s ease;
+    }
+    #menu button:hover { color: #ffd166; border-color: #6c5a3c; }
+    #menu button:active { transform: translateY(4px); box-shadow: 0 0 0 #0b1119, 0 2px 6px rgba(0,0,0,.5), inset 0 1px 0 rgba(255,255,255,.05); }
+    #menu button:focus-visible { outline: 2px solid #ffd166; outline-offset: 3px; }
+    #menu button img { width: 20px; height: 20px; object-fit: contain; }
+
+    #menu button.menu-cta, #menu button.menu-primary {
+      color: #2b1706; font-weight: bold;
+      background: linear-gradient(180deg, #ffdf95 0%, #f2a83f 100%);
+      border-color: #ffeab4; border-bottom-color: #d98c2a;
+      box-shadow: 0 4px 0 #8a4712, 0 7px 18px rgba(245,136,58,.28), inset 0 1px 0 rgba(255,255,255,.5);
+    }
+    #menu button.menu-cta:hover, #menu button.menu-primary:hover { color: #2b1706; border-color: #fff3d0; }
+    #menu button.menu-cta:active, #menu button.menu-primary:active { box-shadow: 0 0 0 #8a4712, 0 2px 6px rgba(0,0,0,.4), inset 0 1px 0 rgba(255,255,255,.4); }
+    #menu button.menu-cta { padding: 16px 18px; font-size: 15px; }
+    #menu button.menu-ghost { padding: 15px 18px; font-size: 14px; }
+    #menu button.menu-back { background: none; border-color: #2b3947; box-shadow: none; color: #6f7a8a; letter-spacing: .22em; padding: 9px 14px; }
+    #menu button.menu-back:hover { color: #ddd6c6; border-color: #47586b; }
+    #menu button.menu-back:active { transform: translateY(1px); box-shadow: none; }
+
+    /* ---- Corner controls ---- */
+    .menu-corner {
+      position: absolute; z-index: 4; padding: 10px 16px !important; font-size: 11px !important;
+      transition: opacity .22s ease, transform .22s ease, color .16s ease, border-color .16s ease;
+    }
+    .corner-tr { top: 24px; right: 24px; }
+    .corner-br { bottom: 24px; right: 24px; }
+    .menu-corner img { width: 17px !important; height: 17px !important; }
+
+    /* ---- Sub-screens: a carved slab over the dimmed world ---- */
+    .menu-card {
+      position: relative; z-index: 3; gap: 14px;
+      width: min(470px, 90vw); max-height: 88vh; overflow-y: auto;
+      padding: 26px 28px 24px; border-radius: 5px;
+      background: linear-gradient(180deg, #1a2431 0%, #0f1620 100%);
+      border: 1px solid #33455a; border-top-color: #4d637c;
+      box-shadow: 0 26px 70px rgba(0,0,0,.75), inset 0 1px 0 rgba(255,255,255,.06);
+    }
+    .menu-card::before {
+      content: ""; position: absolute; top: -1px; left: 26px; right: 26px; height: 2px;
+      background: linear-gradient(90deg, transparent, #ffd166, transparent); opacity: .55;
+    }
+    #menu h2 {
+      margin: 0; font-size: 15px; letter-spacing: .3em; text-transform: uppercase; color: #ffd166;
+      display: flex; align-items: center; gap: 10px;
+    }
+    #menu h2 img { width: 20px; height: 20px; }
+    #menu label { font-size: 10px; letter-spacing: .26em; text-transform: uppercase; color: #6f7a8a; }
+    #menu input[type="text"] {
+      background: #080d13; border: 1px solid #33455a; border-radius: 3px; color: #ffd166;
+      padding: 12px 14px; font-family: inherit; font-size: 16px; letter-spacing: .18em;
+      box-shadow: inset 0 2px 6px rgba(0,0,0,.6);
+    }
+    #menu input[type="text"]:focus { outline: none; border-color: #ffd166; box-shadow: inset 0 2px 6px rgba(0,0,0,.6), 0 0 0 1px rgba(255,209,102,.35); }
+    #menu input[type="text"]::placeholder { color: #3f4d5e; }
+    #menu-join-input { text-align: center; font-size: 22px; letter-spacing: .5em; text-indent: .5em; }
+
+    .menu-actions { display: flex; flex-direction: column; gap: 9px; margin-top: 4px; }
+
+    /* The honesty note — a field notice, not a footnote */
+    .menu-note {
+      margin: 0; padding: 11px 13px; font-size: 11.5px; line-height: 1.6; color: #9aa4b2;
+      background: rgba(109,214,200,.05); border-left: 3px solid #6dd6c8; border-radius: 0 3px 3px 0;
+    }
+    .menu-note b {
+      display: block; margin-bottom: 5px; color: #6dd6c8; font-size: 9.5px;
+      letter-spacing: .28em; text-transform: uppercase; font-weight: normal;
+    }
+    .menu-error { color: #e8797f; font-size: 11.5px; line-height: 1.5; margin: 0; }
+    #menu-profile-message {
+      padding: 10px 12px; border-left: 3px solid #e8797f; background: rgba(232,121,127,.08); border-radius: 0 3px 3px 0;
+    }
+    .menu-preview { font-size: 11px; letter-spacing: .2em; text-transform: uppercase; color: #6f7a8a; margin: 0; }
+    .menu-preview span { color: #ffd166; letter-spacing: .1em; }
+
+    .menu-room-code {
+      display: flex; align-items: center; justify-content: space-between; gap: 12px;
+      background: #080d13; border: 1px solid #33455a; border-radius: 3px; padding: 8px 8px 8px 18px;
+      box-shadow: inset 0 2px 8px rgba(0,0,0,.65);
+    }
+    .menu-room-code span { font-size: 26px; letter-spacing: .38em; color: #ffd166; text-shadow: 0 0 18px rgba(255,209,102,.35); }
+    #menu-create-copy { padding: 9px 14px !important; font-size: 10px !important; }
+
+    .menu-toggle {
+      display: flex !important; align-items: center; gap: 12px; padding: 11px 14px; cursor: pointer;
+      font-size: 12px !important; letter-spacing: .16em !important; text-transform: uppercase;
+      color: #c9c2b4 !important; background: rgba(255,255,255,.02);
+      border: 1px solid #263444; border-radius: 3px;
+    }
+    .menu-toggle:hover { border-color: #3d5065; color: #ffd166 !important; }
+    .menu-toggle input { accent-color: #ffd166; width: 15px; height: 15px; }
+
+    @media (max-width: 900px) {
+      .wordmark { width: 92vw; }
+      .menu-scenery img.hide-sm { display: none; }
+      .corner-tr { top: 14px; right: 14px; }
+      .corner-br { bottom: 14px; right: 14px; }
+    }
+    @media (max-height: 760px) { .wordmark { width: min(70vw, 660px); } .home-actions { margin-top: 18px; } .menu-user { margin-top: 16px; } }
+    @media (max-height: 600px) { .wordmark { width: min(58vw, 540px); } }
+    @media (prefers-reduced-motion: reduce) {
+      #menu *, #menu *::before, #menu *::after { animation: none !important; transition: none !important; }
+      .menu-embers { display: none; }
+    }
+
+    /* ---- Custom cursor: menu and game alike ---- */
+    body, canvas { cursor: url('/sprites/cursor.svg') 2 1, default; }
+    /* Listed out rather than relying on `button` alone: the in-game panels declare
+       `cursor: pointer` at ID specificity, which would otherwise win. */
+    button, input, select, textarea, .menu-toggle, [data-back],
+    #menu button, #btns button, .recipe button, #chestPanel button, #medicPanel button, #devPanel button,
+    .slot.place, .slot.tool, .slot.use {
+      cursor: url('/sprites/cursor_pointer.svg') 2 1, pointer;
+    }
+    button:disabled, .recipe button:disabled, #chestPanel button:disabled, #medicPanel button:disabled {
+      cursor: url('/sprites/cursor.svg') 2 1, default;
+    }
   </style>
 </head>
 <body>
+  <div id="menu" data-screen="home">
+    <div class="menu-scenery" aria-hidden="true">
+      <img src="/sprites/pine_tree.svg" alt="" style="left:4%; bottom:13%; width:98px;" />
+      <img src="/sprites/monolith.svg" alt="" style="left:14%; bottom:29%; width:60px;" />
+      <img src="/sprites/boulder.svg" alt="" style="left:17%; bottom:6%; width:70px;" />
+      <img src="/sprites/campfire.svg" alt="" class="lit hide-sm" style="left:26%; bottom:8%; width:74px;" />
+      <img src="/sprites/wolf.svg" alt="" class="hide-sm" style="right:23%; bottom:7%; width:82px;" />
+      <img src="/sprites/crystal.svg" alt="" style="right:6%; bottom:31%; width:52px;" />
+      <img src="/sprites/lantern.svg" alt="" style="right:13%; bottom:9%; width:38px;" />
+    </div>
+    <div class="menu-hearth-flare" style="left:calc(26% + 37px); bottom:calc(8% + 32px);" aria-hidden="true"></div>
+    <div class="menu-embers" aria-hidden="true">
+      <i style="left:27%; --t:15s; --d:0s;   --x:34px;"></i>
+      <i style="left:29%; --t:19s; --d:3.5s; --x:-22px;"></i>
+      <i style="left:25%; --t:13s; --d:7s;   --x:48px;"></i>
+      <i style="left:31%; --t:21s; --d:10s;  --x:12px;"></i>
+      <i style="left:14%; --t:24s; --d:5s;   --x:60px;"></i>
+      <i style="left:78%; --t:22s; --d:2s;   --x:-40px;"></i>
+      <i style="left:86%; --t:26s; --d:12s;  --x:-16px;"></i>
+    </div>
+    <div class="menu-scrim" aria-hidden="true"></div>
+
+    <button id="menu-profile-btn" class="menu-corner corner-tr">
+      <img src="/sprites/keeper.svg" alt="" /><span>Profile</span>
+    </button>
+    <button id="menu-settings-btn" class="menu-corner corner-br">
+      <img src="/sprites/workbench.svg" alt="" /><span>Settings</span>
+    </button>
+
+    <div id="menu-home" class="menu-screen active">
+      <div class="home-inner">
+        <div class="wordmark">
+          <!-- Pixel-art wordmark. The letterforms are geometry authored here, not a font:
+               every glyph is an 8-wide x 10-tall bitmap emitted as merged axis-aligned
+               <rect> runs on an integer grid, so it stays hard-edged at any size.
+               Each glyph is split into four horizontal shading bands (A rows 0-1,
+               B rows 2-4, C rows 5-7, D rows 8-9) so the face is shaded in whole pixel
+               steps rather than a smooth gradient. The black outline and the down-right
+               slab are built by re-stamping the whole wordmark at integer offsets --
+               never with `stroke`, which would round and straddle the corners. -->
+          <svg viewBox="0 0 80 41" shape-rendering="crispEdges" role="img"
+               aria-label="Echoes of the Hearth" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+              <!-- ---- glyph bitmaps, one group per shading band ---- -->
+              <g id="Ea"><rect x="0" y="0" width="8" height="2"/></g>
+              <g id="Eb"><rect x="0" y="2" width="2" height="3"/><rect x="2" y="4" width="4" height="1"/></g>
+              <g id="Ec"><rect x="0" y="5" width="2" height="3"/><rect x="2" y="5" width="4" height="1"/></g>
+              <g id="Ed"><rect x="0" y="8" width="8" height="2"/></g>
+
+              <g id="Fa"><rect x="0" y="0" width="8" height="2"/></g>
+              <g id="Fb"><rect x="0" y="2" width="2" height="3"/><rect x="2" y="4" width="4" height="1"/></g>
+              <g id="Fc"><rect x="0" y="5" width="2" height="3"/><rect x="2" y="5" width="4" height="1"/></g>
+              <g id="Fd"><rect x="0" y="8" width="2" height="2"/></g>
+
+              <g id="Ca"><rect x="1" y="0" width="6" height="1"/><rect x="0" y="1" width="8" height="1"/></g>
+              <g id="Cb"><rect x="0" y="2" width="2" height="3"/></g>
+              <g id="Cc"><rect x="0" y="5" width="2" height="3"/></g>
+              <g id="Cd"><rect x="0" y="8" width="8" height="1"/><rect x="1" y="9" width="6" height="1"/></g>
+
+              <g id="Ha"><rect x="0" y="0" width="2" height="2"/><rect x="6" y="0" width="2" height="2"/></g>
+              <g id="Hb"><rect x="0" y="2" width="2" height="3"/><rect x="6" y="2" width="2" height="3"/><rect x="2" y="4" width="4" height="1"/></g>
+              <g id="Hc"><rect x="0" y="5" width="2" height="3"/><rect x="6" y="5" width="2" height="3"/><rect x="2" y="5" width="4" height="1"/></g>
+              <g id="Hd"><rect x="0" y="8" width="2" height="2"/><rect x="6" y="8" width="2" height="2"/></g>
+
+              <g id="Oa"><rect x="1" y="0" width="6" height="1"/><rect x="0" y="1" width="8" height="1"/></g>
+              <g id="Ob"><rect x="0" y="2" width="2" height="3"/><rect x="6" y="2" width="2" height="3"/></g>
+              <g id="Oc"><rect x="0" y="5" width="2" height="3"/><rect x="6" y="5" width="2" height="3"/></g>
+              <g id="Od"><rect x="0" y="8" width="8" height="1"/><rect x="1" y="9" width="6" height="1"/></g>
+
+              <g id="Sa"><rect x="0" y="0" width="8" height="2"/></g>
+              <g id="Sb"><rect x="0" y="2" width="2" height="2"/><rect x="0" y="4" width="8" height="1"/></g>
+              <g id="Sc"><rect x="0" y="5" width="8" height="1"/><rect x="6" y="6" width="2" height="2"/></g>
+              <g id="Sd"><rect x="0" y="8" width="8" height="2"/></g>
+
+              <g id="Aa"><rect x="1" y="0" width="6" height="1"/><rect x="0" y="1" width="8" height="1"/></g>
+              <g id="Ab"><rect x="0" y="2" width="2" height="3"/><rect x="6" y="2" width="2" height="3"/><rect x="2" y="4" width="4" height="1"/></g>
+              <g id="Ac"><rect x="0" y="5" width="2" height="3"/><rect x="6" y="5" width="2" height="3"/><rect x="2" y="5" width="4" height="1"/></g>
+              <g id="Ad"><rect x="0" y="8" width="2" height="2"/><rect x="6" y="8" width="2" height="2"/></g>
+
+              <g id="Ra"><rect x="0" y="0" width="7" height="1"/><rect x="0" y="1" width="8" height="1"/></g>
+              <g id="Rb"><rect x="0" y="2" width="2" height="3"/><rect x="6" y="2" width="2" height="2"/><rect x="2" y="4" width="6" height="1"/></g>
+              <g id="Rc"><rect x="0" y="5" width="2" height="3"/><rect x="2" y="5" width="5" height="1"/><rect x="4" y="6" width="2" height="2"/></g>
+              <g id="Rd"><rect x="0" y="8" width="2" height="2"/><rect x="6" y="8" width="2" height="2"/></g>
+
+              <g id="Ta"><rect x="0" y="0" width="8" height="2"/></g>
+              <g id="Tb"><rect x="2" y="2" width="4" height="3"/></g>
+              <g id="Tc"><rect x="2" y="5" width="4" height="3"/></g>
+              <g id="Td"><rect x="2" y="8" width="4" height="2"/></g>
+
+              <!-- ---- the lockup, one group per band. Letter advance 13 (8 cell + 5 gap):
+                   wide enough that a letter's 3-deep slab and its outline never collide
+                   with the next letter's outline. ---- -->
+              <g id="wA">
+                <g transform="translate(2,2)"><use href="#Ea" x="0"/><use href="#Ca" x="13"/><use href="#Ha" x="26"/><use href="#Oa" x="39"/><use href="#Ea" x="52"/><use href="#Sa" x="65"/></g>
+                <g transform="translate(2,26)"><use href="#Ha" x="0"/><use href="#Ea" x="13"/><use href="#Aa" x="26"/><use href="#Ra" x="39"/><use href="#Ta" x="52"/><use href="#Ha" x="65"/></g>
+              </g>
+              <g id="wB">
+                <g transform="translate(2,2)"><use href="#Eb" x="0"/><use href="#Cb" x="13"/><use href="#Hb" x="26"/><use href="#Ob" x="39"/><use href="#Eb" x="52"/><use href="#Sb" x="65"/></g>
+                <g transform="translate(2,26)"><use href="#Hb" x="0"/><use href="#Eb" x="13"/><use href="#Ab" x="26"/><use href="#Rb" x="39"/><use href="#Tb" x="52"/><use href="#Hb" x="65"/></g>
+              </g>
+              <g id="wC">
+                <g transform="translate(2,2)"><use href="#Ec" x="0"/><use href="#Cc" x="13"/><use href="#Hc" x="26"/><use href="#Oc" x="39"/><use href="#Ec" x="52"/><use href="#Sc" x="65"/></g>
+                <g transform="translate(2,26)"><use href="#Hc" x="0"/><use href="#Ec" x="13"/><use href="#Ac" x="26"/><use href="#Rc" x="39"/><use href="#Tc" x="52"/><use href="#Hc" x="65"/></g>
+              </g>
+              <g id="wD">
+                <g transform="translate(2,2)"><use href="#Ed" x="0"/><use href="#Cd" x="13"/><use href="#Hd" x="26"/><use href="#Od" x="39"/><use href="#Ed" x="52"/><use href="#Sd" x="65"/></g>
+                <g transform="translate(2,26)"><use href="#Hd" x="0"/><use href="#Ed" x="13"/><use href="#Ad" x="26"/><use href="#Rd" x="39"/><use href="#Td" x="52"/><use href="#Hd" x="65"/></g>
+              </g>
+              <g id="wAll"><use href="#wA"/><use href="#wB"/><use href="#wC"/><use href="#wD"/></g>
+
+              <!-- "OF THE", same bitmaps at half scale -->
+              <g id="obA"><use href="#Oa" x="0"/><use href="#Fa" x="13"/><use href="#Ta" x="33"/><use href="#Ha" x="46"/><use href="#Ea" x="59"/></g>
+              <g id="obB"><use href="#Ob" x="0"/><use href="#Fb" x="13"/><use href="#Tb" x="33"/><use href="#Hb" x="46"/><use href="#Eb" x="59"/></g>
+              <g id="obC"><use href="#Oc" x="0"/><use href="#Fc" x="13"/><use href="#Tc" x="33"/><use href="#Hc" x="46"/><use href="#Ec" x="59"/></g>
+              <g id="obD"><use href="#Od" x="0"/><use href="#Fd" x="13"/><use href="#Td" x="33"/><use href="#Hd" x="46"/><use href="#Ed" x="59"/></g>
+              <g id="obAll"><use href="#obA"/><use href="#obB"/><use href="#obC"/><use href="#obD"/></g>
+            </defs>
+
+            <!-- Outline: the wordmark re-stamped at every integer offset that dilates the
+                 face+slab silhouette by one pixel unit. -->
+            <g fill="#0c0704">
+              <use href="#wAll" x="-2" y="-2"/><use href="#wAll" x="-2" y="-1"/><use href="#wAll" x="-2" y="0"/><use href="#wAll" x="-2" y="1"/><use href="#wAll" x="-2" y="2"/>
+              <use href="#wAll" x="-1" y="-2"/><use href="#wAll" x="-1" y="-1"/><use href="#wAll" x="-1" y="0"/><use href="#wAll" x="-1" y="1"/><use href="#wAll" x="-1" y="2"/><use href="#wAll" x="-1" y="3"/>
+              <use href="#wAll" x="0" y="-2"/><use href="#wAll" x="0" y="-1"/><use href="#wAll" x="0" y="1"/><use href="#wAll" x="0" y="2"/><use href="#wAll" x="0" y="3"/>
+              <use href="#wAll" x="1" y="-2"/><use href="#wAll" x="1" y="-1"/><use href="#wAll" x="1" y="0"/><use href="#wAll" x="1" y="2"/><use href="#wAll" x="1" y="3"/>
+              <use href="#wAll" x="2" y="-2"/><use href="#wAll" x="2" y="-1"/><use href="#wAll" x="2" y="0"/><use href="#wAll" x="2" y="1"/><use href="#wAll" x="2" y="2"/><use href="#wAll" x="2" y="3"/>
+              <use href="#wAll" x="3" y="-1"/><use href="#wAll" x="3" y="0"/><use href="#wAll" x="3" y="1"/><use href="#wAll" x="3" y="2"/><use href="#wAll" x="3" y="3"/>
+            </g>
+            <!-- Depth: ONE whole-pixel step. Jump King's wordmark is near-flat — weight comes
+                 from the heavy 2px outline, not from extrusion. -->
+            <use href="#wAll" x="1" y="1" fill="#6b3a11"/>
+            <!-- Face: gold, top-lit. Bands kept close in value so it reads as one solid
+                 golden letterform rather than a stack of receding planes. -->
+            <use href="#wA" fill="#ffe9a8"/>
+            <use href="#wB" fill="#ffd166"/>
+            <use href="#wC" fill="#f6bd4a"/>
+            <use href="#wD" fill="#e09a30"/>
+
+            <!-- Connective band -->
+            <g fill="#0c0704"><rect x="3" y="19" width="15" height="3"/><rect x="59" y="19" width="15" height="3"/></g>
+            <g fill="#c9a163"><rect x="4" y="20" width="13" height="1"/><rect x="60" y="20" width="13" height="1"/></g>
+            <g transform="translate(21.75,18) scale(0.5)">
+              <g fill="#0c0704">
+                <use href="#obAll" x="-1" y="-1"/><use href="#obAll" x="0" y="-1"/><use href="#obAll" x="1" y="-1"/>
+                <use href="#obAll" x="-1" y="0"/><use href="#obAll" x="1" y="0"/>
+                <use href="#obAll" x="-1" y="1"/><use href="#obAll" x="0" y="1"/><use href="#obAll" x="1" y="1"/>
+              </g>
+              <use href="#obAll" fill="#e8c489"/>
+            </g>
+          </svg>
+        </div>
+        <p class="menu-user">Playing as <span id="menu-home-name"></span></p>
+        <div class="home-actions">
+          <button id="menu-create-btn" class="menu-cta">
+            <img src="/sprites/campfire.svg" alt="" /><span>Create Room</span>
+          </button>
+          <button id="menu-join-btn" class="menu-ghost">
+            <img src="/sprites/lantern.svg" alt="" /><span>Join Room</span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div id="menu-create" class="menu-screen menu-card">
+      <h2><img src="/sprites/campfire.svg" alt="" />Create Room</h2>
+      <p class="menu-note"><b>Heads up</b>Room codes are not networked yet — the server hosts one
+        shared world, so anyone who joins right now lands in the same place as you
+        regardless of code.</p>
+      <label>Your room code</label>
+      <div class="menu-room-code">
+        <span id="menu-create-code"></span>
+        <button id="menu-create-copy">Copy</button>
+      </div>
+      <div class="menu-actions">
+        <button id="menu-create-start" class="menu-primary">Start</button>
+        <button class="menu-back" data-back>Back</button>
+      </div>
+    </div>
+
+    <div id="menu-join" class="menu-screen menu-card">
+      <h2><img src="/sprites/lantern.svg" alt="" />Join Room</h2>
+      <p class="menu-note"><b>Heads up</b>Room codes are not networked yet — the server hosts one
+        shared world, so joining with a code still puts you in the same world as
+        everyone else.</p>
+      <label for="menu-join-input">Room code</label>
+      <input id="menu-join-input" type="text" maxlength="6" placeholder="ABCDEF" autocomplete="off" />
+      <p id="menu-join-error" class="menu-error" hidden></p>
+      <div class="menu-actions">
+        <button id="menu-join-submit" class="menu-primary">Join</button>
+        <button id="menu-join-solo">Play solo / default world</button>
+        <button class="menu-back" data-back>Back</button>
+      </div>
+    </div>
+
+    <div id="menu-profile" class="menu-screen menu-card">
+      <h2><img src="/sprites/keeper.svg" alt="" />Profile</h2>
+      <p id="menu-profile-message" class="menu-error" hidden></p>
+      <label for="menu-profile-input">Username</label>
+      <input id="menu-profile-input" type="text" maxlength="18" />
+      <p class="menu-preview">Appears as <span id="menu-profile-preview"></span></p>
+      <p id="menu-profile-error" class="menu-error" hidden></p>
+      <div class="menu-actions">
+        <button id="menu-profile-save" class="menu-primary">Save</button>
+        <button class="menu-back" data-back>Back</button>
+      </div>
+    </div>
+
+    <div id="menu-settings" class="menu-screen menu-card">
+      <h2><img src="/sprites/workbench.svg" alt="" />Settings</h2>
+      <label class="menu-toggle"><input type="checkbox" id="menu-settings-sound" /> Sound</label>
+      <label class="menu-toggle"><input type="checkbox" id="menu-settings-names" /> Show player names</label>
+      <div class="menu-actions">
+        <button class="menu-back" data-back>Back</button>
+      </div>
+    </div>
+  </div>
   <div id="hud"></div>
   <div id="objective"></div>
   <div id="msg"></div>
@@ -79,6 +514,7 @@
     <button id="invBtn">Bag [I]</button>
     <button id="craftBtn">Craft [C]</button>
     <button id="helpBtn">? [H]</button>
+    <button id="quitBtn">Quit</button>
   </div>
   <div id="craftPanel"></div>
   <div id="chestPanel"><div class="chest-body"></div></div>
@@ -116,6 +552,6 @@
     <p><b>Boats:</b> craft one, open your Bag, click the boat to SELECT it, then walk into the sea to sail. Without a selected boat you will swim — much slower, and hot or freezing seas deal damage over time. Icebergs destroy wooden boats — a Starmetal-reinforced hull smashes through.</p>
     <p><b>Goal:</b> follow the hidden notes 📜 across five distant islands, awaken all 4 Monoliths with forged Cores, build the World Engine at the Core Void, survive the final assault.</p>
   </div>
-  <script type="module" src="/src/main.ts"></script>
+  <script type="module" src="/src/boot.ts"></script>
 </body>
 </html>
