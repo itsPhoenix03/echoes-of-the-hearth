@@ -8,7 +8,7 @@
     body { margin: 0; background: #111; overflow: hidden; font-family: monospace; }
     /* --uiz is set from main.ts: keeps the interface a constant on-screen size while the
        browser page zoom changes (the camera clamps the world view by the same factor). */
-    #hud, #objective, #msg, #quickbar, #btns, #craftPanel, #chestPanel, #devPanel, .modal {
+    #hud, #objective, #msg, #quickbar, #btns, #craftPanel, #chestPanel, #medicPanel, #devPanel, .modal {
       zoom: var(--uiz, 1);
     }
     #hud { position: fixed; top: 8px; left: 8px; color: #fff; background: rgba(0,0,0,.55);
@@ -61,6 +61,13 @@
     #chestPanel button { background: #2a3a4a; color: #fff; border: 1px solid #57a; border-radius: 4px;
                          cursor: pointer; font-family: monospace; }
     #chestPanel button:disabled { opacity: 0.35; cursor: default; }
+    #medicPanel { position: fixed; top: 50%; left: 50%; transform: translate(-50%,-50%); z-index: 14;
+                  background: rgba(10,15,20,.95); border: 1px solid #57a; border-radius: 10px;
+                  padding: 16px 20px; min-width: 260px; color: #fff; font-size: 14px; display: none;
+                  box-shadow: 0 8px 40px rgba(0,0,0,.6); }
+    #medicPanel button { background: #2a3a4a; color: #fff; border: 1px solid #57a; border-radius: 4px;
+                         padding: 5px 12px; font-family: monospace; cursor: pointer; margin-top: 4px; }
+    #medicPanel button:disabled { opacity: 0.4; cursor: default; }
   </style>
 </head>
 <body>
@@ -75,6 +82,7 @@
   </div>
   <div id="craftPanel"></div>
   <div id="chestPanel"><div class="chest-body"></div></div>
+  <div id="medicPanel"></div>
   <div id="invModal" class="modal">
     <h3>🎒 Inventory <span class="hint">(I or ESC to close · click a 🔨 item to place it)</span></h3>
     <div id="inv"></div>
@@ -88,6 +96,7 @@
       <tr><td><kbd>E</kbd></td><td>Gather · read notes · enter/exit mines &amp; shelters · dig (underground) · awaken monoliths · collect water at shores</td></tr>
       <tr><td><kbd>E</kbd> on farm plot</td><td>Plant (wheat needs 2 fiber, glowcap needs 1 essence) / harvest when fully grown</td></tr>
       <tr><td><kbd>E</kbd> on a chest</td><td>Open shared chest storage — deposit and withdraw resources</td></tr>
+      <tr><td><kbd>E</kbd> near a medic</td><td>Bargain for full healing — pay the requested resource before the offer expires</td></tr>
       <tr><td><kbd>C</kbd></td><td>Crafting menu (needs the right station nearby)</td></tr>
       <tr><td><kbd>I</kbd></td><td>Inventory bag</td></tr>
       <tr><td><kbd>1–5</kbd></td><td>Equip axe / pickaxe / stone pickaxe / sword / iron sword</td></tr>
@@ -100,6 +109,7 @@
     </table>
     <p><b>Survival:</b> eat (hunt + cook at campfire) and drink (E at water, click 💧) or you'll starve.
     Campfires heal you, set your respawn, and shield wooden buildings from night Blight Storms.
+    Herbal Medicine (craft at a campfire: 4 fiber + 1 water) heals 3 HP on the spot — or find a medic on the Woods or Spire and bargain for a full heal instead.
     Deserts need a Heat Cloak, snow needs a Fur Cloak. Shelter beside structures in sandstorms; reach a campfire in blizzards.</p>
     <p><b>Building:</b> open the bag, click a 🔨 item, then click a tile. Click an existing wall/shelter to stack it higher. Walls block monsters; brutes smash them.
     Place farm plots outdoors to grow wheat and glowcap. Decor items (banners, rugs, vases, fences) are zone-restricted — your Bag shows a hint when they cannot be placed. Mines can be furnished as underground hideouts: place chests and beds inside dug tunnels.</p>

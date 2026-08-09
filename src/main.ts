@@ -2,6 +2,8 @@ import Phaser from "phaser";
 import {
   genWorld,
   nearestLand,
+  findMedicSpawns,
+  medicBlockTiles,
   SIZE,
   T,
   TILE_KEYS,
@@ -62,6 +64,19 @@ const DECOR_TEX: Record<string, string> = {
   reed_vase: "reed_bundle",
   trophy_antler: "bone_totem",
   fence: "mod_railing",
+};
+// medicResult/medicOffer failure reasons -> short player-facing text (server protocol is machine-readable only)
+const MEDIC_REASON_MSG: Record<string, string> = {
+  "full-health": "You're already at full health.",
+  dead: "The dead need no medicine.",
+  "too-far": "Move closer to the medic.",
+  "wrong-level": "The medic can't reach you down here.",
+  "in-combat": "Too rattled to bargain — wait a moment.",
+  "offer-expired": "That offer expired — ask again.",
+  "offer-mismatch": "That offer is no longer on the table.",
+  "insufficient-resource": "You don't have enough to pay.",
+  "unknown-medic": "There's no medic there.",
+  "rate-limited": "The medic needs a moment before a new offer.",
 };
 const CHW = 1024,
   CHH = 512;
@@ -156,6 +171,8 @@ class Hearth extends Phaser.Scene {
   gear = new Set<string>();
   equipped: string | null = null;
   wornGear: string | null = null;
+  actionSeq = 0;              // monotonic per-client counter for the validated action protocol (seq/act)
+  pendingActSeq: number | null = null;   // most recent gather/dig/atk seq awaiting server confirmation
   mono = [false, false, false, false];
   day = 1;
   wtime = 0.3;
@@ -202,6 +219,13 @@ class Hearth extends Phaser.Scene {
   faceX = 1;
   faceY = 0;
   zToggleAt = 0;
+  medics: { id: string; islandId: string; sprite: string; x: number; y: number;
+            hutSprite: string; hutX: number; hutY: number }[] = [];
+  medicSpr = new Map<string, Phaser.GameObjects.Sprite>();
+  medicHutSpr = new Map<string, Phaser.GameObjects.Image>();
+  medicBlock = new Set<number>();
+  medicToggleAt = 0;   // own cooldown — separate from zToggleAt (Guide: un-cooldowned E-toggles flip-flop)
+  medicOffer: { medicId: string; offerId: string; resource: string; amount: number; expiresAt: number } | null = null;
   chestReqI = -1;   // chest we asked to open — broadcasts for other chests must not pop our panel
   engineI = -1; engineHp: number | null = null;   // World Engine health for the HUD
   sailing = false;
@@ -371,6 +395,9 @@ class Hearth extends Phaser.Scene {
         );
       },
       (i, res, n) => this.send({ t: "chest_move", i, res, n }),
+      (medicId, offerId) =>
+        this.send({ t: "medic", medicId, action: "accept", offerId }),
+      (medicId) => this.send({ t: "medic", medicId, action: "decline" }),
     );
     this.updateUI = uiApi;
     this.uiApi = uiApi;
@@ -420,8 +447,11 @@ class Hearth extends Phaser.Scene {
   applyViewClamp(dur = 0) {
     const fit = Math.max(1, this.scale.width / VIEW_W, this.scale.height / VIEW_H);
     const z = this.baseZoom * fit;
-    if (dur > 0) this.cameras.main.zoomTo(z, dur);
-    else this.cameras.main.setZoom(z);
+    const cam = this.cameras.main;
+    // force:true — Phaser silently DROPS a zoomTo while another zoom effect is still in
+    // flight, which stranded the camera at the mine's zoom after surfacing again
+    if (dur > 0) cam.zoomTo(z, dur, "Linear", true);
+    else { cam.zoomEffect.reset(); cam.setZoom(z); }
     // counter-scale the DOM interface by the same factor, so HUD/panels keep a constant
     // on-screen size while the browser is zoomed in or out
     document.documentElement.style.setProperty("--uiz", String(fit));
@@ -506,6 +536,13 @@ class Hearth extends Phaser.Scene {
 
   send(m: any) {
     if (this.ws.readyState === 1) this.ws.send(JSON.stringify(m));
+  }
+
+  // Preferred Validated Action Protocol: monotonic id so server outcomes (act/node/dig/chit/actReject)
+  // can be correlated back to the request that caused them. Never trusted for security server-side.
+  nextActSeq() {
+    this.pendingActSeq = ++this.actionSeq;
+    return this.pendingActSeq;
   }
 
   makeGlowTextures() {
@@ -926,7 +963,7 @@ class Hearth extends Phaser.Scene {
     this.z = z;
     const surfA = z !== 0 ? 0.15 : 1;
     // FEATURE 1: camera zoom per layer (clamped so the view area never grows)
-    this.baseZoom = z === 2 || z === 1 ? 1.05 : 1;
+    this.baseZoom = z === 2 || z === 1 ? 1.02 : 1;
     this.applyViewClamp(400);
     // shelter interior floor — FEATURE 1: room half-width = shelterLvl + 2
     this.intFloor.forEach((s) => s.destroy());
@@ -965,6 +1002,8 @@ class Hearth extends Phaser.Scene {
     for (const s of this.templeSpr) s.setAlpha(surfA);
     for (const s of this.creSpr.values()) s.setVisible(z === 0);
     for (const s of this.aniSpr.values()) s.setVisible(z === 0);
+    for (const s of this.medicSpr.values()) s.setVisible(z === 0);
+    for (const s of this.medicHutSpr.values()) s.setVisible(z === 0);
     for (const s of this.ugFloor.values()) s.setVisible(z === 1);
     for (const s of this.ugRock.values()) s.setVisible(z === 1);
     for (const s of this.ugOre.values()) s.setVisible(z === 1);
@@ -1108,6 +1147,10 @@ class Hearth extends Phaser.Scene {
       this.weather = m.weather;
       // Task 4: wornGear from init
       this.wornGear = m.wornGear ?? null;
+      // fix: init now carries hp/hunger/thirst — an injured reconnect must not show a full HUD
+      if (m.hp !== undefined) this.hp = m.hp;
+      if (m.hunger !== undefined) this.hunger = m.hunger;
+      if (m.thirst !== undefined) this.thirst = m.thirst;
       this.buildWorld(m.seed, m.removed, m.mud, m.infected, m.brokenBergs);
       for (const [i, kind, hp, dir, lvl] of m.structures)
         for (let l = 1; l <= (lvl || 1); l++)
@@ -1164,9 +1207,9 @@ class Hearth extends Phaser.Scene {
         }
       }
     } else if (m.t === "anim") {
+      // cosmetic jump only — gather/dig/atk now drive rigs via the validated 'act' broadcast below
       const o = this.others.get(m.id);
-      if (!o) return;
-      if (m.a === "j")
+      if (o && m.a === "j")
         this.tweens.add({
           targets: o.rig,
           y: o.rig.y - 20,
@@ -1174,7 +1217,17 @@ class Hearth extends Phaser.Scene {
           yoyo: true,
           ease: "Sine.out",
         });
-      else o.rig.act(m.a || null);
+    } else if (m.t === "act") {
+      // server-validated & derived action-start: drive remote rigs only — the local player
+      // already predicted this clip at send time via me.act()
+      if (m.id !== this.id) {
+        const o = this.others.get(m.id);
+        o?.rig.playAction({ name: m.a, tool: m.tool, dirX: m.dx, dirY: m.dy });
+      }
+    } else if (m.t === "actReject") {
+      // rejected: no outcome message will ever follow, so no impact audio/FX will fire for
+      // this seq — the rig's own recovery phase simply plays out (see rig.ts ONE WRITER RULE)
+      if (m.seq === this.pendingActSeq) this.pendingActSeq = null;
     } else if (m.t === "eq") {
       const o = this.others.get(m.id);
       o?.rig.hold(m.k);
@@ -1185,7 +1238,28 @@ class Hearth extends Phaser.Scene {
       // Task 4: wornGear from inv update
       this.wornGear = m.wornGear ?? null;
     } else if (m.t === "msg") showMsg(m.s);
-    else if (m.t === "node") {
+    else if (m.t === "medicOffer") {
+      this.medicOffer = m.offer
+        ? {
+            medicId: m.medicId,
+            offerId: m.offer.id,
+            resource: m.offer.resource,
+            amount: m.offer.amount,
+            expiresAt: Date.now() + m.offer.expiresInMs,
+          }
+        : null;
+    } else if (m.t === "medicResult") {
+      this.medicOffer = null;
+      if (m.ok)
+        showMsg(
+          `💊 Healed to full — paid ${m.paid.amount} ${NAMES[m.paid.resource] || m.paid.resource}.`,
+          3000,
+        );
+      else showMsg(MEDIC_REASON_MSG[m.reason] || "The medic declines.", 3000);
+    } else if (m.t === "node") {
+      // impact audio on server confirmation, not on keypress — and only for our own hit
+      if (m.by === this.id && m.seq === this.pendingActSeq && m.hp !== -1)
+        this.audio.chop();
       const s = this.nodeSpr.get(m.i);
       if (m.hp === 0 && s) {
         // depleted: fall + fade
@@ -1213,6 +1287,7 @@ class Hearth extends Phaser.Scene {
       }
       showMsg("The soil sours — this sector's ecosystem is collapsing!");
     } else if (m.t === "dig") {
+      if (m.by === this.id && m.seq === this.pendingActSeq) this.audio.chop();
       for (const i of m.tiles) this.addDug(i);
     } else if (m.t === "torch") {
       this.addTorch(m.i);
@@ -1794,6 +1869,29 @@ class Hearth extends Phaser.Scene {
       }
     }
 
+    // Medics — deterministic from the seed (not sent over the network), surface-only
+    this.medics = findMedicSpawns(this.world);
+    this.medicBlock = medicBlockTiles(this.medics);
+    for (const md of this.medics) {
+      // decorative hut first — the medic stands in front of it, so it must sort behind
+      const hp = this.isoE(md.hutX, md.hutY);
+      this.medicHutSpr.set(
+        md.id,
+        this.add
+          .image(hp.x, hp.y + 16, md.hutSprite)
+          .setOrigin(0.5, 0.92)
+          .setDepth(this.iso(md.hutX, md.hutY).y + 18)
+          .setVisible(this.z === 0),
+      );
+      const mdp = this.isoE(md.x, md.y);
+      const s = this.add
+        .sprite(mdp.x, mdp.y + 16, md.sprite)
+        .setOrigin(0.5, 0.92)
+        .setDepth(this.iso(md.x, md.y).y + 18)
+        .setVisible(this.z === 0);
+      this.medicSpr.set(md.id, s);
+    }
+
     const mp = this.isoE(this.px, this.py);
     this.me = new Rig(this, mp.x, mp.y, colorFor(this.myName)); // same hash others use for us
     this.me.setDepth(mp.y);
@@ -1864,6 +1962,7 @@ class Hearth extends Phaser.Scene {
     // TASK 2d: landmark blocked tiles
     if (LANDMARK_BLOCK && LANDMARK_BLOCK.has((y | 0) * SIZE + (x | 0)))
       return true;
+    if (this.medicBlock.has((y | 0) * SIZE + (x | 0))) return true;
     return false;
   }
 
@@ -1950,10 +2049,15 @@ class Hearth extends Phaser.Scene {
         }
       }
       if (best >= 0) {
-        this.audio.chop();
+        // anticipation only — audio.chop() now fires on server-confirmed 'dig' (see onMsg)
         this.me.act(this.tools.has("spick") ? "spick" : "pick");
-        this.send({ t: "anim", a: "pick" });
-        this.send({ t: "dig", i: best });
+        this.send({
+          t: "dig",
+          seq: this.nextActSeq(),
+          i: best,
+          dx: this.faceX,
+          dy: this.faceY,
+        });
       }
       return;
     }
@@ -2018,6 +2122,16 @@ class Hearth extends Phaser.Scene {
         showMsg(n.text, 15000);
         return;
       }
+    // a medic? bargain for healing — own cooldown since interact() polls every frame E is held
+    if (now - this.medicToggleAt > 900) {
+      for (const md of this.medics) {
+        if (Math.hypot(md.x - this.px, md.y - this.py) <= 2.5) {
+          this.medicToggleAt = now;
+          this.send({ t: "medic", medicId: md.id, action: "inspect" });
+          return;
+        }
+      }
+    }
     // nearest live node in reach
     let best = -1,
       bd = 2.4;
@@ -2038,10 +2152,15 @@ class Hearth extends Phaser.Scene {
               ? "pick"
               : null
             : null;
-      this.audio.chop();
+      // anticipation only — audio.chop() now fires on server-confirmed 'node' (see onMsg)
       this.me.act(tool);
-      this.send({ t: "anim", a: tool });
-      this.send({ t: "gather", i: best });
+      this.send({
+        t: "gather",
+        seq: this.nextActSeq(),
+        i: best,
+        dx: this.faceX,
+        dy: this.faceY,
+      });
       return;
     }
     // monolith?
@@ -2068,10 +2187,14 @@ class Hearth extends Phaser.Scene {
 
   attack() {
     if (!this.ready) return;
-    this.audio.swing();
+    this.audio.swing();   // wind-up sound stays at action start (Guide §impact audio)
     this.me.act(this.equipped);
-    this.send({ t: "anim", a: this.equipped });
-    this.send({ t: "atk" });
+    this.send({
+      t: "atk",
+      seq: this.nextActSeq(),
+      dx: this.faceX,
+      dy: this.faceY,
+    });
   }
 
   // Per-creature procedural gait — called once per frame per creature sprite from the
@@ -2603,6 +2726,13 @@ class Hearth extends Phaser.Scene {
       for (const bird of this.birds) bird.spr.setVisible(false);
     }
 
+    // clear a stale medic offer: expired countdown, or the player wandered off
+    if (this.medicOffer) {
+      const md = this.medics.find((m) => m.id === this.medicOffer!.medicId);
+      const tooFar = !md || Math.hypot(md.x - this.px, md.y - this.py) > 3;
+      if (tooFar || Date.now() >= this.medicOffer.expiresAt) this.medicOffer = null;
+    }
+
     this.updateUI({
       hp: this.hp,
       hunger: this.hunger,
@@ -2631,6 +2761,7 @@ class Hearth extends Phaser.Scene {
         : 0,
       engineHp: this.engineHp,
       zone: this.z === 0 ? "out" : "in",   // mines count as interior too
+      medicOffer: this.medicOffer,
     });
   }
 

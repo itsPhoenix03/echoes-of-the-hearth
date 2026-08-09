@@ -172,6 +172,15 @@ _manifest.push(
   ['villager',       '/sprites/villager.svg',       32, 48],
   ['villager2',      '/sprites/villager2.svg',      32, 48],
 );
+// --- Medicine + Medic feature ---
+_manifest.push(
+  ['medic',      '/sprites/medic.svg',      42, 58],
+  ['medic_snow', '/sprites/medic_snow.svg', 42, 58],
+  ['medicine',   '/sprites/medicine.svg',   28, 28],
+  ['medic_hut',      '/sprites/medic_hut.svg',      96, 88],
+  ['medic_hut_snow', '/sprites/medic_hut_snow.svg', 96, 88],
+);
+
 const _BM: [string, number, number][] = [
   ['clay_bricks', 56, 38], ['crystal_lattice', 54, 44], ['glass_pane', 44, 46], ['iron_beam', 60, 34],
   ['mod_arch', 64, 58], ['mod_bridge_segment', 74, 44], ['mod_door', 42, 52],

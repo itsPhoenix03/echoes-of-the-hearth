@@ -1,14 +1,16 @@
 ﻿// Echoes of the Hearth — authoritative co-op survival server.
 import { WebSocketServer } from 'ws';
 import { readFileSync, writeFileSync, existsSync } from 'fs';
-import { genWorld, findSpawn, nearestLand, SIZE, T, MONOLITHS, CORE, DIGGABLE, WORLD_VERSION, ACTIVATION_I, ISLES } from '../shared/world.js';
-import { NODE_DEF, RECIPES, STRUCT_HP, WOODEN, NAMES, canAfford, pay, emptyInv, DECOR_NONBLOCKING, CROPS } from '../shared/defs.js';
+import { genWorld, findSpawn, findMedicSpawns, medicBlockTiles, nearestLand, SIZE, T, MONOLITHS, CORE, DIGGABLE, WORLD_VERSION, ACTIVATION_I, ISLES } from '../shared/world.js';
+import { NODE_DEF, RECIPES, STRUCT_HP, WOODEN, NAMES, canAfford, pay, emptyInv, DECOR_NONBLOCKING, CROPS, MAX_HP, MEDICINE_HEAL, MEDIC_TRADE_POOLS } from '../shared/defs.js';
 import { TICK_MS, DAY_LENGTH_SEC, isNightTime } from '../shared/time.js';
 
 const PORT = 8081;
 const SEED = process.env.SEED || 'hearth-1';
 const world = genWorld(SEED);
 const spawn = findSpawn(world);
+const medics = findMedicSpawns(world);
+const medicTiles = new Set([...medics.map((md) => md.y * SIZE + md.x), ...medicBlockTiles(medics)]);
 const ti = (x, y) => (y | 0) * SIZE + (x | 0);
 
 // --- world state ---
@@ -102,6 +104,11 @@ console.log(`[hearth] server on ws://0.0.0.0:${PORT} seed=${SEED}`);
 
 const send = (ws, m) => ws.readyState === 1 && ws.send(JSON.stringify(m));
 const bcast = (m) => { const s = JSON.stringify(m); for (const p of players.values()) if (p.ws.readyState === 1) p.ws.send(s); };
+// Preferred Validated Action Protocol (Guide §"Preferred Validated Action Protocol"):
+// seq correlates client requests to server outcomes for reconciliation/dedup ONLY — never security.
+const validSeq = (v) => (Number.isInteger(v) && v >= 0 && v < 2 ** 31) ? v : null;
+const clampDir = (v) => Math.max(-1, Math.min(1, Number(v) || 0));
+const reject = (ws, seq, reason) => send(ws, { t: 'actReject', seq, reason });
 const isNight = () => isNightTime(time);
 const GROW_DIV = process.env.DEV ? 30 : 1;
 const blocked = (x, y) => {
@@ -124,6 +131,40 @@ const nearStruct = (p, kind, r = 4) => {
   return false;
 };
 const sendInv = (id, p) => send(p.ws, { t: 'inv', inv: p.inv, tools: [...p.tools], gear: [...p.gear], wornGear: p.wornGear || null });
+function healPlayer(p, amount, source) {
+  if (!Number.isFinite(amount) || amount <= 0 || p.hp <= 0 || p.hp >= MAX_HP) return 0;
+  const healed = Math.min(amount, MAX_HP - p.hp);
+  p.hp += healed;
+  send(p.ws, { t: 'hp', hp: p.hp, healed, source });
+  return healed;
+}
+function weightedChoice(entries, random = Math.random) {
+  const total = entries.reduce((sum, e) => sum + e.weight, 0);
+  let roll = random() * total;
+  for (const entry of entries) {
+    roll -= entry.weight;
+    if (roll < 0) return entry;
+  }
+  return entries[entries.length - 1];
+}
+let nextMedicOffer = 1;
+const medicOffers = new Map();     // player id -> offer
+const medicRerollAt = new Map();   // player id -> earliest time a new offer may be generated
+function createMedicOffer(playerId, medic, now = Date.now()) {
+  const pool = MEDIC_TRADE_POOLS[medic.islandId];
+  const rule = weightedChoice(pool);
+  const amount = rule.min + Math.floor(Math.random() * (rule.max - rule.min + 1));
+  const offer = {
+    id: `${playerId}:${nextMedicOffer++}`, playerId, medicId: medic.id, islandId: medic.islandId,
+    resource: rule.resource, amount, createdAt: now, expiresAt: now + 60000,
+  };
+  medicOffers.set(playerId, offer);
+  return offer;
+}
+const publicOffer = (offer) => ({
+  id: offer.id, medicId: offer.medicId, resource: offer.resource, amount: offer.amount,
+  expiresInMs: Math.max(0, offer.expiresAt - Date.now()),
+});
 const respawnPoint = (id) => {
   for (const [i, f] of furn)   // own bed wins
     if (f.kind === 'bed' && f.owner === id) return [i % SIZE, ((i / SIZE) | 0) + 1];
@@ -149,7 +190,7 @@ wss.on('connection', (ws) => {
       if (p) return;
       const rawName = String(m.name || '').replace(/[\x00-\x1f\x7f]/g, '').trim().slice(0, 18);
       const helloName = rawName.length >= 2 ? rawName : 'Keeper';
-      p = { ws, x: spawn[0], y: spawn[1], z: 0, hp: 10, hunger: 10, thirst: 10, inv: emptyInv(), tools: new Set(), gear: new Set(), equip: null, wornGear: null, name: helloName, lastGather: 0, lastAtk: 0, tok: typeof m.tok === 'string' ? m.tok.slice(0, 64) : null, lastLandX: spawn[0], lastLandY: spawn[1], b: 0, thermN: 0 };
+      p = { ws, x: spawn[0], y: spawn[1], z: 0, hp: 10, hunger: 10, thirst: 10, inv: emptyInv(), tools: new Set(), gear: new Set(), equip: null, wornGear: null, name: helloName, lastGather: 0, lastAtk: 0, tok: typeof m.tok === 'string' ? m.tok.slice(0, 64) : null, lastLandX: spawn[0], lastLandY: spawn[1], b: 0, thermN: 0, lastUseAt: 0, lastDamageAt: 0, lastMedicAt: 0 };
       const prof = p.tok && profiles[p.tok];
       if (prof) {
         Object.assign(p.inv, prof.inv);
@@ -163,6 +204,7 @@ wss.on('connection', (ws) => {
       players.set(id, p);
       send(ws, {
         t: 'init', id, seed: SEED, x: p.x, y: p.y, time, day, mono, won,
+        hp: p.hp, maxHp: MAX_HP, hunger: p.hunger, thirst: p.thirst,
         name: p.name,
         weather: weather.kind, infected: [...infected.keys()], digs: [...digs],
         torches: [...torches], brokenBergs: [...brokenBergs],
@@ -207,6 +249,7 @@ wss.on('connection', (ws) => {
       if (p.z === 0 && !m.b && moved > 0.01 && moved < 3) {
         const drop = world.elev[ti(p.x, p.y)] - world.elev[ti(m.x, m.y)];
         if (drop >= 2 && world.tiles[ti(m.x, m.y)] !== T.WATER) {
+          p.lastDamageAt = now;
           p.hp = Math.max(0, p.hp - (drop - 1));
           if (p.hp <= 0) { p.hp = 10; p.z = 0; [m.x, m.y] = respawnPoint(id); }
           send(ws, { t: 'hp', hp: p.hp, x: m.x, y: m.y });
@@ -223,6 +266,7 @@ wss.on('connection', (ws) => {
       const b = p.b;
       const wreckBoat = (reason) => {
         if (p.inv.boat > 0) p.inv.boat--;
+        p.lastDamageAt = now;
         p.hp = Math.max(1, p.hp - 2);
         p.b = 0;
         send(ws, { t: 'boat', r: reason });
@@ -288,26 +332,39 @@ wss.on('connection', (ws) => {
     }
 
     else if (m.t === 'dig') {
-      if (now - p.lastGather < 250 || p.z !== 1) return;
+      const seq = validSeq(m.seq);
+      if (now - p.lastGather < 250) return reject(ws, seq, 'rate_limit');
+      if (p.z !== 1) return reject(ws, seq, 'wrong_z');
       p.lastGather = now;
       const i = m.i;
-      if (digs.has(i) || !DIGGABLE(world, i)) return;
+      if (digs.has(i) || !DIGGABLE(world, i)) return reject(ws, seq, 'invalid_target');
       const x = i % SIZE, y = (i / SIZE) | 0;
-      if (Math.hypot(x - p.x, y - p.y) > 2) return;
-      if (!p.tools.has('pick') && !p.tools.has('spick'))
-        return send(ws, { t: 'msg', s: 'You need a Pickaxe to dig.' });
+      if (Math.hypot(x - p.x, y - p.y) > 2) return reject(ws, seq, 'out_of_range');
+      if (!p.tools.has('pick') && !p.tools.has('spick')) {
+        send(ws, { t: 'msg', s: 'You need a Pickaxe to dig.' });
+        return reject(ws, seq, 'no_tool');
+      }
+      // fix: derive pick vs spick from the tool actually validated above — never trust a client claim
+      const tool = p.tools.has('spick') ? 'spick' : 'pick';
+      bcast({ t: 'act', id, seq, a: 'mine', tool, dx: clampDir(m.dx), dy: clampDir(m.dy), targetI: i });
       digs.add(i);
       const v = world.veins[i];
       let got = '';
       if (v === 1) { const n = 2 + (Math.random() < 0.5 ? 1 : 0); p.inv.iron += n; got = `+${n} Iron!`; }
       else if (v === 2) { const n = 1 + (Math.random() < 0.3 ? 1 : 0); p.inv.diamond += n; got = `+${n} 🔷 DIAMOND!`; }
       else if (Math.random() < 0.25) { p.inv.stone += 1; got = '+1 Stone'; }
-      bcast({ t: 'dig', tiles: [i] });
+      bcast({ t: 'dig', tiles: [i], by: id, seq });
       sendInv(id, p);
       if (got) send(ws, { t: 'msg', s: got });
     }
 
-    else if (m.t === 'anim') bcast({ t: 'anim', id, a: m.a });
+    else if (m.t === 'anim') {
+      // gather/dig/atk now drive remote rigs via the validated 'act' broadcast below —
+      // 'anim' remains only for truly cosmetic actions (jump), sanitized to a fixed whitelist.
+      const allowedA = new Set(['j']);
+      if (!allowedA.has(m.a)) return;
+      bcast({ t: 'anim', id, a: m.a });
+    }
 
     else if (m.t === 'eq') {
       if (m.k !== null && !p.tools.has(m.k)) return;
@@ -325,28 +382,40 @@ wss.on('connection', (ws) => {
     }
 
     else if (m.t === 'gather') {
-      if (now - p.lastGather < 250) return;
+      const seq = validSeq(m.seq);
+      if (now - p.lastGather < 250) return reject(ws, seq, 'rate_limit');
       p.lastGather = now;
       const i = m.i;
-      if (!world.nodes.has(i) || removed.has(i)) return;
+      if (!world.nodes.has(i) || removed.has(i)) return reject(ws, seq, 'invalid_target');
       const x = i % SIZE, y = (i / SIZE) | 0;
-      if (Math.hypot(x - p.x, y - p.y) > 2.5) return;
-      const def = NODE_DEF[world.nodes.get(i)];
-      if (def.tool === 'pick' && !p.tools.has('pick') && !p.tools.has('spick'))
-        return send(ws, { t: 'msg', s: 'You need a Pickaxe for this.' });
-      if (def.tool === 'spick' && !p.tools.has('spick'))
-        return send(ws, { t: 'msg', s: 'You need a Stone Pickaxe for this.' });
+      if (Math.hypot(x - p.x, y - p.y) > 2.5) return reject(ws, seq, 'out_of_range');
+      const kind = world.nodes.get(i);
+      const def = NODE_DEF[kind];
+      if (def.tool === 'pick' && !p.tools.has('pick') && !p.tools.has('spick')) {
+        send(ws, { t: 'msg', s: 'You need a Pickaxe for this.' });
+        return reject(ws, seq, 'no_tool');
+      }
+      if (def.tool === 'spick' && !p.tools.has('spick')) {
+        send(ws, { t: 'msg', s: 'You need a Stone Pickaxe for this.' });
+        return reject(ws, seq, 'no_tool');
+      }
       let dmg = 1;
       if (def.axeBonus && p.tools.has('axe')) dmg = 3;
       if (def.tool === 'pick' && p.tools.has('spick')) dmg = 2;
+      // fix: derive the clip/tool from authoritative node kind + owned tool — never trust the client
+      let actA, actTool;
+      if (kind === 0) { actTool = p.tools.has('axe') ? 'axe' : null; actA = actTool ? 'chop' : 'punch'; }
+      else if (def.tool) { actTool = p.tools.has('spick') ? 'spick' : def.tool; actA = 'mine'; }
+      else { actTool = null; actA = 'punch'; }
+      bcast({ t: 'act', id, seq, a: actA, tool: actTool, dx: clampDir(m.dx), dy: clampDir(m.dy), targetI: i });
       const hp = (nodeHp.get(i) ?? def.hp) - dmg;
-      if (hp > 0) { nodeHp.set(i, hp); bcast({ t: 'node', i, hp }); return; }
+      if (hp > 0) { nodeHp.set(i, hp); bcast({ t: 'node', i, hp, by: id, seq }); return; }
       nodeHp.delete(i);
       removed.set(i, now + def.respawn * 1000);
       p.inv[def.res] += def.n;
-      bcast({ t: 'node', i, hp: 0 });
+      bcast({ t: 'node', i, hp: 0, by: id, seq });
       sendInv(id, p);
-      if (world.nodes.get(i) === 0) {   // tree: ecosystem reaction
+      if (kind === 0) {   // tree: ecosystem reaction
         const sk = ((x >> 4) << 8) | (y >> 4);
         sectorChops[sk] = (sectorChops[sk] || 0) + 1;
         if (sectorChops[sk] % 8 === 0) {
@@ -374,7 +443,7 @@ wss.on('connection', (ws) => {
 
     else if (m.t === 'build') {
       const kind = m.kind, i = m.i;
-      if (!STRUCT_HP[kind] || !p.inv[kind]) return;
+      if (!STRUCT_HP[kind] || !p.inv[kind] || medicTiles.has(i)) return;
       const r = RECIPES[kind];
       // zone enforcement: zone:'in' decor cannot be built outdoors (furn path handles them)
       if (r && r.zone === 'in') return;
@@ -568,8 +637,9 @@ wss.on('connection', (ws) => {
     }
 
     else if (m.t === 'atk') {
-      if (now - p.lastAtk < 400) return;
-      if (p.z !== 0) return;          // nothing to strike underground/indoors — protects structures
+      const seq = validSeq(m.seq);
+      if (now - p.lastAtk < 400) return reject(ws, seq, 'rate_limit');
+      if (p.z !== 0) return reject(ws, seq, 'wrong_z');          // nothing to strike underground/indoors — protects structures
       p.lastAtk = now;
       const dmg = p.equip === 'isword' ? 5 : p.equip === 'sword' ? 3 : p.equip === 'axe' ? 2 : 1;
       let best = null, bid = null, bd = 2.4, isAnimal = false;
@@ -581,6 +651,11 @@ wss.on('connection', (ws) => {
         const d = Math.hypot(a.x - p.x, a.y - p.y);
         if (d < bd) { bd = d; best = a; bid = aid; isAnimal = true; }
       }
+      // fix: derive the swing clip from authoritative p.equip — never trust a client-claimed weapon.
+      // Broadcast for a VALID attack even on a miss (guide §"Preferred Validated Action Protocol");
+      // chit is simply omitted below when nothing gets hit.
+      const atkClip = p.equip === 'axe' ? 'chop' : (p.equip === 'pick' || p.equip === 'spick') ? 'mine' : (p.equip === 'sword' || p.equip === 'isword') ? 'slash' : 'punch';
+      bcast({ t: 'act', id, seq, a: atkClip, tool: p.equip, dx: clampDir(m.dx), dy: clampDir(m.dy), targetI: bid });
       if (!best) {
         // no creature in range: strike a structure to demolish it (half materials refunded)
         let bsi = -1, bsd = 2.4;
@@ -680,7 +755,7 @@ wss.on('connection', (ws) => {
               ec.enraged = 100;
           }
         }
-        bcast({ t: 'chit', id: bid, ang: atkAng });
+        bcast({ t: 'chit', id: bid, ang: atkAng, by: id, seq });
       }
     }
 
@@ -698,6 +773,20 @@ wss.on('connection', (ws) => {
     }
 
     else if (m.t === 'use') {
+      if (m.k === 'medicine') {
+        if (now - (p.lastUseAt || 0) < 750) return;
+        if (p.inv.medicine < 1)
+          return send(ws, { t: 'useResult', ok: false, k: 'medicine', reason: 'none-owned' });
+        if (p.hp <= 0)
+          return send(ws, { t: 'useResult', ok: false, k: 'medicine', reason: 'dead' });
+        if (p.hp >= MAX_HP)
+          return send(ws, { t: 'useResult', ok: false, k: 'medicine', reason: 'full-health' });
+        p.lastUseAt = now;
+        p.inv.medicine--;
+        const healed = healPlayer(p, MEDICINE_HEAL, 'medicine');
+        sendInv(id, p);
+        return send(ws, { t: 'useResult', ok: true, k: 'medicine', healed, hp: p.hp, maxHp: MAX_HP });
+      }
       if (m.k === 'water' && p.inv.water > 0) {
         p.inv.water--; p.thirst = Math.min(10, p.thirst + 4);
       } else if (m.k === 'cookedmeat' && p.inv.cookedmeat > 0) {
@@ -705,17 +794,71 @@ wss.on('connection', (ws) => {
       } else if (m.k === 'bread' && p.inv.bread > 0) {
         p.inv.bread--; p.hunger = Math.min(10, p.hunger + 4);
       } else if (m.k === 'glowcap' && p.inv.glowcap > 0) {
-        p.inv.glowcap--; p.hunger = Math.min(10, p.hunger + 2); p.hp = Math.min(10, p.hp + 1);
-        send(ws, { t: 'hp', hp: p.hp });
+        p.inv.glowcap--; p.hunger = Math.min(10, p.hunger + 2); healPlayer(p, 1, 'glowcap');
       } else return;
       sendInv(id, p);
       send(ws, { t: 'stat', hunger: Math.ceil(p.hunger), thirst: Math.ceil(p.thirst) });
+    }
+
+    else if (m.t === 'medic') {
+      const medic = medics.find((md) => md.id === m.medicId);
+      const medicFail = (reason) => send(ws, { t: 'medicResult', ok: false, medicId: m.medicId, reason });
+      if (!medic) return medicFail('unknown-medic');
+      if (p.z !== 0) return medicFail('wrong-level');
+      if (Math.hypot(medic.x - p.x, medic.y - p.y) > 2.5) return medicFail('too-far');
+      // combat-only lockout: environmental chip damage (snow/desert/thermal) must not gate this,
+      // or the Spire medic is unreachable without the very cloak you'd visit them to survive without
+      if (now - (p.lastDamageAt || 0) < 5000) return medicFail('in-combat');
+      if (now - (p.lastMedicAt || 0) < 200) return;
+      p.lastMedicAt = now;
+
+      if (m.action === 'inspect') {
+        if (p.hp <= 0) return medicFail('dead');
+        if (p.hp >= MAX_HP) return medicFail('full-health');
+        const existing = medicOffers.get(id);
+        if (existing && existing.medicId === medic.id && existing.expiresAt > now)
+          return send(ws, { t: 'medicOffer', medicId: medic.id, offer: publicOffer(existing), hp: p.hp, maxHp: MAX_HP });
+        if (existing && existing.expiresAt <= now) {
+          medicOffers.delete(id);
+          medicRerollAt.set(id, now + 20000);
+        }
+        if ((medicRerollAt.get(id) || 0) > now) return medicFail('rate-limited');
+        const offer = createMedicOffer(id, medic, now);
+        send(ws, { t: 'medicOffer', medicId: medic.id, offer: publicOffer(offer), hp: p.hp, maxHp: MAX_HP });
+      } else if (m.action === 'accept') {
+        const offer = medicOffers.get(id);
+        if (!offer || offer.id !== m.offerId || offer.medicId !== medic.id)
+          return medicFail('offer-mismatch');
+        if (offer.expiresAt <= now) {
+          medicOffers.delete(id);
+          return medicFail('offer-expired');
+        }
+        if (p.hp <= 0) return medicFail('dead');
+        if (p.hp >= MAX_HP) return medicFail('full-health');
+        if ((p.inv[offer.resource] || 0) < offer.amount)
+          return medicFail('insufficient-resource');
+        const missing = MAX_HP - p.hp;
+        p.inv[offer.resource] -= offer.amount;
+        const healed = healPlayer(p, missing, 'medic');
+        medicOffers.delete(id);
+        sendInv(id, p);
+        send(ws, {
+          t: 'medicResult', ok: true, medicId: medic.id,
+          paid: { resource: offer.resource, amount: offer.amount }, hp: p.hp, healed,
+        });
+      } else if (m.action === 'decline') {
+        medicOffers.delete(id);
+        medicRerollAt.set(id, now + 20000);
+        send(ws, { t: 'medicOffer', medicId: medic.id, offer: null });
+      }
     }
   });
 
   ws.on('close', () => {
     if (p && p.tok) profiles[p.tok] = snapshot(p);
     players.delete(id);
+    medicOffers.delete(id);
+    medicRerollAt.delete(id);
     bcast({ t: 'pl', id });
   });
 });
@@ -913,6 +1056,7 @@ setInterval(() => {
             if (tickN % 5 === 0 && cdmg) {
               for (const [pid, q] of players) {
                 if (q.z === 0 && Math.hypot(q.x - c.x, q.y - c.y) < 1.1) {
+                  q.lastDamageAt = nowMs;
                   q.hp -= cdmg;
                   const cAng = Math.atan2(q.y - c.y, q.x - c.x);
                   if (q.hp <= 0) { q.hp = 10; q.z = 0; [q.x, q.y] = respawnPoint(pid); }
@@ -950,6 +1094,7 @@ setInterval(() => {
       if (tickN % 5 === 0 && cdmg) {
         for (const [pid, q] of players) {
           if (q.z === 0 && Math.hypot(q.x - c.x, q.y - c.y) < 1.1) {
+            q.lastDamageAt = nowMs;
             q.hp -= cdmg;
             const cAng = Math.atan2(q.y - c.y, q.x - c.x);
             if (q.hp <= 0) { q.hp = 10; q.z = 0; [q.x, q.y] = respawnPoint(pid); }
@@ -1178,6 +1323,7 @@ setInterval(() => {
             bcast({ t: 'msg', s: '⚡ A Blight Lancer\'s beam vaporised a structure!' });
           }
         } else {
+          q.lastDamageAt = nowMs;
           q.hp -= 2;
           const lAng = Math.atan2(q.y - c.y, q.x - c.x);
           if (q.hp <= 0) { q.hp = 10; q.z = 0; [q.x, q.y] = respawnPoint(pid); }
@@ -1194,6 +1340,7 @@ setInterval(() => {
         const d = Math.hypot(q.x - c.x, q.y - c.y);
         if (q.z === 0 && d > 1.5 && d < 7 && world.tiles[ti(q.x, q.y)] === T.WATER) {
           c.shotCd = 3;   // one bolt every ~3s
+          q.lastDamageAt = nowMs;
           q.hp -= 1;
           const cAng = Math.atan2(q.y - c.y, q.x - c.x);
           bcast({ t: 'shot', fx: +c.x.toFixed(1), fy: +c.y.toFixed(1), tx: +q.x.toFixed(1), ty: +q.y.toFixed(1) });
@@ -1213,6 +1360,7 @@ setInterval(() => {
           if (q.z === 0 && Math.hypot(q.x - c.x, q.y - c.y) < 1.1) {
             // brute: only damage if player still ≤1.1 after windup (already checked above)
             if ((c.type === 'brute' || c.type === 'bog_shambler') && c.windupTriggered && c.windup > 0) continue;
+            q.lastDamageAt = nowMs;
             q.hp -= cdmg;
             const cAng = Math.atan2(q.y - c.y, q.x - c.x);  // away from creature = push direction
             if (q.hp <= 0) { q.hp = 10; q.z = 0; [q.x, q.y] = respawnPoint(pid); }
@@ -1295,8 +1443,9 @@ setInterval(() => {
       else if (t === T.SAND && !isNight() && q.wornGear !== 'heatcloak') { delta = -1; send(q.ws, { t: 'msg', s: 'The desert heat sears you! Craft a Heat Cloak.' }); }
       else if (t === T.SNOW && q.wornGear !== 'furcloak') { delta = -1; send(q.ws, { t: 'msg', s: 'The glacial cold bites! Craft a Fur Cloak.' }); }
       else if (q.hunger <= 0 || q.thirst <= 0) { delta = -1; send(q.ws, { t: 'msg', s: q.thirst <= 0 ? 'You are dying of thirst!' : 'You are starving!' }); }
-      else if (q.hp < 10 && nearStruct(q, 'campfire', 4)) delta = 1;
-      if (delta) {
+      else if (q.hp < MAX_HP && nearStruct(q, 'campfire', 4)) delta = 1;
+      if (delta > 0) healPlayer(q, delta, 'campfire');
+      else if (delta) {
         q.hp = Math.min(10, q.hp + delta);
         if (q.hp <= 0) { q.hp = 10; q.z = 0; q.hunger = 10; q.thirst = 10; [q.x, q.y] = respawnPoint(pid); }
         send(q.ws, { t: 'hp', hp: q.hp, x: q.x, y: q.y });

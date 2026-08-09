@@ -13,6 +13,20 @@ export const ISLE_R = 70;
 export const MONOLITHS = ISLES;
 export const CORE = [640, 640];
 
+export const MAJOR_ISLANDS = [
+  { id: 'woods', center: ISLES[0], tile: T.GRASS },
+  { id: 'dunes', center: ISLES[1], tile: T.SAND },
+  { id: 'spire', center: ISLES[2], tile: T.SNOW },
+  { id: 'marsh', center: ISLES[3], tile: T.MUD },
+];
+
+// Only two islands host a medic in this release — Dunes and Marsh keep no medic.
+export const MEDIC_ISLANDS = [
+  { islandId: 'woods', sprite: 'medic' },
+  { islandId: 'spire', sprite: 'medic_snow' },
+];
+const MEDIC_ANCHOR_OFFSETS = { woods: [10, -8], spire: [10, 8] };
+
 export const ACTIVATION_I = CORE[1] * SIZE + CORE[0];
 
 export const MINOR_ISLES = [
@@ -267,3 +281,51 @@ export function findSpawn(world) {
       }
   return [sx, sy];
 }
+
+// Deterministic fixed-order ring search: increasing radius, fixed dx/dy iteration order,
+// bounded max radius. Never Math.random or Map/Set iteration order — client and server
+// must both derive the same answer independently from the same seed.
+export function findNearestValidTile(cx, cy, pred, maxR = 40) {
+  for (let r = 0; r <= maxR; r++)
+    for (let dy = -r; dy <= r; dy++)
+      for (let dx = -r; dx <= r; dx++) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+        const x = cx + dx, y = cy + dy;
+        if (x < 0 || y < 0 || x >= SIZE || y >= SIZE) continue;
+        if (pred(x, y, y * SIZE + x)) return [x, y];
+      }
+  return null;
+}
+
+// Deterministic medic placement — same seed/world always yields the same two spots.
+export function findMedicSpawns(world) {
+  return MEDIC_ISLANDS.map(({ islandId, sprite }) => {
+    const island = MAJOR_ISLANDS.find((mi) => mi.id === islandId);
+    const [ox, oy] = MEDIC_ANCHOR_OFFSETS[islandId];
+    const [cx, cy] = island.center;
+    const found = findNearestValidTile(cx + ox, cy + oy, (tx, ty, i) =>
+      world.tiles[i] === island.tile &&
+      !world.nodes.has(i) &&
+      !LANDMARK_BLOCK.has(i) &&
+      Math.hypot(tx - cx, ty - cy) > 5
+    );
+    if (!found) throw new Error(`findMedicSpawns: no valid tile for medic-${islandId}`);
+    const [x, y] = found;
+    // decorative hut two tiles behind the medic, so the medic always stands outside its door
+    const hut = findNearestValidTile(x, y - 2, (tx, ty, i) =>
+      world.tiles[i] === island.tile &&
+      !world.nodes.has(i) &&
+      !LANDMARK_BLOCK.has(i) &&
+      Math.hypot(tx - x, ty - y) >= 2
+    , 6);
+    if (!hut) throw new Error(`findMedicSpawns: no valid hut tile for medic-${islandId}`);
+    return {
+      id: `medic-${islandId}`, islandId, sprite, x, y,
+      hutSprite: islandId === 'spire' ? 'medic_hut_snow' : 'medic_hut',
+      hutX: hut[0], hutY: hut[1],
+    };
+  });
+}
+
+// Tiles the medic hut occupies — blocked for movement and building on both sides.
+export const medicBlockTiles = (medics) => new Set(medics.map((m) => m.hutY * SIZE + m.hutX));
