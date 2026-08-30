@@ -2,8 +2,24 @@
 
 Web-based 2D isometric co-op survival RPG. See [PLAN.md](PLAN.md) for the full design.
 
-> **Developers / AI agents:** read [AGENT_GUIDE.html](AGENT_GUIDE.html) first — full architecture,
-> protocol reference, balance tables, workflows, and the list of known pitfalls.
+> ## 🤖 AI agents — start here, before anything else
+>
+> 1. **[`.agents/README.md`](.agents/README.md)** — how agents coordinate on this project: read
+>    order, file-ownership rules for parallel work, the mandatory verification gate, and the
+>    hard-won pitfalls list.
+> 2. **[`.agents/PROJECT_STATE.md`](.agents/PROJECT_STATE.md)** — what is built, what is
+>    deliberately deferred, known gaps, and what to work on next. Status source of truth.
+> 3. **[`.agents/session-context-dump/`](.agents/session-context-dump/)** — dated knowledge dumps
+>    from previous sessions. Read the newest one; it records decisions and root causes you must not
+>    re-derive.
+> 4. **[AGENT_GUIDE.html](AGENT_GUIDE.html)** — deep technical reference: architecture, protocol,
+>    balance tables, workflows.
+>
+> **Before the owner runs `/clear`, write a session dump** to `.agents/session-context-dump/` using
+> the template in `.agents/README.md`, and update `.agents/PROJECT_STATE.md` in the same pass.
+>
+> **Nothing is done until `npx tsc --noEmit`, `npx vite build`, and `node test.mjs` all pass.**
+> esbuild does not type-check — `tsc` is the only gate.
 
 ## Run
 

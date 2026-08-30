@@ -30,6 +30,14 @@ Read this whole document before making changes. It encodes the architecture, eve
 message, all game balance data, the workflows to build/test, and — most importantly —
 <a href="#pitfalls">the pitfalls that have already caused real bugs</a>.</p>
 
+<p style="border-left:4px solid #d97706;background:#fffbeb;padding:12px 16px;margin:16px 0">
+<b>⚠ Read <code>.agents/</code> first.</b> This guide is the deep <i>technical</i> reference, but it
+does not track live project status. Before changing anything, read
+<code>.agents/README.md</code> (coordination rules, file ownership for parallel agents, the
+verification gate), <code>.agents/PROJECT_STATE.md</code> (what is built, deferred, and next), and
+the newest file in <code>.agents/session-context-dump/</code> (decisions and root causes from the
+previous session). Write a session dump there before the owner runs <code>/clear</code>.</p>
+
 <div class="toc"><b>Contents</b><ol>
 <li><a href="#overview">What this game is</a></li>
 <li><a href="#quickstart">Quickstart & workflows</a></li>

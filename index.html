@@ -148,7 +148,7 @@
     }
     .home-inner { display: flex; flex-direction: column; align-items: center; width: 100%; }
     .wordmark { width: min(88vw, 880px); line-height: 0; }
-    .wordmark svg {
+    .wordmark img {
       width: 100%; height: auto; display: block;
       /* just enough to seat it on the backdrop — a tall soft shadow made the wordmark
          read as floating above the page rather than printed on it */
@@ -161,7 +161,7 @@
     .menu-user span { color: #ffd166; letter-spacing: .2em; }
     .home-actions { display: flex; flex-direction: column; gap: 12px; margin-top: 26px; width: min(340px, 82vw); }
 
-    /* ---- Plaque buttons: hard bottom edge, same extrusion logic as the logo ---- */
+    /* ---- Plaque buttons: hard bottom edge, so they read as objects of the same world ---- */
     #menu button {
       display: flex; align-items: center; justify-content: center; gap: 10px;
       font-family: inherit; font-size: 13px; letter-spacing: .18em; text-transform: uppercase;
@@ -322,124 +322,16 @@
     <div id="menu-home" class="menu-screen active">
       <div class="home-inner">
         <div class="wordmark">
-          <!-- Pixel-art wordmark. The letterforms are geometry authored here, not a font:
-               every glyph is an 8-wide x 10-tall bitmap emitted as merged axis-aligned
-               <rect> runs on an integer grid, so it stays hard-edged at any size.
-               Each glyph is split into four horizontal shading bands (A rows 0-1,
-               B rows 2-4, C rows 5-7, D rows 8-9) so the face is shaded in whole pixel
-               steps rather than a smooth gradient. The black outline and the down-right
-               slab are built by re-stamping the whole wordmark at integer offsets --
-               never with `stroke`, which would round and straddle the corners. -->
-          <svg viewBox="0 0 80 41" shape-rendering="crispEdges" role="img"
-               aria-label="Echoes of the Hearth" xmlns="http://www.w3.org/2000/svg">
-            <defs>
-              <!-- ---- glyph bitmaps, one group per shading band ---- -->
-              <g id="Ea"><rect x="0" y="0" width="8" height="2"/></g>
-              <g id="Eb"><rect x="0" y="2" width="2" height="3"/><rect x="2" y="4" width="4" height="1"/></g>
-              <g id="Ec"><rect x="0" y="5" width="2" height="3"/><rect x="2" y="5" width="4" height="1"/></g>
-              <g id="Ed"><rect x="0" y="8" width="8" height="2"/></g>
-
-              <g id="Fa"><rect x="0" y="0" width="8" height="2"/></g>
-              <g id="Fb"><rect x="0" y="2" width="2" height="3"/><rect x="2" y="4" width="4" height="1"/></g>
-              <g id="Fc"><rect x="0" y="5" width="2" height="3"/><rect x="2" y="5" width="4" height="1"/></g>
-              <g id="Fd"><rect x="0" y="8" width="2" height="2"/></g>
-
-              <g id="Ca"><rect x="1" y="0" width="6" height="1"/><rect x="0" y="1" width="8" height="1"/></g>
-              <g id="Cb"><rect x="0" y="2" width="2" height="3"/></g>
-              <g id="Cc"><rect x="0" y="5" width="2" height="3"/></g>
-              <g id="Cd"><rect x="0" y="8" width="8" height="1"/><rect x="1" y="9" width="6" height="1"/></g>
-
-              <g id="Ha"><rect x="0" y="0" width="2" height="2"/><rect x="6" y="0" width="2" height="2"/></g>
-              <g id="Hb"><rect x="0" y="2" width="2" height="3"/><rect x="6" y="2" width="2" height="3"/><rect x="2" y="4" width="4" height="1"/></g>
-              <g id="Hc"><rect x="0" y="5" width="2" height="3"/><rect x="6" y="5" width="2" height="3"/><rect x="2" y="5" width="4" height="1"/></g>
-              <g id="Hd"><rect x="0" y="8" width="2" height="2"/><rect x="6" y="8" width="2" height="2"/></g>
-
-              <g id="Oa"><rect x="1" y="0" width="6" height="1"/><rect x="0" y="1" width="8" height="1"/></g>
-              <g id="Ob"><rect x="0" y="2" width="2" height="3"/><rect x="6" y="2" width="2" height="3"/></g>
-              <g id="Oc"><rect x="0" y="5" width="2" height="3"/><rect x="6" y="5" width="2" height="3"/></g>
-              <g id="Od"><rect x="0" y="8" width="8" height="1"/><rect x="1" y="9" width="6" height="1"/></g>
-
-              <g id="Sa"><rect x="0" y="0" width="8" height="2"/></g>
-              <g id="Sb"><rect x="0" y="2" width="2" height="2"/><rect x="0" y="4" width="8" height="1"/></g>
-              <g id="Sc"><rect x="0" y="5" width="8" height="1"/><rect x="6" y="6" width="2" height="2"/></g>
-              <g id="Sd"><rect x="0" y="8" width="8" height="2"/></g>
-
-              <g id="Aa"><rect x="1" y="0" width="6" height="1"/><rect x="0" y="1" width="8" height="1"/></g>
-              <g id="Ab"><rect x="0" y="2" width="2" height="3"/><rect x="6" y="2" width="2" height="3"/><rect x="2" y="4" width="4" height="1"/></g>
-              <g id="Ac"><rect x="0" y="5" width="2" height="3"/><rect x="6" y="5" width="2" height="3"/><rect x="2" y="5" width="4" height="1"/></g>
-              <g id="Ad"><rect x="0" y="8" width="2" height="2"/><rect x="6" y="8" width="2" height="2"/></g>
-
-              <g id="Ra"><rect x="0" y="0" width="7" height="1"/><rect x="0" y="1" width="8" height="1"/></g>
-              <g id="Rb"><rect x="0" y="2" width="2" height="3"/><rect x="6" y="2" width="2" height="2"/><rect x="2" y="4" width="6" height="1"/></g>
-              <g id="Rc"><rect x="0" y="5" width="2" height="3"/><rect x="2" y="5" width="5" height="1"/><rect x="4" y="6" width="2" height="2"/></g>
-              <g id="Rd"><rect x="0" y="8" width="2" height="2"/><rect x="6" y="8" width="2" height="2"/></g>
-
-              <g id="Ta"><rect x="0" y="0" width="8" height="2"/></g>
-              <g id="Tb"><rect x="2" y="2" width="4" height="3"/></g>
-              <g id="Tc"><rect x="2" y="5" width="4" height="3"/></g>
-              <g id="Td"><rect x="2" y="8" width="4" height="2"/></g>
-
-              <!-- ---- the lockup, one group per band. Letter advance 13 (8 cell + 5 gap):
-                   wide enough that a letter's 3-deep slab and its outline never collide
-                   with the next letter's outline. ---- -->
-              <g id="wA">
-                <g transform="translate(2,2)"><use href="#Ea" x="0"/><use href="#Ca" x="13"/><use href="#Ha" x="26"/><use href="#Oa" x="39"/><use href="#Ea" x="52"/><use href="#Sa" x="65"/></g>
-                <g transform="translate(2,26)"><use href="#Ha" x="0"/><use href="#Ea" x="13"/><use href="#Aa" x="26"/><use href="#Ra" x="39"/><use href="#Ta" x="52"/><use href="#Ha" x="65"/></g>
-              </g>
-              <g id="wB">
-                <g transform="translate(2,2)"><use href="#Eb" x="0"/><use href="#Cb" x="13"/><use href="#Hb" x="26"/><use href="#Ob" x="39"/><use href="#Eb" x="52"/><use href="#Sb" x="65"/></g>
-                <g transform="translate(2,26)"><use href="#Hb" x="0"/><use href="#Eb" x="13"/><use href="#Ab" x="26"/><use href="#Rb" x="39"/><use href="#Tb" x="52"/><use href="#Hb" x="65"/></g>
-              </g>
-              <g id="wC">
-                <g transform="translate(2,2)"><use href="#Ec" x="0"/><use href="#Cc" x="13"/><use href="#Hc" x="26"/><use href="#Oc" x="39"/><use href="#Ec" x="52"/><use href="#Sc" x="65"/></g>
-                <g transform="translate(2,26)"><use href="#Hc" x="0"/><use href="#Ec" x="13"/><use href="#Ac" x="26"/><use href="#Rc" x="39"/><use href="#Tc" x="52"/><use href="#Hc" x="65"/></g>
-              </g>
-              <g id="wD">
-                <g transform="translate(2,2)"><use href="#Ed" x="0"/><use href="#Cd" x="13"/><use href="#Hd" x="26"/><use href="#Od" x="39"/><use href="#Ed" x="52"/><use href="#Sd" x="65"/></g>
-                <g transform="translate(2,26)"><use href="#Hd" x="0"/><use href="#Ed" x="13"/><use href="#Ad" x="26"/><use href="#Rd" x="39"/><use href="#Td" x="52"/><use href="#Hd" x="65"/></g>
-              </g>
-              <g id="wAll"><use href="#wA"/><use href="#wB"/><use href="#wC"/><use href="#wD"/></g>
-
-              <!-- "OF THE", same bitmaps at half scale -->
-              <g id="obA"><use href="#Oa" x="0"/><use href="#Fa" x="13"/><use href="#Ta" x="33"/><use href="#Ha" x="46"/><use href="#Ea" x="59"/></g>
-              <g id="obB"><use href="#Ob" x="0"/><use href="#Fb" x="13"/><use href="#Tb" x="33"/><use href="#Hb" x="46"/><use href="#Eb" x="59"/></g>
-              <g id="obC"><use href="#Oc" x="0"/><use href="#Fc" x="13"/><use href="#Tc" x="33"/><use href="#Hc" x="46"/><use href="#Ec" x="59"/></g>
-              <g id="obD"><use href="#Od" x="0"/><use href="#Fd" x="13"/><use href="#Td" x="33"/><use href="#Hd" x="46"/><use href="#Ed" x="59"/></g>
-              <g id="obAll"><use href="#obA"/><use href="#obB"/><use href="#obC"/><use href="#obD"/></g>
-            </defs>
-
-            <!-- Outline: the wordmark re-stamped at every integer offset that dilates the
-                 face+slab silhouette by one pixel unit. -->
-            <g fill="#0c0704">
-              <use href="#wAll" x="-2" y="-2"/><use href="#wAll" x="-2" y="-1"/><use href="#wAll" x="-2" y="0"/><use href="#wAll" x="-2" y="1"/><use href="#wAll" x="-2" y="2"/>
-              <use href="#wAll" x="-1" y="-2"/><use href="#wAll" x="-1" y="-1"/><use href="#wAll" x="-1" y="0"/><use href="#wAll" x="-1" y="1"/><use href="#wAll" x="-1" y="2"/><use href="#wAll" x="-1" y="3"/>
-              <use href="#wAll" x="0" y="-2"/><use href="#wAll" x="0" y="-1"/><use href="#wAll" x="0" y="1"/><use href="#wAll" x="0" y="2"/><use href="#wAll" x="0" y="3"/>
-              <use href="#wAll" x="1" y="-2"/><use href="#wAll" x="1" y="-1"/><use href="#wAll" x="1" y="0"/><use href="#wAll" x="1" y="2"/><use href="#wAll" x="1" y="3"/>
-              <use href="#wAll" x="2" y="-2"/><use href="#wAll" x="2" y="-1"/><use href="#wAll" x="2" y="0"/><use href="#wAll" x="2" y="1"/><use href="#wAll" x="2" y="2"/><use href="#wAll" x="2" y="3"/>
-              <use href="#wAll" x="3" y="-1"/><use href="#wAll" x="3" y="0"/><use href="#wAll" x="3" y="1"/><use href="#wAll" x="3" y="2"/><use href="#wAll" x="3" y="3"/>
-            </g>
-            <!-- Depth: ONE whole-pixel step. Jump King's wordmark is near-flat — weight comes
-                 from the heavy 2px outline, not from extrusion. -->
-            <use href="#wAll" x="1" y="1" fill="#6b3a11"/>
-            <!-- Face: gold, top-lit. Bands kept close in value so it reads as one solid
-                 golden letterform rather than a stack of receding planes. -->
-            <use href="#wA" fill="#ffe9a8"/>
-            <use href="#wB" fill="#ffd166"/>
-            <use href="#wC" fill="#f6bd4a"/>
-            <use href="#wD" fill="#e09a30"/>
-
-            <!-- Connective band -->
-            <g fill="#0c0704"><rect x="3" y="19" width="15" height="3"/><rect x="59" y="19" width="15" height="3"/></g>
-            <g fill="#c9a163"><rect x="4" y="20" width="13" height="1"/><rect x="60" y="20" width="13" height="1"/></g>
-            <g transform="translate(21.75,18) scale(0.5)">
-              <g fill="#0c0704">
-                <use href="#obAll" x="-1" y="-1"/><use href="#obAll" x="0" y="-1"/><use href="#obAll" x="1" y="-1"/>
-                <use href="#obAll" x="-1" y="0"/><use href="#obAll" x="1" y="0"/>
-                <use href="#obAll" x="-1" y="1"/><use href="#obAll" x="0" y="1"/><use href="#obAll" x="1" y="1"/>
-              </g>
-              <use href="#obAll" fill="#e8c489"/>
-            </g>
-          </svg>
+          <!-- DOOM letterforms cut in Minecraft stone. The wordmark is hand-authored pixel
+               geometry in /sprites/wordmark.svg (same origin, no font, no network): 18x18
+               cells on an integer grid, where each stroke FLARES outward into a hard
+               45-degree spur at top and bottom and runs straight through the waist - the
+               DOOM bracket. Surface is Minecraft's: heavy 2-unit near-black outline, a
+               struck highlight on every top/left inner edge, a crevice shadow on every
+               bottom/right inner edge, a rough six-tone cobble face, and the bottom three
+               rows bleeding to ember. It is a separate asset rather than inline markup so
+               the letterforms can be re-cut without touching this file. -->
+          <img src="/sprites/wordmark.svg" alt="Echoes of the Hearth" />
         </div>
         <p class="menu-user">Playing as <span id="menu-home-name"></span></p>
         <div class="home-actions">
