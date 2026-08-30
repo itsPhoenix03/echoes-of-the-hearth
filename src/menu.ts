@@ -1,4 +1,6 @@
 // Front-end menu shell. Owns all menu DOM/state; main.ts never reaches into this.
+import { getSetting, setSetting } from "./settings.ts";
+
 export interface JoinOpts {
   name: string;
   room: string;
@@ -48,6 +50,9 @@ export function showMenu(): void {
   if (!menu) return;
   const nameEl = document.getElementById("menu-home-name");
   if (nameEl) nameEl.textContent = getStoredName() || "no name set";
+  // the in-game M key can have flipped mute while the menu was hidden
+  const soundEl = document.getElementById("menu-settings-sound") as HTMLInputElement | null;
+  if (soundEl) soundEl.checked = !getSetting("hearth-muted");
   SCREEN_NAMES.forEach((k) => {
     document.getElementById("menu-" + k)?.classList.toggle("active", k === "home");
   });
@@ -240,13 +245,14 @@ export function initMenu(onJoin: (opts: JoinOpts) => void): void {
   });
 
   // Settings screen
-  soundToggle.checked = localStorage.getItem("hearth-muted") !== "1";
-  namesToggle.checked = localStorage.getItem("hearth-shownames") !== "0";
+  // The sound toggle is worded positively ("Sound on"), the stored key negatively.
+  soundToggle.checked = !getSetting("hearth-muted");
+  namesToggle.checked = getSetting("hearth-shownames");
   soundToggle.addEventListener("change", () => {
-    localStorage.setItem("hearth-muted", soundToggle.checked ? "0" : "1");
+    setSetting("hearth-muted", !soundToggle.checked);
   });
   namesToggle.addEventListener("change", () => {
-    localStorage.setItem("hearth-shownames", namesToggle.checked ? "1" : "0");
+    setSetting("hearth-shownames", namesToggle.checked);
   });
 
   // The in-game Quit button dispatches this; registered here so it is always live.

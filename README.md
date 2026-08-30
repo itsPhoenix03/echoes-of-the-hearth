@@ -38,20 +38,37 @@ the first time.
 ## Controls
 - **WASD / arrows** — move (mud slows you 50%)
 - **E** — gather (trees, bushes, stones, boulders, crystal) / use Monolith Core
-- **SPACE** — attack
+- **SPACE** — jump (clears higher ledges)
+- **F** — attack
+- **R** — rotate a placeable before confirming
+- **T** — light a torch (mines only; torches can also be built inside shelters; craft with
+  2 wood + 1 fiber)
+- **1–5** — equip a tool/weapon from the hotbar (Wooden Axe, Wooden Pickaxe, Stone Pickaxe,
+  Stone Sword, Iron Sword)
 - **C** — crafting menu
+- **I** — inventory
+- **H** — help
+- **M** — mute/unmute sound
+- **F9** — dev kit (server must be started with `npm run server:dev`)
+- **F10** — toggle dev panel
 - **Click a 🔨 item** in your inventory bar, then click a tile to build it (ESC cancels)
 
 ## World
-- 192×192 map, 3 elevation levels — cliffs (2+ level jumps) are impassable, plan your routes.
+- 1280×1280 map, 3 elevation levels — you can always drop down a cliff (a 2+ level drop deals
+  fall damage), but climbing more than 1 level up is blocked unless you jump, which clears 2.
 - **Weather**: rain (Woods/Marsh), sandstorms (Dunes — take shelter beside a structure or take
   damage), blizzards (Spire — reach a campfire). Ambient snowfall on the Spire.
 - **Wildlife** (7 species): deer & boar (Woods), lizard & crab (Dunes), fox & hare (Spire),
   toad (Marsh). Bigger animals drop more meat, small ones flee faster.
 - **Monsters**: Crawlers (always), Stalkers (fast, night), Brutes (siege beasts that smash
-  structures, appear after 2 Monoliths), and Blight Wisps — floating infectors that corrupt
-  the land as they drift; corrupted tiles breed crawlers until the infection decays. Kill
-  wisps for bonus essence.
+  structures, appear once 2+ Monoliths are awakened), and Blight Wisps — floating infectors
+  that corrupt the land as they drift; corrupted tiles breed crawlers until the infection
+  decays. Kill wisps for bonus essence. Also prowling the islands: Husk Wolves (night packs
+  on the Woods), Bog Shamblers (heavy, structure-ignoring brutes near the Marsh that corrupt
+  their tile on death), Frost Wraiths (night, Spire — charge in fast and land a chilling hit
+  that slows you), Drowned (amphibious, rise from the shallows near players), and Blight
+  Lancers (slow, tanky siege casters with ranged beams that damage structures, appear once
+  the first Monolith is awakened).
 
 ## Progression
 1. **Whispering Woods** — chop trees, place a Workbench, craft Axe/Pickaxe, place a
