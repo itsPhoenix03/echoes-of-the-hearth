@@ -1,7 +1,7 @@
 ﻿// Echoes of the Hearth — authoritative co-op survival server.
 import { WebSocketServer } from 'ws';
 import { readFileSync, writeFileSync, existsSync } from 'fs';
-import { genWorld, findSpawn, findMedicSpawns, medicBlockTiles, nearestLand, SIZE, T, MONOLITHS, CORE, DIGGABLE, WORLD_VERSION, ACTIVATION_I, ISLES } from '../shared/world.js';
+import { genWorld, findSpawn, findMedicSpawns, medicBlockTiles, nearestLand, SIZE, T, MONOLITHS, CORE, DIGGABLE, WORLD_VERSION, ACTIVATION_I, ISLES, LANDMARK_BLOCK } from '../shared/world.js';
 import { NODE_DEF, RECIPES, STRUCT_HP, WOODEN, NAMES, canAfford, pay, emptyInv, DECOR_NONBLOCKING, CROPS, MAX_HP, MEDICINE_HEAL, MEDIC_TRADE_POOLS } from '../shared/defs.js';
 import { TICK_MS, DAY_LENGTH_SEC, isNightTime } from '../shared/time.js';
 
@@ -114,12 +114,42 @@ const GROW_DIV = process.env.DEV ? 30 : 1;
 const blocked = (x, y) => {
   if (x < 0 || y < 0 || x >= SIZE || y >= SIZE) return true;
   if (world.tiles[ti(x, y)] === T.WATER) return true;
+  if (medicTiles.has(ti(x, y))) return true;
   const s = structures.get(ti(x, y));
   if (!s) return false;
   // non-blocking decor and farmplots do not obstruct movement
   if (DECOR_NONBLOCKING.has(s.kind) || s.kind === 'farmplot') return false;
   return true;
 };
+// --- movement validation: client positions are untrusted, and every other handler
+// range-checks against p.x/p.y — so an unvalidated 'pos' would defeat all of them.
+const MAX_SPEED = 6.2;        // fastest world-space speed in the game: sailing (src/main.ts:2371)
+const SPEED_SLACK = 1.6;      // headroom for lag, jitter and frame batching
+const POS_SLACK = 1.0;        // flat allowance absorbing the client's 100ms send-throttle boundary
+const Z_NEAR = 3.0;           // a layer change must land next to its mineshaft/shelter anchor
+const Z_COOLDOWN_MS = 500;    // minimum gap between accepted layer changes
+const FIX_MS = 250;           // at most one snapback per player per window — never flood a desynced client
+const WARP_GRACE_MS = 1000;   // after a server-side teleport, forgive in-flight 'pos' from the old spot
+const ALLOW_WARP = !!process.env.HEARTH_ALLOW_WARP;   // test-only unvalidated teleport. Dedicated var: DEV also changes GROW_DIV
+// Mirror of the client's blockedAt() (src/main.ts:1926) — z-aware. NOT blocked(): that treats
+// WATER as solid, which would forbid swimming and boats outright.
+function posBlocked(x, y, z, fromX, fromY) {
+  if (!(x >= 0 && y >= 0 && x < SIZE && y < SIZE)) return true;
+  const i = ti(x, y);
+  if (z === 1) return !digs.has(i);                    // underground: only carved tunnels
+  if (z === 2) return false;                           // shelter interior: server has no shelterAnchor (see report)
+  if (world.tiles[i] === T.WATER) return false;        // swim / sail
+  // the permissive jump bound: the server cannot observe the client's jumpT, so allow the jump case
+  if (world.elev[i] - world.elev[ti(fromX, fromY)] > 2) return true;
+  if (medicTiles.has(i) || LANDMARK_BLOCK.has(i)) return true;
+  const s = structures.get(i);
+  // shelters are enterable; non-blocking decor and farmplots are walkable
+  if (s && s.kind !== 'shelter' && !DECOR_NONBLOCKING.has(s.kind) && s.kind !== 'farmplot') return true;
+  return false;
+}
+// after ANY server-side reposition — otherwise the client's already-in-flight pos from the
+// OLD location is rejected and the two sides fight over the position
+const warped = (q) => { const t = Date.now(); q.lastPosAt = t; q.warpUntil = t + WARP_GRACE_MS; };
 const nearAnyStruct = (p, r) => {
   for (const [i] of structures)
     if (Math.hypot((i % SIZE) - p.x, ((i / SIZE) | 0) - p.y) <= r) return true;
@@ -128,6 +158,18 @@ const nearAnyStruct = (p, r) => {
 const nearStruct = (p, kind, r = 4) => {
   for (const [i, s] of structures)
     if (s.kind === kind && Math.hypot((i % SIZE) - p.x, ((i / SIZE) | 0) - p.y) <= r) return true;
+  return false;
+};
+// A legit layer change happens at ONE structure: the player stands next to it and lands on
+// its anchor, so origin AND destination are both within ~2 tiles of that same structure.
+// Checking the destination alone would let a client 'transition' to any mineshaft or shelter
+// on the map — an unbounded teleport, since the z branch skips the distance check.
+const zAnchor = (kind, ax, ay, bx, by) => {
+  for (const [i, s] of structures) {
+    if (s.kind !== kind) continue;
+    const sx = i % SIZE, sy = (i / SIZE) | 0;
+    if (Math.hypot(sx - ax, sy - ay) <= Z_NEAR && Math.hypot(sx - bx, sy - by) <= Z_NEAR) return true;
+  }
   return false;
 };
 const sendInv = (id, p) => send(p.ws, { t: 'inv', inv: p.inv, tools: [...p.tools], gear: [...p.gear], wornGear: p.wornGear || null });
@@ -190,14 +232,14 @@ wss.on('connection', (ws) => {
       if (p) return;
       const rawName = String(m.name || '').replace(/[\x00-\x1f\x7f]/g, '').trim().slice(0, 18);
       const helloName = rawName.length >= 2 ? rawName : 'Keeper';
-      p = { ws, x: spawn[0], y: spawn[1], z: 0, hp: 10, hunger: 10, thirst: 10, inv: emptyInv(), tools: new Set(), gear: new Set(), equip: null, wornGear: null, name: helloName, lastGather: 0, lastAtk: 0, tok: typeof m.tok === 'string' ? m.tok.slice(0, 64) : null, lastLandX: spawn[0], lastLandY: spawn[1], b: 0, thermN: 0, lastUseAt: 0, lastDamageAt: 0, lastMedicAt: 0 };
+      p = { ws, x: spawn[0], y: spawn[1], z: 0, hp: 10, hunger: 10, thirst: 10, inv: emptyInv(), tools: new Set(), gear: new Set(), equip: null, wornGear: null, name: helloName, lastGather: 0, lastAtk: 0, tok: typeof m.tok === 'string' ? m.tok.slice(0, 64) : null, lastLandX: spawn[0], lastLandY: spawn[1], b: 0, thermN: 0, lastUseAt: 0, lastDamageAt: 0, lastMedicAt: 0, lastPosAt: now, lastZAt: 0, lastFixAt: 0, warpUntil: 0 };
       const prof = p.tok && profiles[p.tok];
       if (prof) {
         Object.assign(p.inv, prof.inv);
         prof.tools.forEach((t) => p.tools.add(t));
         prof.gear.forEach((g) => p.gear.add(g));
         p.hp = prof.hp; p.hunger = prof.hunger; p.thirst = prof.thirst;
-        if (world.tiles[ti(prof.x, prof.y)] !== T.WATER) { p.x = prof.x; p.y = prof.y; }
+        if (world.tiles[ti(prof.x, prof.y)] !== T.WATER) { p.x = prof.x; p.y = prof.y; warped(p); }
         p.wornGear = prof.wornGear && p.gear.has(prof.wornGear) ? prof.wornGear : null;
         if (prof.name && helloName === 'Keeper') p.name = prof.name;
       }
@@ -244,6 +286,33 @@ wss.on('connection', (ws) => {
     }
 
     if (m.t === 'pos') {
+      const nx = Number(m.x), ny = Number(m.y);
+      const nz = m.z === undefined ? p.z : m.z | 0, nb = m.b === undefined ? 0 : m.b | 0;
+      const snapback = () => {
+        p.lastPosAt = now;   // on reject too, or a rejected client accumulates movement budget
+        if (now - p.lastFixAt >= FIX_MS) { p.lastFixAt = now; send(ws, { t: 'fix', x: p.x, y: p.y, z: p.z, b: p.b }); }
+      };
+      if (!Number.isFinite(nx) || !Number.isFinite(ny) || nx < 0 || ny < 0 || nx >= SIZE || ny >= SIZE
+        || nz < 0 || nz > 2 || nb < 0 || nb > 2) return snapback();
+      const zChange = nz !== p.z;
+      if (zChange) {
+        // every legit layer change is a scripted teleport onto a mineshaft/shelter anchor
+        // (src/main.ts:1995-2081), so travelled distance is meaningless — a single shared
+        // structure bounding BOTH endpoints is the gate
+        if ((nz === 1 || p.z === 1) && !zAnchor('mineshaft', p.x, p.y, nx, ny)) return snapback();
+        if ((nz === 2 || p.z === 2) && !zAnchor('shelter', p.x, p.y, nx, ny)) return snapback();
+        if (now - p.lastZAt < Z_COOLDOWN_MS) return snapback();
+      } else if (now >= p.warpUntil) {
+        // dt is clamped to 1s: a client that goes quiet for 30s must not bank a 190-tile jump
+        const dt = Math.min(1, Math.max(0, (now - p.lastPosAt) / 1000));
+        if (Math.hypot(nx - p.x, ny - p.y) > MAX_SPEED * SPEED_SLACK * dt + POS_SLACK) return snapback();
+      }
+      // stepping OUT to the surface lands on a fixed door/shaft tile the player never chose;
+      // collision-checking it could strand them underground, so only check entries and normal steps
+      if (!(zChange && nz === 0) && posBlocked(nx, ny, nz, p.x, p.y)) return snapback();
+      m.x = nx; m.y = ny; m.z = nz; m.b = nb;
+      p.lastPosAt = now;
+      if (zChange) p.lastZAt = now;
       // fall damage: dropping 2+ elevation levels in one step hurts (drop − 1 hp)
       const moved = Math.hypot(m.x - p.x, m.y - p.y);
       if (p.z === 0 && !m.b && moved > 0.01 && moved < 3) {
@@ -251,7 +320,7 @@ wss.on('connection', (ws) => {
         if (drop >= 2 && world.tiles[ti(m.x, m.y)] !== T.WATER) {
           p.lastDamageAt = now;
           p.hp = Math.max(0, p.hp - (drop - 1));
-          if (p.hp <= 0) { p.hp = 10; p.z = 0; [m.x, m.y] = respawnPoint(id); }
+          if (p.hp <= 0) { p.hp = 10; p.z = 0; [m.x, m.y] = respawnPoint(id); warped(p); }
           send(ws, { t: 'hp', hp: p.hp, x: m.x, y: m.y });
           send(ws, { t: 'msg', s: '💥 You fell hard!' });
         }
@@ -289,6 +358,17 @@ wss.on('connection', (ws) => {
             }
           }
       }
+    }
+
+    // test-only unvalidated teleport, gated behind HEARTH_ALLOW_WARP. Broadcasts the same
+    // 'pos' shape the real handler does so relay assertions keep working.
+    else if (m.t === 'warp' && ALLOW_WARP) {
+      const wx = Number(m.x), wy = Number(m.y);
+      if (!Number.isFinite(wx) || !Number.isFinite(wy)) return;
+      p.x = wx; p.y = wy; p.z = m.z | 0; p.b = m.b | 0;
+      if (world.tiles[ti(p.x, p.y)] !== T.WATER) { p.lastLandX = p.x; p.lastLandY = p.y; }
+      warped(p); p.lastZAt = 0;
+      bcast({ t: 'pos', id, x: p.x, y: p.y, z: p.z, b: p.b });
     }
 
     else if (m.t === 'furn') {
@@ -580,7 +660,7 @@ wss.on('connection', (ws) => {
       if (!process.env.DEV) return send(ws, { t: 'msg', s: 'Dev mode off — start with: npm run server:dev' });
       const c = m.cmd;
       if (c === 'tp' && typeof m.x === 'number' && typeof m.y === 'number') {
-        p.x = m.x; p.y = m.y; p.z = 0; p.b = 0;
+        p.x = m.x; p.y = m.y; p.z = 0; p.b = 0; warped(p);
         bcast({ t: 'pos', id, x: p.x, y: p.y, z: 0 });
         send(ws, { t: 'hp', hp: p.hp, x: p.x, y: p.y });
       } else if (c === 'mono' && m.i >= 0 && m.i < 4 && !mono[m.i]) {
@@ -620,7 +700,7 @@ wss.on('connection', (ws) => {
         send(ws, { t: 'msg', s: `🧹 Cleared ${n} monsters` });
       } else if (c === 'kill') {
         p.god = false; p.hp = 10; p.z = 0; p.hunger = 10; p.thirst = 10;
-        [p.x, p.y] = respawnPoint(id);
+        [p.x, p.y] = respawnPoint(id); warped(p);
         send(ws, { t: 'hp', hp: 10, x: p.x, y: p.y });
         send(ws, { t: 'msg', s: '💀 Killed — respawned.' });
       }
@@ -1048,7 +1128,7 @@ setInterval(() => {
           const spfw = Math.min(baseSp * 1.25, dfw);
           const nxfw = c.x + ((tx - c.x) / dfw) * spfw, nyfw = c.y + ((ty - c.y) / dfw) * spfw;
           const stifw = ti(nxfw, nyfw);
-          if (stifw >= 0 && stifw < SIZE * SIZE && world.tiles[stifw] !== T.WATER && !structures.has(stifw)) {
+          if (stifw >= 0 && stifw < SIZE * SIZE && world.tiles[stifw] !== T.WATER && !medicTiles.has(stifw) && !structures.has(stifw)) {
             c.x = nxfw; c.y = nyfw;
           }
           // wisp flee ticks override
@@ -1059,7 +1139,7 @@ setInterval(() => {
                   q.lastDamageAt = nowMs;
                   q.hp -= cdmg;
                   const cAng = Math.atan2(q.y - c.y, q.x - c.x);
-                  if (q.hp <= 0) { q.hp = 10; q.z = 0; [q.x, q.y] = respawnPoint(pid); }
+                  if (q.hp <= 0) { q.hp = 10; q.z = 0; [q.x, q.y] = respawnPoint(pid); warped(q); }
                   // frost_wraith slow: send {t:'slow', ticks:30} (Guide substitutions)
                   send(q.ws, { t: 'hp', hp: q.hp, x: q.x, y: q.y, ang: cAng });
                   send(q.ws, { t: 'slow', ticks: 30 });
@@ -1097,7 +1177,7 @@ setInterval(() => {
             q.lastDamageAt = nowMs;
             q.hp -= cdmg;
             const cAng = Math.atan2(q.y - c.y, q.x - c.x);
-            if (q.hp <= 0) { q.hp = 10; q.z = 0; [q.x, q.y] = respawnPoint(pid); }
+            if (q.hp <= 0) { q.hp = 10; q.z = 0; [q.x, q.y] = respawnPoint(pid); warped(q); }
             send(q.ws, { t: 'hp', hp: q.hp, x: q.x, y: q.y, ang: cAng });
             if (c.type === 'frost_wraith') send(q.ws, { t: 'slow', ticks: 30 });
           }
@@ -1146,7 +1226,7 @@ setInterval(() => {
           const sphw = baseSp * 0.5;
           const nhx = c.x + ((homeX - c.x) / dhw) * sphw, nhy = c.y + ((homeY - c.y) / dhw) * sphw;
           const nhI = ti(nhx, nhy);
-          if (nhI >= 0 && nhI < SIZE * SIZE && world.tiles[nhI] !== T.WATER && !structures.has(nhI)) { c.x = nhx; c.y = nhy; }
+          if (nhI >= 0 && nhI < SIZE * SIZE && world.tiles[nhI] !== T.WATER && !medicTiles.has(nhI) && !structures.has(nhI)) { c.x = nhx; c.y = nhy; }
           // despawn at home if still no player near
           if (distHome < 1) {
             const anyNearHome = [...players.values()].some((q) => Math.hypot(q.x - c.x, q.y - c.y) <= 20);
@@ -1264,13 +1344,13 @@ setInterval(() => {
     let nx = c.x + Math.cos(moveAng) * sp, ny = c.y + Math.sin(moveAng) * sp;
     let ni = ti(nx, ny);
     const swims = CAN_SWIM.has(c.type);
-    if (ni < 0 || ni >= SIZE * SIZE || (world.tiles[ni] === T.WATER && !swims) || (structures.has(ni) && creBlocked(ni))) {
+    if (ni < 0 || ni >= SIZE * SIZE || (world.tiles[ni] === T.WATER && !swims) || medicTiles.has(ni) || (structures.has(ni) && creBlocked(ni))) {
       let moved = false;
       for (const rot of [35 * Math.PI / 180, -35 * Math.PI / 180]) {
         const tryAng = moveAng + rot;
         const tnx = c.x + Math.cos(tryAng) * sp, tny = c.y + Math.sin(tryAng) * sp;
         const tni = ti(tnx, tny);
-        if (tni >= 0 && tni < SIZE * SIZE && (world.tiles[tni] !== T.WATER || swims) && (!structures.has(tni) || !creBlocked(tni))) {
+        if (tni >= 0 && tni < SIZE * SIZE && (world.tiles[tni] !== T.WATER || swims) && !medicTiles.has(tni) && (!structures.has(tni) || !creBlocked(tni))) {
           nx = tnx; ny = tny; ni = tni; moved = true; break;
         }
       }
@@ -1326,7 +1406,7 @@ setInterval(() => {
           q.lastDamageAt = nowMs;
           q.hp -= 2;
           const lAng = Math.atan2(q.y - c.y, q.x - c.x);
-          if (q.hp <= 0) { q.hp = 10; q.z = 0; [q.x, q.y] = respawnPoint(pid); }
+          if (q.hp <= 0) { q.hp = 10; q.z = 0; [q.x, q.y] = respawnPoint(pid); warped(q); }
           send(q.ws, { t: 'hp', hp: q.hp, x: q.x, y: q.y, ang: lAng });
         }
         break;
@@ -1344,7 +1424,7 @@ setInterval(() => {
           q.hp -= 1;
           const cAng = Math.atan2(q.y - c.y, q.x - c.x);
           bcast({ t: 'shot', fx: +c.x.toFixed(1), fy: +c.y.toFixed(1), tx: +q.x.toFixed(1), ty: +q.y.toFixed(1) });
-          if (q.hp <= 0) { q.hp = 10; q.z = 0; [q.x, q.y] = respawnPoint(pid); }
+          if (q.hp <= 0) { q.hp = 10; q.z = 0; [q.x, q.y] = respawnPoint(pid); warped(q); }
           send(q.ws, { t: 'hp', hp: q.hp, x: q.x, y: q.y, ang: cAng });
           break;
         }
@@ -1363,7 +1443,7 @@ setInterval(() => {
             q.lastDamageAt = nowMs;
             q.hp -= cdmg;
             const cAng = Math.atan2(q.y - c.y, q.x - c.x);  // away from creature = push direction
-            if (q.hp <= 0) { q.hp = 10; q.z = 0; [q.x, q.y] = respawnPoint(pid); }
+            if (q.hp <= 0) { q.hp = 10; q.z = 0; [q.x, q.y] = respawnPoint(pid); warped(q); }
             send(q.ws, { t: 'hp', hp: q.hp, x: q.x, y: q.y, ang: cAng });
           }
         }
@@ -1431,7 +1511,7 @@ setInterval(() => {
             q.hp -= 1;
             const msg = wt === 1 ? 'The freezing water saps your life!' : 'The scalding water burns!';
             send(q.ws, { t: 'msg', s: msg });
-            if (q.hp <= 0) { q.hp = 10; q.z = 0; q.hunger = 10; q.thirst = 10; q.thermN = 0; [q.x, q.y] = respawnPoint(pid); }
+            if (q.hp <= 0) { q.hp = 10; q.z = 0; q.hunger = 10; q.thirst = 10; q.thermN = 0; [q.x, q.y] = respawnPoint(pid); warped(q); }
             send(q.ws, { t: 'hp', hp: q.hp, x: q.x, y: q.y });
           }
         } else { q.thermN = 0; }
@@ -1447,7 +1527,7 @@ setInterval(() => {
       if (delta > 0) healPlayer(q, delta, 'campfire');
       else if (delta) {
         q.hp = Math.min(10, q.hp + delta);
-        if (q.hp <= 0) { q.hp = 10; q.z = 0; q.hunger = 10; q.thirst = 10; [q.x, q.y] = respawnPoint(pid); }
+        if (q.hp <= 0) { q.hp = 10; q.z = 0; q.hunger = 10; q.thirst = 10; [q.x, q.y] = respawnPoint(pid); warped(q); }
         send(q.ws, { t: 'hp', hp: q.hp, x: q.x, y: q.y });
       }
     }

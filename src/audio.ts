@@ -1,9 +1,13 @@
 // Procedural audio engine — everything synthesized with Web Audio, no sound files.
+import { getSetting, setSetting } from './settings.ts';
+
+const VOL = 0.6;                                       // master gain when unmuted
 
 export class GameAudio {
   ctx!: AudioContext; master!: GainNode; noise!: AudioBuffer;
   rain!: GainNode; wind!: GainNode; bliz!: GainNode;
-  started = false; muted = false;
+  // seeded from the menu's Settings toggle; the in-game M key writes it back (see toggleMute)
+  started = false; muted = getSetting('hearth-muted');
   private barTimer = 99; private pluckTimer = 2; private bar = 0;
   private roots = [220, 174.61, 196, 146.83];          // Am–F–G–Dm feel
 
@@ -12,7 +16,7 @@ export class GameAudio {
     this.started = true;
     this.ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
     this.master = this.ctx.createGain();
-    this.master.gain.value = 0.6;
+    this.master.gain.value = this.muted ? 0 : VOL;
     this.master.connect(this.ctx.destination);
     const len = this.ctx.sampleRate * 2;
     this.noise = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
@@ -26,7 +30,8 @@ export class GameAudio {
   toggleMute() {
     if (!this.started) return false;
     this.muted = !this.muted;
-    this.master.gain.setTargetAtTime(this.muted ? 0 : 0.6, this.ctx.currentTime, 0.1);
+    setSetting('hearth-muted', this.muted);          // keep the menu toggle in sync
+    this.master.gain.setTargetAtTime(this.muted ? 0 : VOL, this.ctx.currentTime, 0.1);
     return this.muted;
   }
 

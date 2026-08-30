@@ -1,6 +1,8 @@
 # Project state — Echoes of the Hearth
 
-**Last updated:** 2026-08-30 by the session recorded in
+**Last updated:** 2026-08-30 — small-fixes pass (settings wiring, `ui.reset()`, scene-owned
+tint timers, medic-hut creature blocking, README accuracy) plus **server-authoritative
+movement validation**. Prior entry:
 `session-context-dump/2026-08-30_1302__medic-seq-menu-logo.md`
 
 This is the status source of truth. Update it in the same pass as any session dump.
@@ -68,20 +70,58 @@ This is the status source of truth. Update it in the same pass as any session du
    codes still land together. The Create and Join screens say this plainly — do not remove that note
    or imply isolation the backend cannot deliver. Making it real requires the deferred room
    architecture work.
-2. **Settings toggles are stored but not wired.** `hearth-muted` and `hearth-shownames` persist to
-   localStorage but are not plumbed into `src/audio.ts` / `src/ui.ts`. Mute already works in-game
-   via the `M` key.
-3. **`ui.ts` caches signature strings that survive a quit.** Quit with a medic offer open, rejoin,
-   and if the server re-sends an *identical* offer the signature matches so `#medicPanel` stays
-   hidden until the offer changes. Proper fix is a `reset()` in `ui.ts`.
-4. **Two bare `setTimeout`s in gameplay code** (`src/main.ts`, `clearTint` calls) can fire after the
-   game is destroyed. They only assign tint on a dead sprite and self-expire in under a second.
-5. **Medic huts don't block creature pathing.** They block the player client-side and building
-   server-side, but server-side creature AI walks through the footprint.
-6. **Root `README.md` gameplay details are stale** — it says 192×192 map (actual 1280) and lists
-   SPACE as attack (actual: F attacks, SPACE jumps). Worth a pass.
+2. **`test.mjs` is stateful.** It runs against an already-running server on port 8081 and mutates
+   `server/save.json`, so a second run on the same save fails part-way (depleted nodes, tiles
+   already built on). A green run means a *fresh* save. To verify without disturbing a running dev
+   server, copy `server/index.js` with `PORT`/`SAVE_PATH` swapped and point a copy of `test.mjs` at
+   the new port.
 
----
+### Landed: server-authoritative movement
+
+`pos` was the one handler that assigned `m.x`/`m.y` straight to `p.x`/`p.y`. Because every
+other handler range-checks against `p.x`/`p.y`, an unvalidated `pos` defeated all of them —
+fixing movement retroactively hardened the other 24. The `pos` handler now validates:
+
+- **Speed** — `dt` (clamped to 1s so a quiet client cannot bank a jump) × `MAX_SPEED 6.2`
+  (sailing, the game's fastest) × `SPEED_SLACK 1.6` + `POS_SLACK 1.0`. `lastPosAt` advances
+  on reject too, or a rejected client accumulates budget.
+- **Collision** — new `posBlocked(x,y,z,fromX,fromY)`, a z-aware mirror of the client's
+  `blockedAt()`. Deliberately NOT `blocked()`: that treats water as solid, which would forbid
+  swimming and boats. z=0 allows water, bounds elevation climb at 2, blocks structures /
+  `medicTiles` / `LANDMARK_BLOCK`; z=1 requires `digs`; z=2 is unvalidated (see gaps).
+- **Layer changes** — `zAnchor()` requires one mineshaft/shelter within `Z_NEAR 3.0` of *both*
+  the origin and the destination, plus a 500ms cooldown. Checking the destination alone was a
+  live exploit: it allowed an unbounded hop to any mineshaft or any player's shelter.
+- **Snapback** — `{t:'fix',x,y,z,b}`, throttled to one per 250ms, applied client-side next to
+  the existing `hp` teleport branch.
+- **Grace window** — all 12 server-side repositioning sites call `warped(p)`, which suspends
+  the distance check for 1s so an in-flight `pos` from the old location does not start a fight.
+
+`test.mjs` predates this and teleported the player 45 times, so the server gained a `warp`
+message gated behind `HEARTH_ALLOW_WARP` (a dedicated var — `DEV` also changes `GROW_DIV` and
+would corrupt the crop test). **Run the suite with `HEARTH_ALLOW_WARP=1` or it will fail.**
+Verified inert without the flag. New stages H1–H7 cover speed, collision, water-still-passable,
+illegal layer change, the remote-mineshaft exploit, and legitimate descent.
+
+Remaining movement gaps, in rough priority order:
+1. **z=2 interiors are unvalidated for x/y** — the server has no `shelterAnchor`/`shelterLvl`,
+   so inside a shelter a client can walk through walls. Closing it means recording which
+   shelter the player entered at the z-transition.
+2. **Layer-exit collision is skipped** — the exit tile is a fixed door/shaft the player never
+   chose; rejecting it could strand them underground.
+3. **`jumpT` is not observable server-side**, so the climb bound stays permissive at 2.
+4. **The 1s post-teleport grace fully disables the distance check** — anyone who can trigger a
+   server teleport gets one free window.
+
+### Closed in this pass
+
+- ~~Settings toggles stored but not wired~~ — now read through the new `src/settings.ts` leaf module.
+- ~~`ui.ts` caches signatures that survive a quit~~ — `reset()` added and called from `quitToMenu()`.
+- ~~Two bare `setTimeout`s in gameplay code~~ — both are `this.time.delayedCall` scene-owned timers.
+- ~~Medic huts don't block creature pathing~~ — `medicTiles` now gates creature steering, leash
+  walk-home, frost-wraith darts, and `blocked()` (which also covers animal AI).
+- ~~Root `README.md` gameplay details are stale~~ — full accuracy pass against the source.
+- ~~Movement is client-authoritative~~ — see above.
 
 ## Next work, in the order previously recommended
 
@@ -92,8 +132,7 @@ This is the status source of truth. Update it in the same pass as any session du
 2. **PLAN.md systems with zero code** — fire spread automata, water flow / trenches, blight
    evolution, convergence events, transport networks, Blighted Heart mini-dungeons, roles/classes.
    Fire spread and blight evolution were judged the highest value of these.
-3. **Wire the Settings toggles** (small, self-contained).
-4. **`ui.ts` `reset()`** to clear cached signatures on quit (small).
+Items 3 and 4 of the previous list (Settings wiring, `ui.ts` `reset()`) are done — see above.
 
 ---
 
@@ -109,6 +148,7 @@ This is the status source of truth. Update it in the same pass as any session du
 | Player rig / animation | `src/rig.ts` |
 | In-game DOM UI | `src/ui.ts` |
 | Menu / lobby / profile / settings | `src/menu.ts`, `src/boot.ts` |
+| Persisted setting toggles (leaf module) | `src/settings.ts` |
 | Asset manifest | `src/assets.ts` |
 | Procedural audio | `src/audio.ts` |
 | All art | `assets/sprites/**` (SVG only) |

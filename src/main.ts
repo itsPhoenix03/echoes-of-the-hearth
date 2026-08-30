@@ -24,8 +24,9 @@ import {
 } from "../shared/defs.js";
 import { isNightTime, NIGHT_START } from "../shared/time.js";
 import { Rig, makePartTextures } from "./rig.ts";
-import { initUI, showMsg, UIState } from "./ui.ts";
+import { initUI, showMsg, reset as resetUI, UIState } from "./ui.ts";
 import { GameAudio } from "./audio.ts";
+import { getSetting } from "./settings.ts";
 import { ASSET_MANIFEST, NODE_SPR, STRUCT_SPR } from "./assets.ts";
 
 const TW = 64,
@@ -268,6 +269,8 @@ class Hearth extends Phaser.Scene {
   ready = false;
   meLabel: Phaser.GameObjects.Text | null = null;
   myName = "Keeper";
+  // menu Settings → "Show player names"; read once per scene, so a toggle lands on the next join
+  showNames = getSetting("hearth-shownames");
   knockedUntil = 0; // ms timestamp: player knockback active until this time
   slowUntil = 0; // tick count: frost_wraith slow active until this tick (client-side)
   vignetteRect!: Phaser.GameObjects.Rectangle; // red damage flash overlay
@@ -1000,7 +1003,7 @@ class Hearth extends Phaser.Scene {
     for (const s of this.exitSpr.values()) s.setVisible(z === 1);
     for (const o of this.others.values()) {
       o.rig.setVisible(o.z === z);
-      o.label.setVisible(o.z === z);
+      o.label.setVisible(this.showNames && o.z === z);
       o.boat?.setVisible(o.z === z);
     }
     // hide birds underground
@@ -1078,7 +1081,7 @@ class Hearth extends Phaser.Scene {
     // new players join on the surface (z=0) — hide them unless WE are on the surface too,
     // otherwise a player inside a shelter/mine sees the newcomer walking through their interior
     rig.setVisible(this.z === 0);
-    label.setVisible(this.z === 0);
+    label.setVisible(this.showNames && this.z === 0);
     this.others.set(pid, {
       rig,
       tx: p.x,
@@ -1148,7 +1151,7 @@ class Hearth extends Phaser.Scene {
         if (o) {
           o.z = pz || 0;
           o.rig.setVisible(o.z === this.z);
-          o.label.setVisible(o.z === this.z);
+          o.label.setVisible(this.showNames && o.z === this.z);
           if (eq) o.rig.hold(eq);
           this.setOtherBoat(o, pb | 0);
         }
@@ -1183,7 +1186,7 @@ class Hearth extends Phaser.Scene {
         if (nz !== o.z) {
           o.z = nz;
           o.rig.setVisible(o.z === this.z);
-          o.label.setVisible(o.z === this.z);
+          o.label.setVisible(this.showNames && o.z === this.z);
           o.boat?.setVisible(o.z === this.z);
           o.rig.setPosition(p.x, p.y);
         }
@@ -1449,6 +1452,23 @@ class Hearth extends Phaser.Scene {
         if (this.z !== 0) this.setZ(0);
       }
       this.hp = m.hp;
+    } else if (m.t === "fix") {
+      // server rejected our last 'pos' — snap back to its authoritative position.
+      // same teleport mechanism as the hp correction above (px/py + setZ).
+      this.px = m.x;
+      this.py = m.y;
+      if (this.z !== m.z) this.setZ(m.z);
+      if (!m.b) {
+        this.sailing = false;
+        this.boatKind = 0;
+        this.boatSpr?.destroy();
+        this.boatSpr = null;
+      } else {
+        this.boatKind = m.b;
+        this.sailing = true;
+      }
+      this.swimming =
+        !m.b && this.z === 0 && this.tileAt(this.px, this.py) === T.WATER;
     } else if (m.t === "slow") {
       // frost_wraith slow: sent as standalone message (Guide substitutions)
       this.slowUntil = (this.slowUntil || 0) + (m.ticks || 30);
@@ -1459,7 +1479,8 @@ class Hearth extends Phaser.Scene {
         bs.setTint(0xffaa00);
         this.audio.telegraph();
         // tint clears when next cre broadcast updates position (windup is 8 ticks ~0.8s)
-        setTimeout(() => bs.clearTint(), 900);
+        // scene-owned timer: dies with the scene, so it can never touch a sprite freed by a quit
+        this.time.delayedCall(900, () => bs.clearTint());
       }
     } else if (m.t === "stat") {
       this.hunger = m.hunger;
@@ -1509,7 +1530,7 @@ class Hearth extends Phaser.Scene {
         s.setTintFill(0xffffff);
         // restore any base tint (shambler/wraith) — clearTint alone would revert them to base art
         const baseTint = s.getData("baseTint");
-        setTimeout(() => { s.clearTint(); if (baseTint) s.setTint(baseTint); }, 80);
+        this.time.delayedCall(80, () => { s.clearTint(); if (baseTint) s.setTint(baseTint); });
         // tween toward pushed position over 90ms with Back.easeOut (Guide §2.2)
         if (m.ang !== undefined) {
           const tx2 = s.getData("tx"),
@@ -1909,7 +1930,8 @@ class Hearth extends Phaser.Scene {
         strokeThickness: 3,
       })
       .setOrigin(0.5, 1)
-      .setDepth(mp.y + 1);
+      .setDepth(mp.y + 1)
+      .setVisible(this.showNames);
   }
 
   tileAt(x: number, y: number) {
@@ -2910,10 +2932,16 @@ export function quitToMenu(opts: { confirm?: boolean } = {}) {
   showMsg("", 1);
   for (const el of gameDomEls()) el.style.display = "none";
 
-  // 7. The camera clamp counter-scales the DOM; the menu must not inherit that factor.
+  // 7. The UI singleton outlives the game (see getUiApi), so its signature caches would
+  //    otherwise carry into the next session and suppress the first redraw of an identical
+  //    state — a re-offered medic trade would never re-open its panel. Done after the DOM
+  //    is hidden so nothing can repopulate the caches afterwards.
+  resetUI();
+
+  // 8. The camera clamp counter-scales the DOM; the menu must not inherit that factor.
   document.documentElement.style.setProperty("--uiz", "1");
 
-  // 8. Allow startGame() to boot a fresh world, then let the menu take over.
+  // 9. Allow startGame() to boot a fresh world, then let the menu take over.
   gameStarted = false;
   window.dispatchEvent(new Event("hearth:quit"));
 }

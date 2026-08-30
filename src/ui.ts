@@ -6,11 +6,22 @@ import { isNightTime } from '../shared/time.js';
 
 const $ = (id: string) => document.getElementById(id)!;
 let msgTimer = 0;
+// set by initUI() so reset() can reach the singleton's closure state without exporting it
+let resetSession: (() => void) | null = null;
 
 export function showMsg(s: string, ms = 3500) {
   const el = $('msg');
   el.textContent = s; el.style.display = 'block';
   clearTimeout(msgTimer); msgTimer = window.setTimeout(() => (el.style.display = 'none'), ms);
+}
+
+// Drop every scrap of per-session state (signature caches, selection, chest + medic offer)
+// on quit-to-menu. The caches exist to skip redundant DOM writes, so a re-join that produced
+// an identical signature — e.g. the same medic offer — would otherwise never be drawn at all,
+// leaving its panel hidden. initUI() itself is deliberately NOT re-run (listeners would double).
+export function reset() {
+  clearTimeout(msgTimer); msgTimer = 0;
+  resetSession?.();
 }
 
 export interface UIState {
@@ -151,6 +162,15 @@ export function initUI(
     },
     closeChest: closeChestPanel,
     isChestOpen: () => chestOpenI >= 0,
+  };
+
+  // see reset() above — the whole closure state, in one place
+  resetSession = () => {
+    closeChestPanel();
+    selected = null;
+    invSig = ''; panelSig = '';
+    medicOffer = null; medicSig = '';
+    $('medicPanel').style.display = 'none';
   };
 
   return Object.assign(function update(st: UIState) {
