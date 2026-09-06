@@ -177,7 +177,12 @@ export function initUI(
     // Task 2: use isNightTime
     const night = isNightTime(st.time);
     const hour = ((st.time * 24 + 6) % 24) | 0;
-    const warn = (v: number) => (v <= 3 ? `<b style="color:#ff6a6a">${v}</b>` : `${v}`);
+    // The Go server decays hunger/thirst as floats, so display-round them — without this
+    // the HUD reads "8.256999999999996".
+    const warn = (raw: number) => {
+      const v = Math.ceil(raw);
+      return v <= 3 ? `<b style="color:#ff6a6a">${v}</b>` : `${v}`;
+    };
     $('hud').innerHTML =
       `${'❤'.repeat(Math.max(0, st.hp))}${'🖤'.repeat(Math.max(0, 10 - st.hp))}` +
       ` 💧${warn(st.thirst)} 🍖${warn(st.hunger)}<br>` +
