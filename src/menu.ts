@@ -45,9 +45,10 @@ const SCREEN_NAMES: ScreenName[] = [
  * Used by the in-game Quit button (via the "hearth:quit" event) after the game
  * has torn itself down.
  */
-export function showMenu(): void {
+export function showMenu(error?: string): void {
   const menu = document.getElementById("menu");
   if (!menu) return;
+  showHomeError(error);
   const nameEl = document.getElementById("menu-home-name");
   if (nameEl) nameEl.textContent = getStoredName() || "no name set";
   // the in-game M key can have flipped mute while the menu was hidden
@@ -58,6 +59,27 @@ export function showMenu(): void {
   });
   menu.dataset.screen = "home";
   menu.style.display = "flex";
+}
+
+/**
+ * Surface a join/connection failure on the title screen. Created on demand so the menu
+ * markup needs no placeholder element.
+ */
+function showHomeError(text?: string): void {
+  let el = document.getElementById("menu-home-error");
+  if (!text) {
+    el?.remove();
+    return;
+  }
+  if (!el) {
+    el = document.createElement("p");
+    el.id = "menu-home-error";
+    el.style.cssText =
+      "margin:10px auto 0;max-width:34ch;color:#ffb0a0;background:rgba(60,14,14,.75);" +
+      "border:1px solid #8b3a2e;border-radius:8px;padding:8px 12px;font:13px/1.4 monospace;text-align:center";
+    document.getElementById("menu-home")?.appendChild(el);
+  }
+  el.textContent = text;
 }
 
 export function initMenu(onJoin: (opts: JoinOpts) => void): void {
@@ -148,6 +170,7 @@ export function initMenu(onJoin: (opts: JoinOpts) => void): void {
   }
 
   function finishJoin(room: string) {
+    showHomeError(undefined);
     menu!.style.display = "none";
     onJoin({ name: getStoredName(), room });
   }
@@ -256,7 +279,9 @@ export function initMenu(onJoin: (opts: JoinOpts) => void): void {
   });
 
   // The in-game Quit button dispatches this; registered here so it is always live.
-  window.addEventListener("hearth:quit", () => showMenu());
+  window.addEventListener("hearth:quit", (e) =>
+    showMenu((e as CustomEvent)?.detail?.error),
+  );
 
   refreshHome();
   showScreen("home");

@@ -1,6 +1,7 @@
 # Project state — Echoes of the Hearth
 
-**Last updated:** 2026-08-30 — small-fixes pass (settings wiring, `ui.reset()`, scene-owned
+**Last updated:** 2026-09-06 — **Go game server, Slices 1 + 2** (branch `go-migration`).
+Previous entry: 2026-08-30 — small-fixes pass (settings wiring, `ui.reset()`, scene-owned
 tint timers, medic-hut creature blocking, README accuracy) plus **server-authoritative
 movement validation**. Prior entry:
 `session-context-dump/2026-08-30_1302__medic-seq-menu-logo.md`
@@ -75,6 +76,54 @@ This is the status source of truth. Update it in the same pass as any session du
    already built on). A green run means a *fresh* save. To verify without disturbing a running dev
    server, copy `server/index.js` with `PORT`/`SAVE_PATH` swapped and point a copy of `test.mjs` at
    the new port.
+
+### Landed: Go game server — Slices 1 and 2 (branch `go-migration`)
+
+The server is being split in two. **Node control plane** (`control/`, :8090) owns identity,
+profiles, world allocation and issues a 30s Ed25519-signed ticket. **Go game server**
+(`gameserver/`, :8082) owns the world and all gameplay. Go verifies tickets *offline* from a
+public key — it never calls Node on the connection path, so a Node hiccup cannot stop players
+connecting. Wire spec: `docs/10_GO_WIRE_PROTOCOL.md`. Ticket format: `control/PROTOCOL.md`.
+
+**Worldgen is bit-exact.** `gameserver/world/` is a literal port of `shared/world.js`,
+including `alea@1.0.1` and `simplex-noise@4.0.3` (ported by hand — a different-but-valid
+Simplex gives a different world). Verified across 5 seeds × 8 fields by
+`node tools/worldparity/compare.mjs`, which is the gate: **run it after any worldgen edit.**
+Exactness was required because `test.mjs` calls `genWorld('hearth-1')` and asserts against
+those exact tiles; keeping it preserves ~1000 lines of black-box tests.
+
+**The client no longer generates terrain.** Go streams 64x64 chunks (20x20 grid, pushed
+within Chebyshev radius 2, 2-byte-run RLE + base64). `src/tiles.ts` is the streamed tile
+store; unloaded tiles use sentinel `255`, render as void (NOT water — water is walkable and
+would mislead), and movement input is gated until the player's own chunk arrives. This
+deletes the client/server terrain divergence class permanently.
+
+**Rules data is no longer duplicated.** `shared/defs.json` is the single authored source;
+`shared/defs.js` is *generated* from it (`node tools/defs/gen-defs.mjs`, `--check` for drift,
+`npm run defs:check`). A runtime JSON re-export was not possible — no import syntax works in
+both this repo's Node 18 and a Vite browser build. **Edit the JSON, then regenerate.**
+
+Ported in Slice 2: `gather`, `craft`, `build`, `dig`, `plant`, `harvest`, `furn`, `torch`,
+`eq`, `wear`, `use`, `water`, `chest_open`, `chest_move`, structure/node `atk`, boat hazards,
+node respawn, crop growth, wooden erosion, survival tick, persistence to
+`gameserver/world.save.json` (**never** `server/save.json` — the legacy server owns that).
+
+Concurrency contract, and it must be preserved: **all game state is owned by the single
+`Room.Run` goroutine with no locks.** Socket readers only push onto an inbox; writers only
+drain a buffered per-player channel. A client whose buffer fills is dropped, never waited on,
+so a slow client can never stall the world tick.
+
+### Still open before the Go server can replace Node
+
+1. **Slice 3** — creatures, animals, weather, medic NPCs, `usecore`/progression, `devcmd`.
+2. **Medics are not on the wire.** The client used to derive them from the whole generated
+   world, which a streaming client cannot do. Needs a protocol addition.
+3. **The legacy `?legacy=1` client path against :8081 is untested** — it was written but
+   never exercised (agents were barred from binding 8081 while the user's dev server ran).
+4. **`hunger`/`thirst` are floats in Go, ints in the legacy server.** The HUD rounds; decide
+   which side owns the rounding.
+5. Run the suites with `HEARTH_ALLOW_WARP=1` — both `test.mjs` and `gameserver/test-go.mjs`
+   position players via `warp`, which is off unless that env var is set.
 
 ### Landed: server-authoritative movement
 

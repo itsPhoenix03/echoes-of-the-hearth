@@ -9,6 +9,10 @@
     "build": "tsc --noEmit && vite build",
     "server": "node server/index.js",
     "server:dev": "set DEV=1&& node server/index.js",
+    "control": "node control/index.js",
+    "defs": "node tools/defs/gen-defs.mjs",
+    "defs:check": "node tools/defs/gen-defs.mjs --check",
+    "test:go": "node gameserver/test-go.mjs",
     "preview": "vite preview --host"
   },
   "dependencies": {
