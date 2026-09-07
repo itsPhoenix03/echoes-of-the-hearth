@@ -108,8 +108,12 @@ func (s *Server) handshake(ctx context.Context, c *ws.Conn, addr string) (*room.
 		s.authFail(actx, c, "wrong-world")
 		return nil, errors.New("net: ticket is for another world")
 	}
-	// Identity comes from the ticket, never from a client-sent field (§1).
-	return room.NewSession(room.NewSessionID(), payload.UserID, payload.Name, addr), nil
+	// Identity comes from the ticket, never from a client-sent field (§1). The
+	// same goes for the dev-tools claim: it rides in the signed payload, so a
+	// client cannot grant itself the F9/F10 commands.
+	sess := room.NewSession(room.NewSessionID(), payload.UserID, payload.Name, addr)
+	sess.DevClaim = payload.Dev
+	return sess, nil
 }
 
 func (s *Server) authFail(ctx context.Context, c *ws.Conn, reason string) {

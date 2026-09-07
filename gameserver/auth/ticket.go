@@ -26,6 +26,11 @@ type Payload struct {
 	IAT        int64  `json:"iat"`
 	Exp        int64  `json:"exp"`
 	JTI        string `json:"jti"`
+	// Dev is the optional dev-tools claim (docs/09 §7). A pointer so "the
+	// control plane did not say" stays distinguishable from an explicit false;
+	// Node does not mint this field yet, so today it is always nil and the game
+	// server falls back to its HEARTH_DEV env var.
+	Dev *bool `json:"dev"`
 }
 
 // Verifier holds the cached public key. It is immutable after construction and

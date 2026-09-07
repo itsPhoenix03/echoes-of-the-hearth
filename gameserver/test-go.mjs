@@ -7,9 +7,9 @@
 // below are copied verbatim from test.mjs wherever the behaviour is meant to be
 // identical.
 //
-// Stages that need Slice 3 (creatures, wildlife, the medic NPC, monolith
-// progression) are skipped with an explicit `skip` line — never by deleting or
-// weakening an assertion.
+// Slice 4 (the medic NPC, endgame progression, waves, dev tooling) is in, so
+// every stage now runs for real: there are no `skip` lines left in this file,
+// and none may be added — a stage that cannot fail asserts nothing.
 //
 //   Terminal 1:  node control/index.js
 //   Terminal 2:  cd gameserver && HEARTH_ALLOW_WARP=1 go run ./cmd/hearthd
@@ -19,7 +19,7 @@
 // whatever /api/join returns), HEARTH_SEED (default hearth-1).
 
 import WebSocket from 'ws';
-import { genWorld, SIZE } from '../shared/world.js';
+import { genWorld, findMedicSpawns, SIZE, MONOLITHS, CORE } from '../shared/world.js';
 import { NODE, MAX_HP, MEDICINE_HEAL } from '../shared/defs.js';
 
 const CONTROL = process.env.HEARTH_CONTROL_URL || 'http://localhost:8090';
@@ -28,7 +28,6 @@ const SEED = process.env.HEARTH_SEED || 'hearth-1';
 const world = genWorld(SEED);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const fail = (s) => { console.log('FAIL:', s); process.exit(1); };
-const skip = (s) => console.log('skip:', s);
 
 // The Go server pushes 25 chunks on join and another batch on every chunk
 // crossing; a client that stops draining is dropped, so chunks are counted and
@@ -151,8 +150,12 @@ if (!sd) fail('workbench not demolished');
 if (A.state.inv.wood !== woodBefore + 4) fail(`refund wrong: ${woodBefore} -> ${A.state.inv.wood}`);
 console.log('demolition OK: refunded 4 wood, removal synced to B');
 
-// animals broadcast in sim tick — Slice 3
-skip('animal sim (cre broadcast): creatures and wildlife are Slice 3');
+// animals broadcast in sim tick — spawn is player-biased, so expect a population.
+// Assertions copied verbatim from the root test.mjs.
+const cre = A.msgs.filter((m) => m.t === 'cre').pop();
+if (!cre || !Array.isArray(cre.a)) fail('no animal data in sim broadcast');
+if (cre.a.length < 3) fail('too few animals spawned: ' + cre.a.length);
+console.log('animal sim OK (', cre.a.length, 'animals roaming:', [...new Set(cre.a.map(a => a[3]))].join(','), ')');
 
 // --- mining flow: gather materials, rebuild workbench, craft pick + mine entrance, descend, dig ---
 const byDist = (list) => list
@@ -300,8 +303,36 @@ const wearInv2 = await A.wait('inv', 2000);
 if (wearInv2.wornGear !== null) fail('E3: wornGear should be null after toggle, got ' + wearInv2.wornGear);
 console.log('E3 wear toggle off OK: wornGear =', wearInv2.wornGear);
 
-// --- Stage E4: chit ang — Slice 3 ---
-skip('E4 chit ang: needs a live creature to strike (Slice 3)');
+// --- Stage E4: chit ang field — attack a nearby creature and assert ang is numeric ---
+// A single unarmed hit does 1 damage and every CRE_TYPES hp floor is 2, so a hit on a FRESH
+// creature always survives and always produces a chit. It can still miss for reasons outside
+// the assertion's control — the creature moved between the 'cre' snapshot and the swing, or
+// it was already damaged by an earlier stage — so this retries across candidates and spawns
+// (the same technique G5 uses) within a bounded budget and then fails. There is deliberately
+// no "no chit arrived, skipping" path: a test that cannot fail asserts nothing.
+let e4chit = null, e4sawCre = false;
+const e4t0 = Date.now();
+while (!e4chit && Date.now() - e4t0 < 20000) {
+  const latest = A.msgs.filter((m) => m.t === 'cre').pop();
+  const cands = latest?.c || [];
+  if (!cands.length) { await sleep(300); continue; }
+  e4sawCre = true;
+  for (const [cid, cx, cy] of cands) {
+    A.msgs = A.msgs.filter((m) => m.t !== 'chit');
+    warp(A, cx + 0.5, cy, 0); await sleep(80);
+    A.send({ t: 'atk' });
+    await sleep(250);
+    const hit = A.msgs.find((m) => m.t === 'chit' && m.id === cid);
+    if (hit) { e4chit = hit; break; }
+    await sleep(450);   // clear the 400ms atk cooldown before trying the next candidate
+  }
+}
+if (!e4sawCre) fail('E4: no creature ever appeared in a cre broadcast');
+if (!e4chit) fail('E4: no creature survived a hit within the time budget (no chit to check ang on)');
+if (typeof e4chit.ang !== 'number' || !Number.isFinite(e4chit.ang))
+  fail('E4: chit arrived without a finite numeric ang: ' + JSON.stringify(e4chit));
+if (e4chit.by !== initA.id) fail('E4: chit.by mismatch: ' + e4chit.by);
+console.log('E4 chit ang OK: ang =', e4chit.ang.toFixed(3));
 
 // --- Stage E5: farming — place farmplot near workbench, plant wheat, check crop broadcast, reject early harvest ---
 warp(A, px, py, 0); await sleep(80);
@@ -350,7 +381,7 @@ const badHarvest = A.msgs.find((m) => m.t === 'crop' && m.crop === null);
 if (badHarvest) fail('E5: harvest succeeded at stage 0 — should have been rejected!');
 console.log('E5 early harvest correctly rejected');
 
-// --- Stage F: Medicine (Slice 2) + Medic NPC (Slice 3) ---
+// --- Stage F: Medicine and the Medic NPC ---
 warp(A, px, py, 0); await sleep(80);
 const medBushes = byDist([...world.nodes].filter(([, k]) => k === NODE.BUSH).map(([i]) => i)).slice(12, 18);
 for (const b of medBushes) {
@@ -390,18 +421,192 @@ for (let c = 0; c < 3; c++) { A.send({ t: 'craft', r: 'medicine' }); await sleep
 if ((A.state.inv?.medicine || 0) !== 3) fail('a) medicine craft failed: expected 3, got ' + A.state.inv?.medicine);
 console.log('a) craft medicine OK: 3x Herbal Medicine');
 
-// Drive hp down to <=3 with the deterministic fall-damage cliff, then heal.
-// Stand away from the campfire first: campfire regen would fight the drop.
-if (cliff) {
-  for (let i = 0; i < 10 && (A.state.hp ?? 0) > 3; i++) {
+// Stage F spends two budgets, and the order matters. The medic refuses a healthy player, so
+// every bargain step re-injures with the fall-damage cliff first; and the three medicine doses
+// from (a) are spent LAST, so the heal loop in (b) always runs against a genuinely injured
+// player rather than silently passing on one the medic already healed.
+//
+// One offer serves the whole bargain: (d) drains the resource it asked for and proves a
+// refused accept charges nothing, then (d2) re-gathers that exact resource and proves the paid
+// path. Nothing slower than ~20 s sits between the offer and either accept, well inside its
+// 60 s life.
+
+// --- Stage F c/d/e/f: the medic bargain ---
+// Use the Woods medic, not the Spire one: the Spire tile is snow, and standing there without
+// a worn Fur Cloak takes -1 hp every 5s environmental tick. That does not arm the in-combat
+// lockout (environmental chip damage deliberately is not counted as combat), but it does keep
+// re-injuring the player, which would race the full-health assertion in (e).
+const medics = findMedicSpawns(world);
+const medicWoods = medics.find((md) => md.islandId === 'woods');
+if (!medicWoods) fail('F: findMedicSpawns did not return a medic on the Woods');
+if (!cliff) fail('F: no cliff found — the medic stages need a deterministic way to take damage');
+
+// The cliff is the only deterministic damage source here: a validated 1-tile step off a 2+
+// elevation drop costs exactly 1 hp. It DOES stamp lastDamageAt, so every medic interaction
+// after it has to wait out the server's 5s in-combat lockout.
+const hurt = async (down) => {
+  for (let i = 0; i < 14 && (A.state.hp ?? 0) > down; i++) {
     warp(A, cliff[0], cliff[1], 0); await sleep(80);
     A.msgs = A.msgs.filter((m) => m.t !== 'hp');
     A.send({ t: 'pos', x: cliff[0] + 1, y: cliff[1], z: 0 });
     await A.wait('hp', 2000);
   }
-}
+};
+const atMedic = async () => { warp(A, medicWoods.x, medicWoods.y, 0); await sleep(80); await sleep(5300); };
 
-// b) use medicine — heals exactly MEDICINE_HEAL, capped so hp never exceeds MAX_HP
+await hurt(3);
+if ((A.state.hp ?? 0) > 3) fail('F: could not injure the player below 4 hp, got ' + A.state.hp);
+await atMedic();
+
+// c) inspect -> offer; a second inspect must return the SAME offer id (stability)
+A.msgs = A.msgs.filter((m) => m.t !== 'medicOffer' && m.t !== 'medicResult');
+A.send({ t: 'medic', medicId: medicWoods.id, action: 'inspect' });
+const offer1 = await A.wait('medicOffer');
+if (!offer1.offer?.id) fail('c) medic inspect returned no offer: ' + JSON.stringify(offer1));
+if (typeof offer1.offer.amount !== 'number' || offer1.offer.amount < 1)
+  fail('c) offer amount is not a positive number: ' + JSON.stringify(offer1.offer));
+if (typeof offer1.offer.expiresInMs !== 'number' || offer1.offer.expiresInMs <= 0 || offer1.offer.expiresInMs > 60000)
+  fail('c) offer expiresInMs outside the 60s window: ' + JSON.stringify(offer1.offer));
+if (offer1.maxHp !== MAX_HP) fail('c) medicOffer carried the wrong maxHp: ' + JSON.stringify(offer1));
+console.log(`c) medic inspect OK: wants ${offer1.offer.amount} ${offer1.offer.resource}`);
+await sleep(300);
+A.msgs = A.msgs.filter((m) => m.t !== 'medicOffer');
+A.send({ t: 'medic', medicId: medicWoods.id, action: 'inspect' });
+const offer2 = await A.wait('medicOffer');
+if (offer2.offer?.id !== offer1.offer.id) fail(`c) offer not stable: ${offer1.offer.id} -> ${offer2.offer?.id}`);
+if (offer2.offer.expiresInMs > offer1.offer.expiresInMs)
+  fail('c) a repeat inspect refreshed the expiry — the offer must age, not reset');
+console.log('c) medic offer stability OK: repeat inspect returns the same offer id');
+
+const needRes = offer1.offer.resource, needAmt = offer1.offer.amount;
+
+// d) accept with insufficient resources — and assert the refusal charges nothing. The Woods
+// pool asks for wood, fiber, stone or meat; drain whichever THIS offer wants below its amount.
+// One recipe per resource, each station:null so it crafts from anywhere. Nothing in this suite
+// eats meat, so if the roll asked for meat the counter is already 0.
+const drainWith = { wood: 'fence', fiber: 'torch', stone: 'campfire' }[needRes];
+if (drainWith) {
+  for (let i = 0; i < 60 && (A.state.inv?.[needRes] || 0) >= needAmt; i++) {
+    A.send({ t: 'craft', r: drainWith }); await sleep(120);
+  }
+  await sleep(200);
+}
+if ((A.state.inv?.[needRes] || 0) >= needAmt)
+  fail(`d) could not drain ${needRes} below the offer's amount (${needAmt}); have ${A.state.inv?.[needRes]}, wood ${A.state.inv?.wood}`);
+const shortBefore = A.state.inv?.[needRes] || 0, dHpBefore = A.state.hp;
+await sleep(300);
+A.msgs = A.msgs.filter((m) => m.t !== 'medicResult');
+A.send({ t: 'medic', medicId: medicWoods.id, action: 'accept', offerId: offer1.offer.id });
+const acceptShort = await A.wait('medicResult');
+if (acceptShort.ok || acceptShort.reason !== 'insufficient-resource')
+  fail('d) expected insufficient-resource, got ' + JSON.stringify(acceptShort));
+await sleep(200);
+if ((A.state.inv?.[needRes] || 0) !== shortBefore)
+  fail(`d) a refused bargain still charged the player: ${needRes} ${shortBefore} -> ${A.state.inv?.[needRes]}`);
+if ((A.state.hp ?? 0) !== dHpBefore) fail(`d) a refused bargain moved hp: ${dHpBefore} -> ${A.state.hp}`);
+console.log('d) medic accept correctly rejected: insufficient-resource (nothing deducted)');
+
+// e2) the gate rejections. All of these are checked before hp and before the offer, so they
+// hold at any health — driving them here covers the client's whole reason switch.
+const medicExpect = async (msg, reason, label) => {
+  await sleep(300);
+  A.msgs = A.msgs.filter((m) => m.t !== 'medicResult');
+  A.send(msg);
+  const res = await A.wait('medicResult');
+  if (res.ok || res.reason !== reason) fail(`${label}: expected ${reason}, got ` + JSON.stringify(res));
+  console.log(`${label} OK: ${reason}`);
+};
+await medicExpect({ t: 'medic', medicId: 'medic-nowhere', action: 'inspect' }, 'unknown-medic', 'e2) unknown medic');
+warp(A, medicWoods.x + 6, medicWoods.y, 0); await sleep(150);
+await medicExpect({ t: 'medic', medicId: medicWoods.id, action: 'inspect' }, 'too-far', 'e2) out of range');
+warp(A, medicWoods.x, medicWoods.y, 0); await sleep(150);
+await medicExpect({ t: 'medic', medicId: medicWoods.id, action: 'accept', offerId: 'not-a-real-offer' }, 'offer-mismatch', 'e2) bogus offer id');
+
+// d2) pay-then-heal for real. Re-stock exactly the resource this offer wants and accept the
+// SAME offer — the player must be charged exactly the quoted amount and healed to MAX_HP.
+const payTrees = byDist([...world.nodes].filter(([, k]) => k === NODE.TREE).map(([i]) => i)).slice(25, 40);
+// bushes 18 and 19 are reserved for G1/G2, which need intact nodes.
+const payBushes = byDist([...world.nodes].filter(([, k]) => k === NODE.BUSH).map(([i]) => i)).slice(20, 34);
+const payStones = byDist([...world.nodes].filter(([, k]) => k === NODE.STONE).map(([i]) => i)).slice(24, 36);
+if (needRes === 'meat') {
+  // meat is the one pool entry no node yields, so hunt for it: wildlife rides the same per-tick
+  // `cre` frame as monsters, under `a`, and a bare-handed hit (1 dmg) fells a 1-2 hp deer or
+  // boar in one or two swings. Bounded, then a hard fail — never a skip.
+  const huntT0 = Date.now();
+  while ((A.state.inv?.meat || 0) < needAmt && Date.now() - huntT0 < 25000) {
+    const latest = A.msgs.filter((m) => m.t === 'cre').pop();
+    const prey = latest?.a?.[0];
+    if (!prey) { await sleep(300); continue; }
+    const [, ax, ay] = prey;
+    warp(A, ax + 0.5, ay, 0); await sleep(80);
+    A.send({ t: 'atk' }); await sleep(450);   // 450ms clears the 400ms atk cooldown
+  }
+  if ((A.state.inv?.meat || 0) < needAmt)
+    fail(`d2) could not hunt ${needAmt} meat, have ${A.state.inv?.meat}`);
+  console.log(`d2) hunted ${A.state.inv.meat} meat for the bargain`);
+} else {
+  const nodes = needRes === 'fiber' ? payBushes : needRes === 'stone' ? payStones : payTrees;
+  for (const n of nodes) {
+    if ((A.state.inv?.[needRes] || 0) >= needAmt) break;
+    warp(A, n % SIZE, (n / SIZE) | 0); await sleep(60);
+    for (let h = 0; h < 3; h++) { A.send({ t: 'gather', i: n }); await sleep(280); }
+  }
+  if ((A.state.inv?.[needRes] || 0) < needAmt)
+    fail(`d2) could not re-gather ${needAmt} ${needRes}, have ${A.state.inv?.[needRes]}`);
+}
+// Gathering and hunting both wander into monster range, and a death would respawn the player
+// at full health — which the medic refuses outright. Re-injure if that happened.
+if ((A.state.hp ?? 0) >= MAX_HP) await hurt(3);
+await atMedic();
+const payBefore = A.state.inv[needRes], hpPayBefore = A.state.hp;
+if (hpPayBefore >= MAX_HP) fail('d2) player is at full health — the accept would be refused');
+A.msgs = A.msgs.filter((m) => m.t !== 'medicResult');
+A.send({ t: 'medic', medicId: medicWoods.id, action: 'accept', offerId: offer1.offer.id });
+const paid = await A.wait('medicResult');
+if (!paid.ok) fail('d2) a fully-funded accept was refused: ' + JSON.stringify(paid));
+if (paid.paid?.resource !== needRes || paid.paid?.amount !== needAmt)
+  fail('d2) receipt mismatch: ' + JSON.stringify(paid.paid));
+if (paid.hp !== MAX_HP) fail('d2) treatment must restore full health, got hp=' + paid.hp);
+if (paid.healed !== MAX_HP - hpPayBefore) fail(`d2) healed should be ${MAX_HP - hpPayBefore}, got ${paid.healed}`);
+await sleep(200);
+if (A.state.inv[needRes] !== payBefore - needAmt)
+  fail(`d2) charged the wrong amount: ${needRes} ${payBefore} -> ${A.state.inv[needRes]}, expected -${needAmt}`);
+console.log(`d2) medic pay-then-heal OK: paid ${needAmt} ${needRes}, healed ${paid.healed} to full`);
+
+// d3) the offer is consumed: replaying it is a mismatch, not a second charge.
+await sleep(300);
+A.msgs = A.msgs.filter((m) => m.t !== 'medicResult');
+A.send({ t: 'medic', medicId: medicWoods.id, action: 'accept', offerId: offer1.offer.id });
+const replay = await A.wait('medicResult');
+if (replay.ok) fail('d3) a spent offer was replayable: ' + JSON.stringify(replay));
+if (A.state.inv[needRes] !== payBefore - needAmt) fail('d3) the replay charged the player again');
+console.log('d3) spent offer correctly refused:', replay.reason);
+
+// f) decline clears the offer and starts the 20s reroll delay, so the very next inspect is
+// refused with rate-limited rather than handing out a fresh bargain. A successful accept costs
+// no reroll delay, so the inspect below hands out a new offer immediately.
+await hurt(MAX_HP - 1);
+if ((A.state.hp ?? 0) >= MAX_HP) fail('f) could not injure the player');
+await atMedic();
+A.msgs = A.msgs.filter((m) => m.t !== 'medicOffer' && m.t !== 'medicResult');
+A.send({ t: 'medic', medicId: medicWoods.id, action: 'inspect' });
+const offerF = await A.wait('medicOffer');
+if (!offerF.offer?.id) fail('f) inspect returned no offer: ' + JSON.stringify(offerF));
+if (offerF.offer.id === offer1.offer.id) fail('f) a spent offer id was handed out again');
+await sleep(300);
+A.msgs = A.msgs.filter((m) => m.t !== 'medicOffer');
+A.send({ t: 'medic', medicId: medicWoods.id, action: 'decline' });
+const declined = await A.wait('medicOffer');
+if (declined.offer !== null) fail('f) decline must clear the offer, got ' + JSON.stringify(declined.offer));
+await medicExpect({ t: 'medic', medicId: medicWoods.id, action: 'accept', offerId: offerF.offer.id }, 'offer-mismatch', 'f) declined offer unspendable');
+await medicExpect({ t: 'medic', medicId: medicWoods.id, action: 'inspect' }, 'rate-limited', 'f) reroll delay after decline');
+console.log('f) medic decline OK: offer cleared and rerolls locked for 20s');
+
+// b) use medicine — heals exactly MEDICINE_HEAL, capped so hp never exceeds MAX_HP. Three
+// doses from <=3 hp give two uncapped heals and one capped one.
+await hurt(3);
+if ((A.state.hp ?? 0) > 3) fail('b) could not injure the player below 4 hp, got ' + A.state.hp);
+if ((A.state.inv?.medicine || 0) !== 3) fail('b) expected the 3 doses from stage a, got ' + A.state.inv?.medicine);
 let healUses = 0, sawCap = false;
 while ((A.state.hp ?? 10) < MAX_HP && (A.state.inv?.medicine || 0) > 0 && healUses < 3) {
   const hpBefore = A.state.hp;
@@ -416,10 +621,63 @@ while ((A.state.hp ?? 10) < MAX_HP && (A.state.inv?.medicine || 0) > 0 && healUs
   console.log(`b) use medicine OK: hp ${hpBefore} -> ${res.hp} (healed ${res.healed})`);
   healUses++;
 }
+if (healUses !== 3) fail('b) expected all three doses to be spent, spent ' + healUses);
+if (!sawCap) fail('b) the last dose should have been capped by MAX_HP');
 if ((A.state.hp ?? 0) !== MAX_HP) fail('b) expected full health after the medicine loop, got ' + A.state.hp);
-console.log(`b) medicine restored full health${sawCap ? ' (cap observed on the last dose)' : ''}`);
+console.log('b) medicine restored full health (cap observed on the last dose)');
 
-skip('c/d/e medic bargain (inspect/accept/decline): the medic NPC is Slice 3');
+// e) at full health the medic refuses outright, before it ever looks at an offer.
+await atMedic();
+A.msgs = A.msgs.filter((m) => m.t !== 'medicResult' && m.t !== 'medicOffer');
+A.send({ t: 'medic', medicId: medicWoods.id, action: 'inspect' });
+const inspectFull = await A.wait('medicResult');
+if (inspectFull.ok || inspectFull.reason !== 'full-health')
+  fail('e) expected full-health from inspect, got ' + JSON.stringify(inspectFull));
+if (A.msgs.some((m) => m.t === 'medicOffer')) fail('e) a healthy player was still handed an offer');
+console.log('e) medic correctly refuses a healthy player: full-health');
+
+// --- Stage MONO: monolith progression (usecore) and the World Engine build gates ---
+// The gates, not the grind: `usecore` is refused without a Core in the pack, and the Engine
+// is refused both off the activation dais and with the monoliths unlit. Actually lighting all
+// four would raise creature strength for the rest of the run, so only the refusals are driven.
+A.msgs = A.msgs.filter((m) => m.t !== 'mono');
+warp(A, MONOLITHS[0][0], MONOLITHS[0][1], 0); await sleep(150);
+A.send({ t: 'usecore', i: 0 }); await sleep(400);
+if (A.msgs.some((m) => m.t === 'mono')) fail('MONO: usecore lit a monolith with no Monolith Core in the pack');
+console.log('MONO usecore correctly refused with no Core');
+
+const engineI = CORE[1] * SIZE + CORE[0];
+const offDais = engineI + 3;
+warp(A, offDais % SIZE, (offDais / SIZE) | 0, 0); await sleep(150);
+A.msgs = A.msgs.filter((m) => m.t !== 'build' && m.t !== 'wave');
+A.send({ t: 'build', i: offDais, kind: 'engine' }); await sleep(400);
+if (A.msgs.some((m) => m.t === 'build')) fail('MONO: the World Engine was built off the activation dais');
+console.log('MONO engine build correctly refused off the dais');
+warp(A, CORE[0], CORE[1], 0); await sleep(150);
+A.msgs = A.msgs.filter((m) => m.t !== 'build' && m.t !== 'wave');
+A.send({ t: 'build', i: engineI, kind: 'engine' }); await sleep(400);
+if (A.msgs.some((m) => m.t === 'build')) fail('MONO: the World Engine was built with the monoliths unlit');
+if (A.msgs.some((m) => m.t === 'wave')) fail('MONO: a refused Engine build still armed the final assault');
+console.log('MONO engine build correctly refused with the monoliths unlit');
+
+// --- Stage DEV: the dev/devcmd gate ---
+// The server under test runs without HEARTH_DEV and the control plane does not yet mint a
+// `dev` ticket claim, so both must be refused with the legacy off-message and must mutate
+// nothing. If this ever starts passing the gate, the tester panel is reachable in production.
+A.msgs = A.msgs.filter((m) => m.t !== 'msg');
+const devInvBefore = A.state.inv?.starmetal || 0;
+A.send({ t: 'dev' }); await sleep(400);
+if (!A.msgs.some((m) => m.t === 'msg' && /Dev mode/.test(m.s)))
+  fail('DEV: `dev` was neither granted nor refused — no Dev mode message');
+await sleep(200);
+if ((A.state.inv?.starmetal || 0) !== devInvBefore)
+  fail('DEV: the dev kit was granted with no dev claim and no HEARTH_DEV!');
+A.msgs = A.msgs.filter((m) => m.t !== 'msg' && m.t !== 'mono');
+A.send({ t: 'devcmd', cmd: 'mono', i: 0 }); await sleep(400);
+if (A.msgs.some((m) => m.t === 'mono')) fail('DEV: devcmd mono ran with no dev claim!');
+if (!A.msgs.some((m) => m.t === 'msg' && /Dev mode/.test(m.s)))
+  fail('DEV: devcmd was not refused with a message');
+console.log('DEV gate OK: dev and devcmd both refused, nothing mutated');
 
 // --- Stage G: Preferred Validated Action Protocol (seq/act) ---
 warp(A, px, py, 0); await sleep(80);
@@ -494,7 +752,30 @@ await sleep(300);
 if (A.msgs.some((m) => m.t === 'chit' && m.seq === 9004)) fail('G4: a miss produced a chit for seq 9004');
 console.log('G4 miss OK: act fired with no chit');
 
-skip('G5 impact correlation (chit by/seq on a surviving creature): Slice 3');
+// G5: a successful, non-lethal hit's chit carries the correct by/seq correlation. A single
+// unarmed hit (dmg 1) never one-shots a fresh spawn (every CRE_TYPES hp floor is 2), but the
+// very first candidate may be one E4 already damaged above — so retry across candidates/spawns.
+let g5chit = null, g5seq = 9004;
+const g5t0 = Date.now();
+while (!g5chit && Date.now() - g5t0 < 10000) {
+  const latest = A.msgs.filter((m) => m.t === 'cre').pop();
+  const cand = latest?.c?.[0];
+  if (!cand) { await sleep(300); continue; }
+  const [cid, cx, cy] = cand;
+  g5seq++;
+  A.msgs = A.msgs.filter((m) => m.t !== 'chit' && m.t !== 'act');
+  warp(A, cx + 0.5, cy, 0); await sleep(80);
+  A.send({ t: 'atk', seq: g5seq, dx: -1, dy: 0 });
+  const g5act = await A.wait('act');
+  if (g5act.seq !== g5seq) fail('G5: act seq mismatch: ' + g5act.seq);
+  await sleep(250);
+  g5chit = A.msgs.find((m) => m.t === 'chit' && m.id === cid) || null;
+  if (!g5chit) await sleep(450);   // clear atk cooldown, let a dead target drop off the next 'cre' tick
+}
+if (!g5chit) fail('G5: no creature survived a hit within the time budget');
+if (g5chit.by !== initA.id || g5chit.seq !== g5seq)
+  fail(`G5: chit by/seq mismatch: by=${g5chit.by} seq=${g5chit.seq}`);
+console.log('G5 impact correlation OK: chit.by =', g5chit.by, 'chit.seq =', g5chit.seq);
 
 // --- Stage H: server-side movement validation ---
 const hbx = fpx + 0.5, hby = fpy + 0.5;
@@ -567,13 +848,18 @@ console.log('H7 legitimate descent still accepted OK');
 // Last, so it can use node slices nothing else has consumed. A chest is
 // furniture: it goes down with `furn` on a carved mine tile, and it is only
 // reachable from the layer it was placed on.
-const chTrees = byDist([...world.nodes].filter(([, k]) => k === NODE.TREE).map(([i]) => i)).slice(22, 25);
+// 11 wood: 8 for the chest itself, plus the 3 deposited below. Earlier stages spend an
+// unpredictable amount (the medic's bargain can ask for up to 10 wood), so gather to a
+// target rather than assuming a fixed slice covers it.
+const chTrees = byDist([...world.nodes].filter(([, k]) => k === NODE.TREE).map(([i]) => i)).slice(40, 60);
 for (const t of chTrees) {
+  if ((A.state.inv?.wood || 0) >= 11) break;
   warp(A, t % SIZE, (t / SIZE) | 0); await sleep(60);
   for (let h = 0; h < 3; h++) { A.send({ t: 'gather', i: t }); await sleep(280); }
 }
 await sleep(300);
-if ((A.state.inv?.wood || 0) < 8) fail('CH: not enough wood for a chest: ' + A.state.inv?.wood);
+if ((A.state.inv?.wood || 0) < 11)
+  fail('CH: not enough wood for a chest plus a deposit: ' + A.state.inv?.wood);
 warp(A, px, py, 0); await sleep(80);
 A.send({ t: 'craft', r: 'chest' }); await sleep(300);
 if (!A.state.inv.chest) fail('CH: chest craft failed: ' + JSON.stringify(A.state.inv));

@@ -6,19 +6,19 @@ import (
 	"hearth/gameserver/world"
 )
 
-// Tick-driven simulation for Slice 2: node respawn timers, crop growth,
-// structure erosion, the survival clock and the wave/victory timer.
+// Tick-driven simulation: node respawn timers, weather, infection decay,
+// creature spawning and AI, wildlife, the survival clock, structure erosion,
+// crop growth and the wave/victory timer.
 //
-// Creature spawning and movement, wildlife, weather and infection spread are
-// Slice 3. Weather is therefore always "no weather", which is a state the legacy
-// server also spends most of its time in — the branches below that test
-// weather.kind simply never fire, and the code takes the same path it does on a
-// clear day.
+// The order of the blocks below is the order of the legacy setInterval body in
+// server/index.js and is load-bearing: creature contact damage lands before the
+// survival tick reads hp, and the `cre` broadcast at the end is the frame that
+// also carries the clock.
 
-// onSimTick runs everything the legacy setInterval body does, minus the
-// creature/animal/weather sections.
+// onSimTick runs everything the legacy setInterval body does.
 func (r *Room) onSimTick() {
 	now := r.now()
+	strength := r.strength()
 
 	// --- node respawns (every 5s) ---
 	if r.tickN%25 == 0 {
@@ -29,6 +29,23 @@ func (r *Room) onSimTick() {
 			}
 		}
 	}
+
+	// --- weather fronts: rain (Woods/Marsh), sandstorm (Dunes),
+	// snowstorm (Spire) ---
+	r.weatherTick(now)
+
+	// --- wisp-spread corruption decays over time (every 5s) ---
+	if r.tickN%25 == 0 {
+		r.infectionDecayTick(now)
+	}
+
+	// --- creatures: spawn gating, dawn despawn, AI, attacks ---
+	r.creatureSpawnTick(strength)
+	r.creatureTick(strength, now)
+
+	// --- wildlife ---
+	r.animalSpawnTick()
+	r.animalTick()
 
 	// --- environmental damage, hunger/thirst, campfire regen (every 5s) ---
 	if r.tickN%25 == 0 {
@@ -61,6 +78,34 @@ func (r *Room) onSimTick() {
 		r.won = true
 		r.broadcast(map[string]any{"t": "win"})
 	}
+
+	r.broadcastCre()
+}
+
+// broadcastCre is the legacy per-tick `cre` frame: every creature and animal
+// position, plus the world clock the legacy server piggybacks on it. Both lists
+// are emitted in spawn order (creOrder / aniOrder) rather than map order, so a
+// client that diffs by array position sees a stable sequence.
+func (r *Room) broadcastCre() {
+	if len(r.players) == 0 {
+		return
+	}
+	c := make([][]any, 0, len(r.creOrder))
+	for _, cr := range r.creOrder {
+		typ := cr.Type
+		if typ == "" {
+			typ = "crawler"
+		}
+		c = append(c, []any{cr.ID, toFixed(cr.X, 2), toFixed(cr.Y, 2), typ})
+	}
+	a := make([][]any, 0, len(r.aniOrder))
+	for _, an := range r.aniOrder {
+		a = append(a, []any{an.ID, toFixed(an.X, 2), toFixed(an.Y, 2), an.Type})
+	}
+	r.broadcast(map[string]any{
+		"t": "cre", "c": c, "a": a,
+		"time": toFixed(r.time, 4), "day": r.day,
+	})
 }
 
 // survivalTick is the legacy `tickN % 25` player block: hunger and thirst decay,
@@ -103,10 +148,12 @@ func (r *Room) survivalTick() {
 		switch {
 		case q.Z != 0:
 			// underground or indoors: sheltered from the weather
-		// The two weather branches of the legacy server (sandstorm/snowstorm)
-		// sit here; weather is Slice 3 and is always inactive in Slice 2, so
-		// they are unreachable and omitted rather than stubbed with a
-		// permanently false condition.
+		case r.weather.kind == "sandstorm" && tile == world.TSand && !r.nearAnyStruct(q, 2):
+			// any structure within 2 tiles counts as shelter from the sand
+			delta, msg = -1, "The sandstorm flays you — shelter beside a structure!"
+		case r.weather.kind == "snowstorm" && tile == world.TSnow && !r.nearStruct(q, "campfire", 6):
+			// only a campfire keeps the blizzard off, and it reaches 6 tiles
+			delta, msg = -1, "The blizzard freezes you — get to a campfire!"
 		case tile == world.TSand && !r.isNight() && q.Worn != "heatcloak":
 			delta, msg = -1, "The desert heat sears you! Craft a Heat Cloak."
 		case tile == world.TSnow && q.Worn != "furcloak":

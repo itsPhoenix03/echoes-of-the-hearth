@@ -741,12 +741,14 @@ func (r *Room) handleChestMove(p *Player, m map[string]any) {
 
 // --- attack (structures) --------------------------------------------------
 
-// handleAtk is the structure half of the legacy `atk`. Creature and animal
-// combat is Slice 3: the legacy handler scans `creatures` and `animals` for a
-// target within 2.4 tiles and only falls through to demolition when it finds
-// none. With no creatures simulated, that fall-through is the only path, so this
-// port keeps the rate limit, the z guard and the derived `act` broadcast exactly
-// as they are and then takes the demolition branch.
+// handleAtk is the legacy `atk`: it scans creatures and then animals for the
+// nearest target within 2.4 tiles, and only falls through to structure
+// demolition when it finds none.
+//
+// The two scans walk creOrder and aniOrder rather than the maps. The comparison
+// is strict (`d < bd`), so when two targets are exactly equidistant the one the
+// scan reaches first wins — under Go map iteration that would be a coin flip
+// every swing.
 func (r *Room) handleAtk(p *Player, m map[string]any) {
 	now := r.now()
 	seq := validSeq(m)
@@ -782,12 +784,39 @@ func (r *Room) handleAtk(p *Player, m map[string]any) {
 	case "sword", "isword":
 		atkClip = "slash"
 	}
-	// Slice 3 restores the creature/animal target search here; targetI carries
-	// the creature id when one is hit and null otherwise.
+	// target search: creatures first, then animals, nearest wins within 2.4
+	var bestC *Creature
+	var bestA *Animal
+	bid := ""
+	bd := 2.4
+	for _, c := range r.creOrder {
+		if d := math.Hypot(c.X-p.X, c.Y-p.Y); d < bd {
+			bd, bestC, bestA, bid = d, c, nil, c.ID
+		}
+	}
+	for _, a := range r.aniOrder {
+		if d := math.Hypot(a.X-p.X, a.Y-p.Y); d < bd {
+			bd, bestC, bestA, bid = d, nil, a, a.ID
+		}
+	}
+	// targetI carries the struck creature/animal id, or null on a miss.
+	var targetI any
+	if bid != "" {
+		targetI = bid
+	}
 	r.broadcast(map[string]any{
 		"t": "act", "id": p.S.ID, "seq": seq, "a": atkClip, "tool": nullable(p.Equip),
-		"dx": clampDir(m, "dx"), "dy": clampDir(m, "dy"), "targetI": nil,
+		"dx": clampDir(m, "dx"), "dy": clampDir(m, "dy"), "targetI": targetI,
 	})
+
+	if bestA != nil {
+		r.hitAnimal(p, bestA, dmg, seq)
+		return
+	}
+	if bestC != nil {
+		r.hitCreature(p, bestC, dmg, seq, now)
+		return
+	}
 
 	// no creature in range: strike a structure to demolish it (half the
 	// materials are refunded)

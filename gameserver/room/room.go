@@ -59,8 +59,12 @@ type Config struct {
 	// Defs, when non-nil, is used instead of loading shared/defs.json.
 	Defs *defs.Defs
 	// Dev mirrors the legacy server's DEV env var: it shortens crop growth by
-	// GROW_DIV (30x). It does NOT gate the warp teleport — that is AllowWarp.
+	// GROW_DIV (30x). It does NOT gate the warp teleport — that is AllowWarp,
+	// nor the dev commands — that is DevTools.
 	Dev bool
+	// DevTools is the fallback gate for `dev`/`devcmd` when the ticket carries
+	// no dev claim (HEARTH_DEV). See the TODO at the top of dev.go.
+	DevTools bool
 	// World, when non-nil, is used instead of generating one. Generation takes
 	// a couple of seconds, so tests (and any future multi-room process sharing
 	// one seed) can hand in a pre-generated, read-only world.
@@ -95,10 +99,46 @@ type Room struct {
 	brokenBergs map[int]bool
 	wave        *waveState
 
+	// Slice 4 medic bargain state, keyed by session id: at most one live offer
+	// per player, plus the earliest wall-clock ms at which they may be issued a
+	// new one. Neither is ever iterated, so neither needs an ordered mirror.
+	medicOffers    map[string]*medicOffer
+	medicRerollAt  map[string]int64
+	nextMedicOffer int
+
+	// Creatures. creOrder mirrors the map purely to give iteration a stable order:
+	// Go randomises map iteration where the JS reference walks a Map in insertion
+	// order, and spawn selection / "first target in range" depend on that order.
+	creatures map[string]*Creature
+	creOrder  []*Creature
+
+	// structIndices() is O(structures) and several creature paths call it per tick;
+	// memoised for the duration of one tick, keyed by tickN.
+	structIdx     []int
+	structIdxTick int64
+
+	// Animals. aniOrder is the same insertion-order mirror as creOrder.
+	animals  map[string]*Animal
+	aniOrder []*Animal
+
+	nextCre int
+	nextAni int
+
+	// Wisp-spread corruption: tile -> wall-clock ms at which it cures.
+	// infOrder mirrors the keys so the crawler-breeding pick and the `cure`
+	// broadcast are reproducible.
+	infected map[int]int64
+	infOrder []int
+
+	weather weatherState
+
 	chunkCache map[int]*staticChunk
 
 	players  map[string]*Player
 	profiles map[string]*persist.Profile // keyed by ticket userId
+	// playerOrder is players in join order. Every creature loop that picks
+	// "the first player in range" or a random player walks this, not the map.
+	playerOrder []*Player
 
 	time  float64
 	day   int
@@ -150,33 +190,38 @@ func New(cfg Config) (*Room, error) {
 		mt[m.Y*world.SIZE+m.X] = true
 	}
 	r := &Room{
-		cfg:         cfg,
-		world:       w,
-		spawn:       world.FindSpawn(w),
-		medics:      medics,
-		medicTiles:  mt,
-		defs:        d,
-		growDivisor: growDiv(cfg.Dev),
-		structures:  map[int]*Structure{},
-		furn:        map[int]*Furniture{},
-		digs:        map[int]bool{},
-		torches:     map[int]bool{},
-		nodeHP:      map[int]int{},
-		removed:     map[int]int64{},
-		mudTiles:    map[int]bool{},
-		sectorChops: map[int]int{},
-		farms:       map[int]*Farm{},
-		chestInv:    map[int]map[string]int{},
-		brokenBergs: map[int]bool{},
-		chunkCache:  map[int]*staticChunk{},
-		players:     map[string]*Player{},
-		profiles:    map[string]*persist.Profile{},
-		time:        0.3,
-		day:         1,
-		inbox:       make(chan Inbound, 1024),
-		join:        make(chan *Session),
-		leave:       make(chan *Session, 64),
-		nowFn:       func() int64 { return time.Now().UnixMilli() },
+		cfg:           cfg,
+		world:         w,
+		spawn:         world.FindSpawn(w),
+		medics:        medics,
+		medicTiles:    mt,
+		defs:          d,
+		growDivisor:   growDiv(cfg.Dev),
+		structures:    map[int]*Structure{},
+		creatures:     map[string]*Creature{},
+		animals:       map[string]*Animal{},
+		infected:      map[int]int64{},
+		furn:          map[int]*Furniture{},
+		digs:          map[int]bool{},
+		torches:       map[int]bool{},
+		nodeHP:        map[int]int{},
+		removed:       map[int]int64{},
+		mudTiles:      map[int]bool{},
+		sectorChops:   map[int]int{},
+		farms:         map[int]*Farm{},
+		chestInv:      map[int]map[string]int{},
+		brokenBergs:   map[int]bool{},
+		chunkCache:    map[int]*staticChunk{},
+		medicOffers:   map[string]*medicOffer{},
+		medicRerollAt: map[string]int64{},
+		players:       map[string]*Player{},
+		profiles:      map[string]*persist.Profile{},
+		time:          0.3,
+		day:           1,
+		inbox:         make(chan Inbound, 1024),
+		join:          make(chan *Session),
+		leave:         make(chan *Session, 64),
+		nowFn:         func() int64 { return time.Now().UnixMilli() },
 	}
 	if err := r.loadSave(); err != nil {
 		cfg.Logger.Printf("[hearth] failed to load save: %v", err)
@@ -297,6 +342,7 @@ func (r *Room) onJoin(s *Session) {
 		r.restore(p, prof)
 	}
 	r.players[s.ID] = p
+	r.playerOrder = append(r.playerOrder, p)
 
 	others := make([]map[string]any, 0, len(r.players))
 	for id, q := range r.players {
@@ -316,6 +362,11 @@ func (r *Room) onJoin(s *Session) {
 		"inv": p.Inv, "tools": keysOf(p.Tools), "gear": keysOf(p.Gear), "wornGear": p.Worn,
 		"players": others,
 		"time":    r.time, "day": r.day, "mono": r.mono[:], "won": r.won,
+		// Slice 3 global state. Weather is one value and corruption is a short,
+		// self-expiring list (120s TTL), so both ride in `init` exactly as they
+		// do in server/index.js rather than being folded into the chunk stream.
+		"weather":  nullable(r.weather.kind),
+		"infected": r.infectedTiles(),
 	})
 	r.pushChunks(p)
 	r.broadcast(map[string]any{"t": "pj", "id": s.ID, "x": p.X, "y": p.Y, "name": p.Name})
@@ -333,6 +384,13 @@ func (r *Room) onLeave(s *Session) {
 func (r *Room) removePlayer(p *Player) {
 	r.snapshotInto(p)
 	delete(r.players, p.S.ID)
+	r.forgetMedic(p.S.ID)
+	for i, q := range r.playerOrder {
+		if q == p {
+			r.playerOrder = append(r.playerOrder[:i], r.playerOrder[i+1:]...)
+			break
+		}
+	}
 	r.broadcast(map[string]any{"t": "pl", "id": p.S.ID})
 	r.cfg.Logger.Printf("[hearth] %s (%s) left (%d online)", p.S.ID, p.Name, len(r.players))
 }
@@ -381,6 +439,16 @@ func (r *Room) onMessage(in Inbound) {
 		r.handleChestMove(p, in.Data)
 	case "atk":
 		r.handleAtk(p, in.Data)
+
+	// --- Slice 4: the medic NPC, endgame progression, dev tooling ---
+	case "medic":
+		r.handleMedic(p, in.Data)
+	case "usecore":
+		r.handleUseCore(p, in.Data)
+	case "dev":
+		r.handleDev(p)
+	case "devcmd":
+		r.handleDevCmd(p, in.Data)
 	case "anim":
 		// gather/dig/atk drive remote rigs through the validated `act`
 		// broadcast; `anim` remains only for cosmetic actions, whitelisted.
@@ -390,24 +458,24 @@ func (r *Room) onMessage(in Inbound) {
 
 	default:
 		// Unknown types are ignored, exactly as the legacy server ignores them.
-		// Creature combat, the medic and monolith progression are Slice 3.
 	}
 }
 
 func (r *Room) onTick() {
 	r.tickN++
+	// Dev god mode runs first, exactly as it does in the legacy setInterval
+	// body — before the clock advances and before anything can damage anyone.
+	r.godTick()
 	prev := r.time
 	r.time = math.Mod(r.time+(TickMS/1000.0)/DayLengthSec, 1)
 	if r.time < prev {
 		r.day++
 		r.broadcast(map[string]any{"t": "msg", "s": fmt.Sprintf("Day %d dawns over The Hearth.", r.day)})
 	}
-	// The legacy server piggybacks the clock on the per-tick 'cre' message.
-	// Slice 1 has no creatures, so the clock gets its own frame at the same
-	// cadence; the payload is a few dozen bytes.
-	if len(r.players) > 0 {
-		r.broadcast(map[string]any{"t": "time", "time": r.time, "day": r.day})
-	}
+	// The clock rides on the per-tick 'cre' frame, exactly as it does in
+	// server/index.js — see broadcastCre at the end of onSimTick. Slices 1 and 2
+	// sent a standalone 't":"time"' frame because there were no creatures to
+	// carry it; that frame is gone now, and the client has always handled both.
 	r.onSimTick()
 }
 

@@ -1,13 +1,26 @@
-# Go game server (`hearthd`) — Slices 1 and 2
+# Go game server (`hearthd`) — Slices 1-4 (complete)
 
-Authoritative connection, terrain streaming, movement (Slice 1), and resource
-gathering, crafting, construction, digging, farming, chests and structure
-demolition (Slice 2). Implements `docs/10_GO_WIRE_PROTOCOL.md` and verifies the
-tickets described in `control/PROTOCOL.md`.
+The full authoritative simulation, ported from `server/index.js`:
 
-Still **not** implemented (Slice 3): creatures and wildlife, creature combat,
-weather, infection spread, the medic NPC, and monolith progression. The legacy
-Node server (`server/index.js`, port 8081) is untouched and still runs.
+- **Slice 1** — connection and the signed-ticket handshake, terrain streaming,
+  server-side movement validation.
+- **Slice 2** — resource gathering, crafting, construction, digging, farming,
+  chests, structure demolition.
+- **Slice 3** — creatures and wildlife, creature combat, weather, wisp
+  infection spread and decay.
+- **Slice 4** — the medic NPC and its bargain state machine, monolith
+  progression (`usecore`) and the World Engine gates, the four-minute final
+  assault and victory, and the `dev` / `devcmd` tester tooling.
+
+Implements `docs/10_GO_WIRE_PROTOCOL.md` and verifies the tickets described in
+`control/PROTOCOL.md`. Every inbound message type in `server/index.js` is
+answered. The legacy Node server (`server/index.js`, port 8081) is untouched
+and still runs.
+
+**Dev tooling gate.** `dev` and `devcmd` are gated on an optional `dev` claim in
+the signed ticket, not on a server-wide env var (docs/09 §7). The control plane
+does not mint that claim yet, so today the fallback applies: the `HEARTH_DEV`
+env var. See the `TODO(control-plane)` at the top of `room/dev.go`.
 
 ## Packages
 
@@ -115,17 +128,25 @@ assertion passed.
 `test-go.mjs` is the root `test.mjs` adapted to the Go front door: it joins
 through the control plane, authenticates with a real ticket and consumes chunks
 instead of a terrain-carrying `init`. The gameplay assertions are copied
-verbatim wherever the behaviour is meant to be identical; the stages that need
-Slice 3 log an explicit `skip`.
+verbatim wherever the behaviour is meant to be identical. **There are no `skip`
+lines left, and none may be added** — a stage that cannot fail asserts nothing.
 
 It needs a **freshly started** game server (harvested nodes take up to five
 minutes to respawn, and the suite expects an untouched world):
 
 ```sh
+rm -f gameserver/world.save.json                       # a run dirties the world
 node control/index.js                                  # terminal 1
 cd gameserver && HEARTH_ALLOW_WARP=1 go run ./cmd/hearthd   # terminal 2
 node gameserver/test-go.mjs                            # terminal 3
 ```
+
+Delete `world.save.json` and restart the server between runs: nodes near spawn
+are on respawn timers afterwards, and a lit monolith would change creature
+strength for the next run.
+
+The suite runs with `HEARTH_DEV` **unset**, so its `DEV` stage asserts that
+`dev` and `devcmd` are refused and mutate nothing.
 
 ## Rules data
 

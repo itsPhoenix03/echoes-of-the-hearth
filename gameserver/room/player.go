@@ -45,6 +45,12 @@ type Player struct {
 	LastGather   int64
 	LastAtk      int64
 	LastUseAt    int64
+	// LastMedicAt damps medic packet spam (200 ms floor).
+	LastMedicAt int64
+
+	// God is the dev tester panel's invulnerability toggle: godTick heals the
+	// player back to full every tick while it is set.
+	God bool
 
 	// Terrain streaming state (§4.1). sentChunks is keyed by cy*ChunkGrid+cx.
 	sentChunks map[int]bool

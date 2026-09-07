@@ -12,6 +12,8 @@
 //	HEARTH_NO_PERSIST     set to disable persistence entirely
 //	HEARTH_DEFS_PATH      shared/defs.json                (default: found by walking up)
 //	DEV                   shortens crop growth 30x, as in the legacy server
+//	HEARTH_DEV            fallback gate for dev/devcmd when the ticket carries
+//	                      no `dev` claim (see the TODO in room/dev.go)
 package main
 
 import (
@@ -64,6 +66,7 @@ func main() {
 		Seed:      env("HEARTH_SEED", "hearth-1"),
 		AllowWarp: os.Getenv("HEARTH_ALLOW_WARP") != "",
 		Dev:       os.Getenv("DEV") != "",
+		DevTools:  os.Getenv("HEARTH_DEV") != "",
 		Defs:      d,
 		Store:     store,
 		Logger:    logger,

@@ -24,6 +24,13 @@ type Session struct {
 	Name   string // authenticated name from the ticket
 	Addr   string
 
+	// DevClaim is the ticket's optional `dev` claim: nil when the control plane
+	// said nothing (the current state — see the TODO in room/dev.go), otherwise
+	// the authenticated answer to "may this account use dev commands". It is
+	// written once by the net layer before the session is handed to the room
+	// and never mutated afterwards.
+	DevClaim *bool
+
 	Out chan []byte
 
 	closeOnce sync.Once

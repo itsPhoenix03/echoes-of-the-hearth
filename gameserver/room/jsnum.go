@@ -85,3 +85,23 @@ func getString(m map[string]any, key string) string {
 	}
 	return ""
 }
+
+// itoa is strconv.Itoa under a shorter name, used to build creature and animal
+// ids ("c" + n) the way the legacy server does.
+func itoa(n int) string { return strconv.Itoa(n) }
+
+// toFixed mirrors JS `+v.toFixed(n)`: format to n decimal places, then read the
+// result back as a number. The legacy server rounds creature positions this way
+// before putting them on the wire, and the client's lerp assumes that
+// precision, so the rounding happens here rather than being left to the JSON
+// encoder.
+func toFixed(v float64, n int) float64 {
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return 0
+	}
+	f, err := strconv.ParseFloat(strconv.FormatFloat(v, 'f', n, 64), 64)
+	if err != nil {
+		return v
+	}
+	return f
+}

@@ -563,7 +563,16 @@ func (r *Room) stepCreature(c *Creature, strength int, nowMs int64) {
 				!r.medicTiles[nhI] && r.structures[nhI] == nil {
 				c.X, c.Y = nhx, nhy
 			}
-			// despawn at home if still no player near
+			// Despawn at home if still no player near.
+			//
+			// NOTE: this branch is UNREACHABLE, and deliberately so. In
+			// server/index.js the `distHome < 1` test is nested inside
+			// `distHome > 60`, and no distance is both, so the legacy server
+			// never despawns a creature this way either — a leashed creature
+			// walks until distHome drops to 60 and then resumes hunting. The
+			// dead branch is preserved rather than removed or "fixed": making
+			// it reachable would change how long creatures persist, which is
+			// balance, not a port. See the Slice 3 report.
 			if distHome < 1 && !r.anyPlayerWithin(c.X, c.Y, 20) {
 				r.delCreature(c.ID)
 			}

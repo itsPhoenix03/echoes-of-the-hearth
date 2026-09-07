@@ -1,6 +1,6 @@
 # Project state — Echoes of the Hearth
 
-**Last updated:** 2026-09-06 — **Go game server, Slices 1 + 2** (branch `go-migration`).
+**Last updated:** 2026-09-07 — **Go game server, Slices 1-4 COMPLETE** (branch `go-migration`).
 Previous entry: 2026-08-30 — small-fixes pass (settings wiring, `ui.reset()`, scene-owned
 tint timers, medic-hut creature blocking, README accuracy) plus **server-authoritative
 movement validation**. Prior entry:
@@ -113,17 +113,62 @@ Concurrency contract, and it must be preserved: **all game state is owned by the
 drain a buffered per-player channel. A client whose buffer fills is dropped, never waited on,
 so a slow client can never stall the world tick.
 
-### Still open before the Go server can replace Node
+### Slices 3 and 4 — the port is feature-complete
 
-1. **Slice 3** — creatures, animals, weather, medic NPCs, `usecore`/progression, `devcmd`.
+**Slice 3 (living world):** all 9 creature types with exact `CRE_TYPES` stats, the full
+ordered spawn roll, chase/orbit/dart AI, enrage and windup telegraphs, lancer beam and brute
+bolt, all 7 animal species, weather (rain/sandstorm/blizzard) including the two survival
+branches Slice 2 left unreachable, wisp infection with the 120s cure, and creature combat
+(`atk` target scan, knockback, essence, `chit`/`act` correlation).
+
+**Slice 4 (endgame):** the medic bargain state machine (60s TTL, 20s reroll, offer stability,
+atomic pay-then-heal, all 10 rejection strings in the reference's check order), `usecore` and
+monolith progression, the World Engine dais gate, the 4-minute wave assault and victory, and
+`dev`/`devcmd`.
+
+**Measured tick cost** (Ryzen 7 4800H, 200ms budget): realistic load — 4 players, 18
+creatures, 20 animals, 60 structures, night — is **79 microseconds, 0.04% of budget**, of
+which creature AI is only 16% (the rest is JSON encoding). 200 creatures + 200 animals + 16
+players costs 1.0ms, still 0.5%. **There is no performance case for breaking the
+single-goroutine ownership model**; don't.
+
+Slice 3 added **five ordered mirrors** because Go randomises map iteration where the JS
+reference walks Maps in insertion order: `creOrder`, `aniOrder`, `playerOrder`, `infOrder`,
+and `structIndices()`. Each decides a real outcome (target selection, spawn bias, which
+infected tile breeds a crawler). **If you add state whose iteration order affects an outcome,
+add a mirror and maintain it in exactly one add and one remove site.**
+
+### Acceptance status
+
+`gameserver/test-go.mjs` reaches **ALL TESTS PASSED with zero skips** — 67 stages, every
+assertion live. The root `test.mjs` still passes against the legacy Node server, so the old
+path is not broken. `go build` / `go vet` / `gofmt` / `go test ./...`, `npx tsc --noEmit`,
+`npx vite build` and worldgen parity are all green.
+
+**Both suites need `HEARTH_ALLOW_WARP=1`** and a **fresh** server — they are stateful, and a
+second run against a live server fails at `gather` because nodes near spawn are on respawn
+timers. Delete `gameserver/world.save.json` between runs.
+
+### Still open
+
+1. **Dev commands fall back to a `HEARTH_DEV` env var.** Per `docs/09_...` §7 they should be
+   gated on a ticket claim. `Session.DevClaim` is wired and ready, but `control/` does not yet
+   sign a `dev` boolean into the ticket. Once it does, **delete the env fallback** — an
+   operator flag that hands world-mutating commands to every connected player does not belong
+   in production. `TODO(control-plane)` at the top of `gameserver/room/dev.go`.
 2. **Medics are not on the wire.** The client used to derive them from the whole generated
    world, which a streaming client cannot do. Needs a protocol addition.
-3. **The legacy `?legacy=1` client path against :8081 is untested** — it was written but
-   never exercised (agents were barred from binding 8081 while the user's dev server ran).
+3. **The legacy `?legacy=1` client path against :8081 is untested** — written but never
+   exercised (agents were barred from binding 8081 while the dev server ran).
 4. **`hunger`/`thirst` are floats in Go, ints in the legacy server.** The HUD rounds; decide
-   which side owns the rounding.
-5. Run the suites with `HEARTH_ALLOW_WARP=1` — both `test.mjs` and `gameserver/test-go.mjs`
-   position players via `warp`, which is off unless that env var is set.
+   which side owns it.
+5. **Multi-world** — the whole point of the split. One hardcoded world today; `control/` has
+   the registry shaped as a list so it is a data change, and the room is already one goroutine
+   per world.
+6. **A dead branch preserved verbatim:** `server/index.js:1231` nests `if (distHome < 1)`
+   inside `if (distHome > 60)`, so the legacy leash despawn never fires. The Go port keeps the
+   dead branch and `TestLeashedCreatureNeverDespawnsAtHome` pins it — "fixing" it would
+   silently shorten every creature's lifetime. That is a balance decision, not a port bug.
 
 ### Landed: server-authoritative movement
 

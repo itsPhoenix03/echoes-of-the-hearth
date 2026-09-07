@@ -1,4 +1,4 @@
-# Go game server — wire protocol (Slice 1)
+# Go game server — wire protocol (Slices 1-4)
 
 **Status:** authoritative spec for the Go runtime and the client. Both implement against
 *this document*, not against each other.
@@ -141,14 +141,18 @@ them on top of its chunk cache. A chunk is never re-sent for a mutation.
 
 ---
 
-## 4.5 `time` — clock
+## 4.5 The clock
 
-The legacy server piggybacked `time`/`day` on the per-tick `cre` message. Slice 1 does not
-send `cre`, so the clock is its own broadcast, once per tick, only when a player is connected:
+The legacy server piggybacks `time`/`day` on the per-tick `cre` message. Slices 1 and 2 had no
+creatures to carry it, so the clock was its own broadcast:
 
 ```jsonc
 { "t": "time", "time": 0.31, "day": 1 }
 ```
+
+**Slice 3 removed that frame.** With creatures simulated, `cre` is sent once per tick again and
+carries the clock exactly as the legacy server does (see §9.2). The client has always handled
+both shapes, so nothing on the wire needs a compatibility window.
 
 ---
 
@@ -269,3 +273,308 @@ furniture, farms, chest contents, mud, felled-tree counters, broken icebergs and
 node respawn timers. Two fields are stored as durations rather than absolute
 clocks, because neither clock survives a restart: node respawns as milliseconds
 remaining, and farms as ticks elapsed since planting.
+
+---
+
+## 9. Slice 3 — creatures, wildlife, weather, creature combat
+
+All shapes are identical to the legacy server; this section exists so the Slice 3 surface is
+enumerated in one place.
+
+### 9.1 Client → server
+
+No new message types. `atk` gains its creature/animal half: the handler now scans creatures
+and then animals for the nearest target within **2.4** tiles and only falls through to
+structure demolition when it finds none.
+
+- `act.targetI` carries the struck creature or animal id (e.g. `"c12"`, `"a3"`), or `null` on
+  a miss. It was always `null` in Slices 1-2.
+- A landed, non-lethal hit emits `chit`; a killing blow does not. `act` fires either way.
+
+### 9.2 `cre` — the per-tick world frame
+
+Broadcast once per tick whenever at least one player is connected:
+
+```jsonc
+{
+  "t": "cre",
+  "c": [ ["c12", 640.25, 641.00, "crawler"] ],   // id, x, y, type
+  "a": [ ["a3", 182.50, 179.75, "deer"] ],       // id, x, y, species
+  "time": 0.3141, "day": 2
+}
+```
+
+Positions are rounded to 2 decimal places and the clock to 4, matching the legacy
+`+v.toFixed(n)`. Both arrays are emitted in **spawn order**, not map order (see §9.6).
+
+Creature types: `crawler`, `stalker`, `brute`, `wisp`, `husk_wolf`, `bog_shambler`,
+`frost_wraith`, `drowned`, `blight_lancer`.
+Wildlife species: `deer`, `boar` (Woods), `lizard`, `crab` (Dunes), `fox`, `hare` (Spire),
+`toad` (Marsh).
+
+### 9.3 Combat and creature-driven frames
+
+| Message | Direction | Meaning |
+| --- | --- | --- |
+| `chit` | broadcast | `{ id, ang, by, seq }` — a creature or animal took a non-lethal hit. `ang` points away from the attacker (the knockback direction); `by` + `seq` correlate it to the attacker's `act`. |
+| `hp` | to one player | Gains an `ang` field when the damage came from a creature: the direction to shove the player. |
+| `slow` | to one player | `{ ticks: 30 }` — the frost wraith's chilling touch. |
+| `ctel` | broadcast | `{ id }` — a brute or bog shambler has begun its 8-tick telegraph windup. |
+| `shot` | broadcast | `{ fx, fy, tx, ty }` for the brute's blight bolt, plus `kind: "lance"` for the blight lancer's beam. Coordinates rounded to 1 decimal. |
+| `sd` | broadcast | Already in Slice 2; creatures now also drive it by gnawing structures. |
+
+### 9.4 Weather
+
+```jsonc
+{ "t": "wx", "kind": "sandstorm" }   // or "rain", "snowstorm", or null to clear
+```
+
+Weather is a single global state, not per-region. A front starts with probability
+`(TICK_MS/1000)/180` per tick — roughly one every 180 s — and lasts 45-90 s. What differs per
+biome is who it hurts:
+
+- `rain` (Woods / Marsh) — cosmetic on the server; the client draws it.
+- `sandstorm` (Dunes) — 1 hp per 5 s on `SAND` unless *any* structure is within 2 tiles.
+- `snowstorm` (Spire) — 1 hp per 5 s on `SNOW` unless a **campfire** is within 6 tiles. A fur
+  cloak does not help; that is what separates a blizzard from ordinary cold.
+
+Being underground or indoors (`z != 0`) shelters from all of it. "Blizzard" is the client's
+name for `snowstorm`, and ambient snowfall is a permanent client-side particle layer in the
+Spire biome — neither is a distinct server state.
+
+### 9.5 Corruption
+
+```jsonc
+{ "t": "infect", "tiles": [820481] }
+{ "t": "cure",   "tiles": [820481] }
+```
+
+Wisps corrupt the ground they drift over (every 25 ticks), and both wisps and frost wraiths
+corrupt on being hit and on death; a bog shambler corrupts its own tile plus the four
+orthogonals when it dies. Every corrupted tile cures itself after **120 s**. Corrupted tiles
+also breed crawlers: a low spawn roll places a crawler on a random infected tile instead of at
+the Core.
+
+`init` continues to carry the current `weather` kind and the full `infected` tile list.
+
+### 9.6 Iteration order is part of the protocol
+
+Go randomises map iteration where the JS reference walks a `Map`/`Set` in insertion order, and
+several rules resolve ties by "whichever came first". Every such site iterates an explicitly
+ordered slice instead of the map, so behaviour is reproducible across runs:
+
+| Ordered mirror | Decides |
+| --- | --- |
+| `creOrder` | the `cre` array order, the `atk` target scan, wisp/wolf population counts, husk-wolf pack-link, pack enrage, dawn despawn |
+| `aniOrder` | the `cre` array order, the `atk` target scan, the wildlife movement pass |
+| `playerOrder` | which player a creature targets or damages first, and which player a spawn is biased toward |
+| `infOrder` | which infected tile breeds a crawler, and the `cure` payload order |
+| `structIndices()` | which structure a brute walks to (ascending tile index; memoised per tick) |
+
+## 10. Slice 4 — the medic NPC, endgame progression, waves, dev tooling
+
+All shapes are identical to the legacy server. This section enumerates the last of the
+gameplay surface, and it closes the protocol: after Slice 4 there is no message type in
+`server/index.js` that the Go server does not answer.
+
+### 10.1 Client → server
+
+| Type | Fields | Meaning |
+| --- | --- | --- |
+| `medic` | `medicId`, `action`, `offerId?` | interact with a medic; `action` is `inspect`, `accept` or `decline` |
+| `usecore` | `i` (0-3) | spend one Monolith Core to awaken monolith `i` |
+| `dev` | — | grant the F9 dev kit (gated, §10.6) |
+| `devcmd` | `cmd`, plus per-command fields (§10.6) | run one F10 tester-panel command (gated) |
+
+`medicId` is the stable, seed-derived id `medic-woods` or `medic-spire`. `offerId` is opaque
+and server-minted; a client must echo back exactly the `offer.id` it was given.
+
+`usecore.i` must be a JSON integer in 0..3. The legacy handler indexes its arrays with the raw
+value — harmless in JS, where a bad index merely misses — so the Go port validates the type
+instead of indexing a real array with it. Same for `devcmd cmd:"mono"`.
+
+### 10.2 The medic bargain
+
+Two medics exist per world, both deterministic functions of the seed
+(`shared/world.js findMedicSpawns`): one on the Woods, one on the Frozen Spire. A medic's own
+tile and its hut tile are permanently blocked — they cannot be walked through, built on,
+harvested, or pathed over by creatures — so a medic can never be attacked or buried.
+
+The state machine holds **at most one live offer per player**:
+
+```
+                 inspect (injured, in range, out of combat)
+   no offer  ─────────────────────────────────────────────►  live offer
+      ▲                                                       │  │  │
+      │  decline / accept / 60 s expiry                       │  │  │
+      └───────────────────────────────────────────────────────┘  │  │
+                                                                 │  │
+              inspect again ── same offer id, smaller expiresInMs ┘  │
+              accept, paid in full ── medicResult ok, healed to MAX_HP┘
+```
+
+Server → client:
+
+```jsonc
+// inspect succeeded, or decline cleared the offer (offer: null)
+{ "t": "medicOffer", "medicId": "medic-woods", "hp": 3, "maxHp": 10,
+  "offer": { "id": "lkyj7a:1", "medicId": "medic-woods",
+             "resource": "fiber", "amount": 4, "expiresInMs": 57300 } }
+
+// accept succeeded
+{ "t": "medicResult", "ok": true, "medicId": "medic-woods",
+  "paid": { "resource": "fiber", "amount": 4 }, "hp": 10, "healed": 7 }
+
+// anything refused
+{ "t": "medicResult", "ok": false, "medicId": "medic-woods", "reason": "in-combat" }
+```
+
+The offer's own `createdAt` and owning player id are never sent. `expiresInMs` is relative and
+is recomputed on every send, so a repeat `inspect` returns the same `id` with a **smaller**
+`expiresInMs` — a client that sees it grow has hit a reroll bug.
+
+Timings and radii, all from `server/index.js` and docs/05 §3:
+
+| Constant | Value | Effect |
+| --- | --- | --- |
+| offer TTL | 60 s | after which the offer is dead and `accept` answers `offer-expired` |
+| reroll delay | 20 s | applied after an expiry **or** an explicit `decline` |
+| combat lockout | 5 s since `lastDamageAt` | any medic frame answers `in-combat` |
+| spam floor | 200 ms per player | extra frames are dropped with no reply at all |
+| interaction range | 2.5 tiles | Euclidean, from the medic's tile |
+
+Rejection reasons, in the order the server checks them — the earlier ones therefore win even
+when a later one also applies:
+
+| `reason` | Cause |
+| --- | --- |
+| `unknown-medic` | `medicId` is not one of the world's medics |
+| `wrong-level` | the player is underground or inside a shelter (`z != 0`) |
+| `too-far` | further than 2.5 tiles |
+| `in-combat` | took combat damage in the last 5 s |
+| `offer-mismatch` | `accept` with no offer, the wrong `offerId`, or the other medic's offer |
+| `offer-expired` | `accept` on an offer past its 60 s TTL |
+| `dead` | `hp <= 0` |
+| `full-health` | `hp >= MAX_HP` — a healthy player is never handed an offer, or charged |
+| `insufficient-resource` | the player holds less than `offer.amount` of `offer.resource` |
+| `rate-limited` | `inspect` inside the 20 s reroll delay |
+
+**Environmental damage does not arm the combat lockout.** Snow, desert heat, thermal water,
+starvation and weather all chip 1 hp without stamping `lastDamageAt`. If they did, the Spire
+medic would be permanently unreachable without the very Fur Cloak a player would be visiting
+them to survive without.
+
+**Payment is atomic.** The three conditions under which healing could be a no-op — dead,
+already full, cannot afford — are all checked *before* the resource is deducted, and nothing
+between the check and the deduction can change player state (the room is single-goroutine). So
+a player is never charged without being healed, and never healed without being charged.
+Treatment always restores to `MAX_HP`, whatever the missing amount.
+
+Offers are drawn from `MEDIC_TRADE_POOLS[islandId]` in `shared/defs.json` — a weighted list of
+`{resource, min, max, weight}` — by cumulative weight, with the amount uniform over
+`[min, max]`. A player's offer and reroll timer are discarded when they disconnect.
+
+### 10.3 Progression
+
+| Rung | Gate | Enforced by |
+| --- | --- | --- |
+| Aether Forge | `RECIPES.forge.station == "workbench"` | the ordinary `craft` station check |
+| Monolith Core | `RECIPES.core.station == "forge"` | same |
+| Awaken a monolith | `usecore` within **3** tiles of `MONOLITHS[i]`, holding a Core, monolith not already lit | `usecore` |
+| World Engine | `RECIPES.engine.station == "forge"`, built **only** on `ACTIVATION_I` (the Core dais), **only** with all four monoliths lit | `build` |
+
+A successful `usecore` broadcasts `{"t":"mono","i":i}` and charges one `core`. `init` carries
+the full `mono` array and `won`.
+
+Lighting a monolith raises `strength = 1 + (monoliths lit)`, which the Slice 3 spawn gates
+read: brutes need `strength >= 3`, blight lancers `>= 2`, and the population cap is
+`2 + strength` by day / `6 + 3*strength` at night. Progress makes the world harder immediately.
+
+Refused Engine builds answer with `msg`, not a rejection type:
+
+- off the dais — `The World Engine must be built on the activation dais at the temple heart.`
+- monoliths unlit — `All 4 Monoliths must be awakened first.`
+
+### 10.4 The final assault
+
+Placing the Engine arms a four-minute wave and broadcasts `{"t":"wave","secs":240}`. The client
+counts down locally; the server sends no further ticks.
+
+While a wave is live:
+
+- the creature cap jumps to **20** (from `2 + strength` / `6 + 3*strength`),
+- every creature targets the Engine tile instead of a player,
+- a creature within **1.6** tiles gnaws the Engine every 5th tick for 1 damage, or 3 for a
+  brute or bog shambler,
+- a blight lancer's beam does **20** to the Engine rather than vaporising it outright, which is
+  the only structure that survives a beam at all.
+
+Four things end a wave, and all four broadcast `{"t":"wave","secs":0}` so the client's
+countdown stops:
+
+| Ending | Extra broadcast |
+| --- | --- |
+| the timer runs out | `{"t":"win"}`, and `won` latches true |
+| a creature gnaws the Engine down | `msg` `THE WORLD ENGINE WAS DESTROYED! Rebuild it to try again.` |
+| a lancer beam finishes the Engine | the same `msg` |
+| a **player** demolishes their own Engine with `atk` | `msg` `You destroyed your own World Engine!` |
+
+`won` zeroes the creature cap for good and stops the nightly Blight Storm erosion of wooden
+structures. It is persisted, so a won world stays won across a restart. A destroyed Engine
+leaves `won` false: rebuild it and the four minutes start again.
+
+### 10.5 Ordered mirrors (extends §9.6)
+
+Slice 4 adds no ordered mirror, and that is deliberate rather than an omission. `medicOffers`
+and `medicRerollAt` are keyed by session id, hold at most one entry per player, and are never
+iterated — no outcome can depend on their order, so mirroring them would be dead weight. `mono`
+is a fixed four-element array and `wave` is a single struct.
+
+### 10.6 `dev` / `devcmd` — gating
+
+**The legacy server gates both on a process-wide `DEV` env var. The Go server does not.** One
+Go process hosts rooms for many players, so a process-wide switch is either on for everyone in
+every room or off for everyone. Per docs/09 §7, the authority is a **per-player claim in the
+signed ticket** the control plane issues:
+
+```jsonc
+// ticket payload — `dev` is optional
+{ "userId": "...", "worldId": "...", "instanceId": "...", "name": "...",
+  "iat": 1757000000000, "exp": 1757000030000, "jti": "...", "dev": true }
+```
+
+The claim is verified offline with the rest of the ticket, so a client cannot grant itself the
+tester panel. Resolution order:
+
+1. the ticket carries `dev` → that value decides, `true` or `false`;
+2. the ticket says nothing (**the current state — Node does not mint the claim yet**) → the
+   game server's own `HEARTH_DEV` env var decides.
+
+**Follow-up required in `control/`:** add the optional `dev` boolean to the ticket payload
+signed by `/api/join`, populated from the account's permissions and never from a client-sent
+field. Once it ships, the `HEARTH_DEV` fallback should be removed — an operator flag that hands
+world-mutating commands to every connected player has no place in production. Tracked as
+`TODO(control-plane)` at the top of `gameserver/room/dev.go`.
+
+A refused command answers with the legacy string, verbatim: `dev` sends
+`Dev mode is off — start the server with: npm run server:dev` and `devcmd` sends
+`Dev mode off — start with: npm run server:dev`.
+
+### 10.7 `devcmd` commands
+
+| `cmd` | Fields | Effect |
+| --- | --- | --- |
+| `tp` | `x`, `y` (both JSON numbers) | teleport to `(x, y)` on the surface, boat cleared; broadcasts `pos`, sends `hp`, and **pushes chunks** |
+| `mono` | `i` (0-3) | light monolith `i` if unlit; broadcasts `mono`, and announces the Engine when the fourth closes the set |
+| `god` | — | toggle invulnerability: `godTick` heals the player to full at the top of every tick |
+| `wx` | `kind` (`rain` \| `sandstorm` \| `snowstorm`, anything else clears) | force weather for 180 s; broadcasts `wx` |
+| `time` | `v` (0..0.999) | set the world clock; the sim tick broadcasts it as usual |
+| `spawn` | `type` (a `CRE_TYPES` key) | spawn one creature 4-8 tiles away with `strength`-scaled hp and **no home tile**, so it never disengages |
+| `clearcre` | — | remove every creature |
+| `kill` | — | clear god mode, respawn at bed/campfire/spawn with full vitals; **pushes chunks** |
+
+Unknown `cmd` values are ignored silently, as in the legacy server.
+
+The two chunk pushes are the only deviation from the legacy behaviour. The legacy server shipped
+the whole map inside `init`, so a teleport needed no terrain; the Go server streams chunks, so a
+tester who teleports without one lands in an empty world.

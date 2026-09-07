@@ -41,6 +41,9 @@ func newFixture(t *testing.T) *fixture {
 	f.sess = NewSession("test01", "u_test", "Tester", "test")
 	f.p = newPlayer(f.sess, r.spawn, f.now, r.defs)
 	r.players[f.sess.ID] = f.p
+	// playerOrder is the stable iteration order every creature loop walks, so a
+	// fixture player that is only in the map is invisible to creature AI.
+	r.playerOrder = append(r.playerOrder, f.p)
 	// Chunk streaming is exercised elsewhere; pre-mark the join push so these
 	// tests only observe movement traffic.
 	f.p.chunkInit = true
