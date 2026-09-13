@@ -6,21 +6,30 @@ import { verifyTicket } from './ticket.js';
 
 const PORT = 8099;
 const BASE = `http://localhost:${PORT}`;
+// Second instance, configured for multi-world + a dev allowlist.
+const PORT2 = 8098;
+const BASE2 = `http://localhost:${PORT2}`;
+const DEV_TOK = 'dev-allowlisted-tok';
+const WORLDS_CFG = [
+  { worldId: 'default', seed: 'hearth-1', instanceId: 'local', ws: 'ws://localhost:8082', name: 'The Hearth' },
+  { worldId: 'frontier', seed: 'seed-frontier', instanceId: 'inst-2', ws: 'ws://localhost:8083' },
+];
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const fail = (s) => { console.log('FAIL:', s); if (child) child.kill(); process.exit(1); };
+const fail = (s) => { console.log('FAIL:', s); for (const c of kids) { try { c.kill(); } catch { /* already gone */ } } process.exit(1); };
 
 let child;
+const kids = [];
 
 function b64urlDecode(s) {
   const pad = s.length % 4 === 0 ? '' : '='.repeat(4 - (s.length % 4));
   return Buffer.from(s.replace(/-/g, '+').replace(/_/g, '/') + pad, 'base64');
 }
 
-async function waitForHealth() {
+async function waitForHealth(base = BASE) {
   const t0 = Date.now();
   while (Date.now() - t0 < 5000) {
     try {
-      const r = await fetch(`${BASE}/api/health`);
+      const r = await fetch(`${base}/api/health`);
       if (r.ok) return;
     } catch { /* not up yet */ }
     await sleep(100);
@@ -28,25 +37,46 @@ async function waitForHealth() {
   fail('control server did not become healthy in time');
 }
 
-async function join(name, tok) {
-  const r = await fetch(`${BASE}/api/join`, {
+async function post(base, path, body) {
+  const r = await fetch(`${base}${path}`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ name, tok }),
+    body: JSON.stringify(body),
   });
   return { status: r.status, body: await r.json() };
 }
 
-child = spawn(process.execPath, ['control/index.js'], {
-  env: { ...process.env, CONTROL_PORT: String(PORT) },
-  stdio: ['ignore', 'pipe', 'pipe'],
+async function join(name, tok, extra = {}, base = BASE) {
+  return post(base, '/api/join', { name, tok, ...extra });
+}
+
+function payloadOf(ticket) {
+  return JSON.parse(b64urlDecode(ticket.split('.')[0]).toString('utf8'));
+}
+
+function spawnControl(port, extraEnv) {
+  const c = spawn(process.execPath, ['control/index.js'], {
+    // Point the worlds file at a path that cannot exist, so a developer's real
+    // control/worlds.json never changes what these tests see.
+    env: { ...process.env, CONTROL_PORT: String(port), HEARTH_WORLDS_FILE: 'no-such-worlds.json', ...extraEnv },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  c.stdout.on('data', () => {});
+  c.stderr.on('data', (d) => process.stderr.write(d));
+  kids.push(c);
+  return c;
+}
+
+child = spawnControl(PORT, { HEARTH_WORLDS: '', HEARTH_DEV_TOKS: '', HEARTH_DEV_USERS: '' });
+spawnControl(PORT2, {
+  HEARTH_WORLDS: JSON.stringify(WORLDS_CFG),
+  HEARTH_DEV_TOKS: `${DEV_TOK},someone-else`,
 });
-child.stdout.on('data', () => {});
-child.stderr.on('data', (d) => process.stderr.write(d));
 
 try {
   await waitForHealth();
-  console.log('server up on', PORT);
+  await waitForHealth(BASE2);
+  console.log('servers up on', PORT, 'and', PORT2);
 
   // --- health ---
   const health = await (await fetch(`${BASE}/api/health`)).json();
@@ -59,6 +89,8 @@ try {
   if (typeof pk.publicKey !== 'string' || Buffer.from(pk.publicKey, 'base64').length !== 32)
     fail('pubkey: expected 32 raw bytes, got ' + pk.publicKey);
   console.log('pubkey OK: 32 raw bytes');
+  const pk2 = await (await fetch(`${BASE2}/api/pubkey`)).json();
+  if (typeof pk2.publicKey !== 'string') fail('pubkey: second instance did not publish a key');
 
   // --- join: well-formed ticket ---
   const tok1 = 'test-' + Math.random().toString(36).slice(2);
@@ -133,8 +165,71 @@ try {
   if (rKeep.body.name !== 'SecondName') fail('rejoin: fallback name clobbered saved name: ' + rKeep.body.name);
   console.log('rejoin OK: rename applied, fallback preserved saved name');
 
+  // --- dev claim: absent for a normal account ---
+  const jPlain = await join('Plain', 'test-' + Math.random().toString(36).slice(2), {}, BASE2);
+  const pPlain = payloadOf(jPlain.body.ticket);
+  if ('dev' in pPlain) fail('dev: field must be omitted for a normal account, got ' + JSON.stringify(pPlain));
+  console.log('dev OK: field absent for a normal account');
+
+  // --- dev claim: a client-sent dev:true in the join body is ignored ---
+  const jLiar = await join('Liar', 'test-' + Math.random().toString(36).slice(2), { dev: true }, BASE2);
+  const pLiar = payloadOf(jLiar.body.ticket);
+  if ('dev' in pLiar) fail('dev: client-supplied dev:true was honored! payload=' + JSON.stringify(pLiar));
+  const vLiar = verifyTicket(jLiar.body.ticket, pk2.publicKey);
+  if (!vLiar.ok || vLiar.payload.dev !== undefined) fail('dev: client-supplied claim survived verification');
+  console.log('dev OK: client-supplied dev:true ignored');
+
+  // --- dev claim: present and true for an allowlisted account ---
+  const jDev = await join('Tester', DEV_TOK, {}, BASE2);
+  const pDev = payloadOf(jDev.body.ticket);
+  if (pDev.dev !== true) fail('dev: allowlisted account did not get dev:true, got ' + JSON.stringify(pDev));
+  const vDev = verifyTicket(jDev.body.ticket, pk2.publicKey);
+  if (!vDev.ok || vDev.payload.dev !== true) fail('dev: allowlisted ticket failed verification: ' + JSON.stringify(vDev));
+  console.log('dev OK: allowlisted account gets a signed dev:true claim');
+
+  // --- an allowlisted account cannot drop its own claim from the body either ---
+  const jDevFalse = await join('Tester', DEV_TOK, { dev: false }, BASE2);
+  if (payloadOf(jDevFalse.body.ticket).dev !== true) fail('dev: client body overrode the stored permission');
+  console.log('dev OK: body.dev is ignored in both directions');
+
+  // --- multi-world: /api/worlds shape ---
+  const wl = await (await fetch(`${BASE2}/api/worlds`)).json();
+  if (!Array.isArray(wl.worlds) || wl.worlds.length !== 2) fail('worlds: expected 2 worlds, got ' + JSON.stringify(wl));
+  if (wl.defaultWorldId !== 'default') fail('worlds: unexpected defaultWorldId ' + wl.defaultWorldId);
+  const wDefault = wl.worlds.find((w) => w.worldId === 'default');
+  const wFrontier = wl.worlds.find((w) => w.worldId === 'frontier');
+  if (!wDefault || !wFrontier) fail('worlds: missing configured world in ' + JSON.stringify(wl.worlds));
+  if (wDefault.name !== 'The Hearth') fail('worlds: display name not surfaced: ' + wDefault.name);
+  if (wFrontier.name !== 'frontier') fail('worlds: name should default to worldId, got ' + wFrontier.name);
+  if (wFrontier.seed !== 'seed-frontier' || wFrontier.ws !== 'ws://localhost:8083') fail('worlds: wrong seed/ws: ' + JSON.stringify(wFrontier));
+  for (const w of wl.worlds) {
+    if ('instanceId' in w) fail('worlds: instanceId must not be exposed to players');
+    if (Object.keys(w).length !== 4) fail('worlds: unexpected extra fields: ' + JSON.stringify(w));
+  }
+  console.log('worlds OK: 2 worlds listed, no instanceId leaked');
+
+  // --- multi-world: join resolves and binds the requested world ---
+  const jF = await join('Pioneer', 'test-' + Math.random().toString(36).slice(2), { worldId: 'frontier' }, BASE2);
+  if (jF.body.worldId !== 'frontier' || jF.body.ws !== 'ws://localhost:8083') fail('multiworld: join did not resolve frontier: ' + JSON.stringify(jF.body));
+  const pF = payloadOf(jF.body.ticket);
+  if (pF.worldId !== 'frontier' || pF.instanceId !== 'inst-2') fail('multiworld: ticket did not bind frontier: ' + JSON.stringify(pF));
+  console.log('multiworld OK: ticket bound to frontier/inst-2');
+
+  // --- multi-world: unknown and missing worldId fall back to the default ---
+  const jUnknown = await join('Lost', 'test-' + Math.random().toString(36).slice(2), { worldId: 'nope-not-a-world' }, BASE2);
+  if (jUnknown.body.worldId !== 'default') fail('multiworld: unknown worldId did not fall back: ' + jUnknown.body.worldId);
+  if (payloadOf(jUnknown.body.ticket).worldId !== 'default') fail('multiworld: ticket echoed the unknown worldId');
+  const jNone = await join('Homebody', 'test-' + Math.random().toString(36).slice(2), {}, BASE2);
+  if (jNone.body.worldId !== 'default' || jNone.body.ws !== 'ws://localhost:8082') fail('multiworld: missing worldId did not fall back: ' + JSON.stringify(jNone.body));
+  console.log('multiworld OK: unknown/missing worldId falls back to default');
+
+  // --- the single-world default instance still lists exactly one world ---
+  const wl1 = await (await fetch(`${BASE}/api/worlds`)).json();
+  if (wl1.worlds.length !== 1 || wl1.worlds[0].worldId !== 'default') fail('worlds: single-world default broke: ' + JSON.stringify(wl1));
+  console.log('worlds OK: single-world default preserved');
+
   console.log('ALL TESTS PASSED');
-  child.kill();
+  for (const c of kids) c.kill();
   process.exit(0);
 } catch (err) {
   fail('unexpected error: ' + (err.stack || err));

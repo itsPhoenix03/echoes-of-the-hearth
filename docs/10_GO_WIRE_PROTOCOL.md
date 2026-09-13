@@ -19,7 +19,10 @@ The Go server verifies the ticket signature **offline** with the Ed25519 public 
 fetched at boot. It never calls Node on the connection path.
 
 - Ticket invalid/expired → `{ t:'authfail', reason }`, then close. No world data is sent.
-- Ticket valid → the server replies `init` (§3) and the session begins.
+- Ticket valid → the server **routes it** (§11) and then replies `init` (§3); the session begins.
+
+`authfail` reasons: `malformed`, `bad-signature`, `bad-json`, `expired` (ticket verification),
+plus the routing refusals `wrong-instance`, `unknown-world` and `world-unavailable` (§11).
 
 The client's identity (`userId`, `name`) comes from the **ticket**, never from a client-sent
 field. A client that sends its own `name` in `auth` is ignored.
@@ -53,9 +56,32 @@ deliberately NOT used in Slice 1 — debuggability over the last few percent of 
   "players": [ { id, x, y, z, name, b, eq } ],
   "time": 0.31, "day": 1,
   "mono": [false,false,false,false],
-  "won": false, "maxHp": 10, "wornGear": null
+  "won": false, "maxHp": 10, "wornGear": null,
+  "weather": null,             // §9.4 — current front kind, or null
+  "infected": [],              // §9.5 — corrupted tile indices
+  "medics": [                  // §10.2 — exactly two, see below
+    { "id": "medic-woods", "islandId": "woods", "sprite": "medic",
+      "x": 190, "y": 172, "hutSprite": "medic_hut", "hutX": 190, "hutY": 170 },
+    { "id": "medic-spire", "islandId": "spire", "sprite": "medic_snow",
+      "x": 189, "y": 1107, "hutSprite": "medic_hut_snow", "hutX": 189, "hutY": 1105 }
+  ]
 }
 ```
+
+**`hunger` and `thirst` are integers on the wire**, here and in every `stat` frame (§8.2).
+The simulation carries them as fractions — the survival tick drains 0.055/0.083 per 5 s
+block — but the wire value is `ceil()`, matching `Math.ceil(p.hunger)` in `server/index.js`.
+Ceil, not floor: a bar reads 1 until the value has genuinely reached 0. Clients must not
+round defensively; a fractional value here is a server bug.
+
+**`medics`** is the whole medic roster. There are exactly two per world and both are pure
+functions of the seed, so they ride in `init` rather than being streamed with the chunks that
+contain them; the client needs them before the chunk containing a medic arrives, because the
+hut tile is solid. The field names are exactly those of `findMedicSpawns()` in
+`shared/world.js`, so the client can feed the array straight into its own
+`medicBlockTiles(medics)` helper — the blocked hut tile is `hutY * SIZE + hutX`, and no
+separate tile list is sent. `id` is the same identifier the `medic` frames (§10.2) are keyed
+on. Coordinates above are for seed `hearth-1`.
 
 **`players` shape changed** from the legacy array-of-arrays `[pid,x,y,equip,z,name,b]` to
 objects. The client's `init` handler must be updated to match — flagged here because it is
@@ -231,7 +257,9 @@ the player owns one.
 
 `inv`, `msg`, `stat`, `hp`, `act`, `actReject`, `node`, `dig`, `build`, `sd`,
 `crop`, `furn`, `torch`, `chest`, `mud`, `berg`, `boat`, `wave`, `win` — all
-identical in shape to the legacy server.
+identical in shape to the legacy server. `stat` is
+`{ "t": "stat", "hunger": <int>, "thirst": <int> }`: both values are `ceil()` of the
+fractional simulation state, exactly as `Math.ceil(p.hunger)` in `server/index.js`. See §3.
 
 ### 8.3 Chunk overlay fields (extends §4.2)
 
@@ -266,9 +294,12 @@ hardcodes a cost or a hit-point total. Regenerate the wrapper with
 
 ### 8.5 Persistence
 
-The Go server writes `gameserver/world.save.json` (override with
-`HEARTH_SAVE_PATH`) and never touches `server/save.json`, which the legacy
-server owns. The snapshot carries profiles, structures, digs, torches,
+The Go server writes one save file **per world** — `world.<worldId>.save.json` in
+`HEARTH_SAVE_DIR` (default: the working directory), so the default setup writes
+`gameserver/world.default.save.json`. Keying on `worldId` is what stops two worlds
+in one process from clobbering each other; a single-world process may still pin one
+path with `HEARTH_SAVE_PATH`. The server never touches `server/save.json`, which the
+legacy server owns. The snapshot carries profiles, structures, digs, torches,
 furniture, farms, chest contents, mud, felled-tree counters, broken icebergs and
 node respawn timers. Two fields are stored as durations rather than absolute
 clocks, because neither clock survives a restart: node respawns as milliseconds
@@ -396,7 +427,9 @@ instead of indexing a real array with it. Same for `devcmd cmd:"mono"`.
 ### 10.2 The medic bargain
 
 Two medics exist per world, both deterministic functions of the seed
-(`shared/world.js findMedicSpawns`): one on the Woods, one on the Frozen Spire. A medic's own
+(`shared/world.js findMedicSpawns`): one on the Woods, one on the Frozen Spire. **Both are sent
+to the client in `init.medics` (§3)** — the client no longer derives them, because on the Go
+path it never generates the world. A medic's own
 tile and its hut tile are permanently blocked — they cannot be walked through, built on,
 harvested, or pathed over by creatures — so a medic can never be attacked or buried.
 
@@ -544,17 +577,27 @@ signed ticket** the control plane issues:
 ```
 
 The claim is verified offline with the rest of the ticket, so a client cannot grant itself the
-tester panel. Resolution order:
+tester panel. **There is exactly one rule:**
 
-1. the ticket carries `dev` → that value decides, `true` or `false`;
-2. the ticket says nothing (**the current state — Node does not mint the claim yet**) → the
-   game server's own `HEARTH_DEV` env var decides.
+> `dev` present and `true` → dev tools on. Anything else — the key absent, `null`, or `false` →
+> off.
 
-**Follow-up required in `control/`:** add the optional `dev` boolean to the ticket payload
-signed by `/api/join`, populated from the account's permissions and never from a client-sent
-field. Once it ships, the `HEARTH_DEV` fallback should be removed — an operator flag that hands
-world-mutating commands to every connected player has no place in production. Tracked as
-`TODO(control-plane)` at the top of `gameserver/room/dev.go`.
+The `HEARTH_DEV` env fallback that used to cover an absent claim is **gone**, along with
+`room.Config.DevTools`. An operator flag that hands world-mutating commands to every connected
+player has no place in production, and with `control/` minting the claim there is nothing left
+for it to cover. `control/PROTOCOL.md` §2 is the contract: Node emits `dev` **only ever as
+`true`** and omits the key entirely otherwise, so a ticket for an ordinary account is
+byte-identical to the pre-`dev` format, and Go reads absent as false.
+
+The permission itself is per-account and lives on the control plane: the `HEARTH_DEV_TOKS` /
+`HEARTH_DEV_USERS` operator allowlist (`control/PROTOCOL.md` §3.3), never client input.
+
+The claim is still decoded as a `*bool`, purely so a re-marshalled payload cannot manufacture a
+claim that was never made. A `dev` field of any non-boolean type rejects the whole ticket as
+`bad-json` rather than being coerced — there is no path by which a malformed claim becomes a
+spurious `true`. Covered by `auth.TestVerifyDevClaim` / `TestVerifyDevClaimWrongType` and
+`room.TestDevGateIsTicketClaimOnly`, and end to end by the DEV stage of
+`gameserver/test-go.mjs`, which asserts both commands are refused and mutate nothing.
 
 A refused command answers with the legacy string, verbatim: `dev` sends
 `Dev mode is off — start the server with: npm run server:dev` and `devcmd` sends
@@ -578,3 +621,77 @@ Unknown `cmd` values are ignored silently, as in the legacy server.
 The two chunk pushes are the only deviation from the legacy behaviour. The legacy server shipped
 the whole map inside `init`, so a teleport needed no terrain; the Go server streams chunks, so a
 tester who teleports without one lands in an empty world.
+
+---
+
+## 11. Hosting many worlds — routing and the allocation boundary
+
+One `hearthd` process is one **instance**, and an instance hosts one or more **worlds**. Each
+world is a `Room` with its own goroutine, its own state, its own overlays and its own save file.
+Nothing mutable is shared between two rooms, which is what makes cross-world leakage impossible
+rather than merely unlikely.
+
+### 11.1 Routing
+
+The control plane allocates and the ticket carries the result (`control/PROTOCOL.md` §1, §3.1):
+
+```jsonc
+{ "userId": "...", "worldId": "frontier", "instanceId": "inst-2", ... }
+```
+
+On a verified ticket the game server:
+
+1. compares `instanceId` with its own. **A mismatch is refused** with
+   `{ t:'authfail', reason:'wrong-instance' }`. The ticket is valid and correctly signed; it
+   simply names a world some other process hosts, and serving it anyway would make allocation
+   advisory. An empty `instanceId` never matches.
+2. looks `worldId` up among the worlds it hosts; unknown → `authfail: unknown-world`.
+3. hands the connection to that world's room. The socket holds a reference to exactly one room
+   for its lifetime — there is no path by which a frame crosses worlds.
+
+If the room cannot be produced (world build failed, process shutting down) the reason is
+`world-unavailable`.
+
+A client never picks its own binding: `POST /api/join` resolves the world server-side and signs
+the result, and `GET /api/worlds` deliberately omits `instanceId`.
+
+### 11.2 Which worlds does a process host?
+
+Config, read once at boot, in the same shapes and the same precedence `control/store.js` uses —
+so **one registry can configure both processes**, each taking the slice bound to its own
+instance:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `HEARTH_INSTANCE_ID` | `local` | which instance this process is |
+| `HEARTH_WORLDS` | — | JSON array of `{worldId, seed, instanceId, ws, name}` records (`ws` ignored here) |
+| `HEARTH_WORLDS_FILE` | `control/worlds.json`, found by walking up | the same JSON in a file |
+| `HEARTH_WORLD_ID` / `HEARTH_WORLD_SEED` / `HEARTH_SEED` | `default` / `hearth-1` | the single-world fallback |
+| `HEARTH_EAGER_WORLDS` | unset | build every world at boot instead of on first join |
+| `HEARTH_SAVE_DIR` | working directory | where `world.<worldId>.save.json` files go |
+
+First source yielding at least one entry wins. Entries whose `instanceId` is not ours are
+skipped — they are someone else's worlds. A registry that names worlds but none of ours **fails
+at boot**: that is a misconfigured process, not an idle one. A `worldId` must be
+`[A-Za-z0-9._-]{1,64}`, because it names a save file.
+
+With no configuration at all a process is instance `local` hosting one world `default` on seed
+`hearth-1`, which is exactly the pre-multi-world behaviour the client and `test-go.mjs` expect.
+
+### 11.3 Lazy by default
+
+Worldgen is ~2-6s of CPU and hundreds of MB per world, so rooms are built **on first join**, not
+at boot: a process configured with eight worlds would otherwise stall for a minute at startup
+and hold every world resident even if nobody joins. The first player into a world pays the build
+inside their handshake window (bounded at 45s); everyone after finds the room warm.
+`HEARTH_EAGER_WORLDS=1` builds everything at boot instead, for operators who prefer a warm
+process and a slower start.
+
+Two simultaneous first-joins cannot build the same world twice: the room-manager entry is
+published under a lock before the build starts, and the second caller waits on its completion
+channel. That lock guards the *registry of rooms* only — never game state, which stays owned by
+each room's own goroutine (see the contract at the top of `gameserver/room/room.go`).
+
+Covered by `gameserver/hosting/*_test.go` (run them with `-race`) and end to end by
+`node gameserver/test-multiworld.mjs`, which starts a control plane and a two-world game server
+on private ports and proves routing, isolation and the `wrong-instance` refusal over the wire.

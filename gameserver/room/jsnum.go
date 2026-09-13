@@ -105,3 +105,16 @@ func toFixed(v float64, n int) float64 {
 	}
 	return f
 }
+
+// statInt is the wire rounding for hunger and thirst. The simulation carries
+// both as fractions (survivalTick drains 0.055/0.083 per 5 s block), but the
+// wire contract is integral: server/index.js puts `Math.ceil(p.hunger)` on
+// every `stat` frame, so a bar only reads empty once the value has actually
+// reached 0 and 0.001 still shows as 1. Every frame that carries these values —
+// `init` included — goes through here so the two servers agree.
+func statInt(v float64) int {
+	if math.IsNaN(v) {
+		return 0
+	}
+	return int(math.Ceil(v))
+}

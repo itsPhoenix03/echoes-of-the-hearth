@@ -25,8 +25,8 @@ type Session struct {
 	Addr   string
 
 	// DevClaim is the ticket's optional `dev` claim: nil when the control plane
-	// said nothing (the current state — see the TODO in room/dev.go), otherwise
-	// the authenticated answer to "may this account use dev commands". It is
+	// said nothing, otherwise the authenticated answer to "may this account use
+	// dev commands". Only a non-nil true opens the dev tools (see dev.go). It is
 	// written once by the net layer before the session is handed to the room
 	// and never mutated afterwards.
 	DevClaim *bool

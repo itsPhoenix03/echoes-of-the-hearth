@@ -19,22 +19,25 @@ import (
 // than the current server-wide DEV env var"), the authority here is a per-player
 // claim carried in the signed ticket.
 //
-// TODO(control-plane): the Node control plane does not yet mint that claim.
-// `control/` must add an optional boolean `dev` to the ticket payload it signs
-// in /api/join (see control/PROTOCOL.md §2), set from the account's own
-// permissions — NOT from anything the client sends, or the gate is worthless.
-// Until it does, Session.DevClaim is nil for every connection and this falls
-// back to the process-wide HEARTH_DEV env var, which is a strict improvement on
-// DEV only in that it no longer shares a name with the crop-growth switch.
-// Once the claim ships, drop the env fallback: an operator flag that grants
-// world-mutating commands to every connected player has no place in production.
+// The control plane mints that claim: /api/join signs an optional boolean `dev`
+// into the ticket payload, set from the account's own permission list and never
+// from anything the client sends (control/PROTOCOL.md §2, §3.3). Node only ever
+// emits it as `true` — an account without the permission gets a payload with no
+// `dev` key at all — so in practice the claim is "true or silent".
+//
+// The rule is now a single one: the claim is present and true, or dev tools are
+// off. There is no server-side fallback — the earlier `HEARTH_DEV` env var is
+// gone, because an operator flag that grants world-mutating commands to every
+// connected player has no place in production, and with the control plane
+// minting the claim there is nothing left for it to cover. An absent claim
+// means "this account is not a dev" (control/PROTOCOL.md §2); an explicit
+// false, which Node never mints, is denied for the same reason.
 //
 // devAllowed is the single choke point. Every command below goes through it.
 func (r *Room) devAllowed(p *Player) bool {
-	if claim := p.S.DevClaim; claim != nil {
-		return *claim
-	}
-	return r.cfg.DevTools
+	// Dereferencing is safe under the nil check, and the pointer is never
+	// rewritten after the handshake.
+	return p.S.DevClaim != nil && *p.S.DevClaim
 }
 
 // The legacy refusal strings, verbatim: the client renders them as-is, and the

@@ -17,10 +17,16 @@ Implements `docs/10_GO_WIRE_PROTOCOL.md` and verifies the tickets described in
 answered. The legacy Node server (`server/index.js`, port 8081) is untouched
 and still runs.
 
-**Dev tooling gate.** `dev` and `devcmd` are gated on an optional `dev` claim in
-the signed ticket, not on a server-wide env var (docs/09 §7). The control plane
-does not mint that claim yet, so today the fallback applies: the `HEARTH_DEV`
-env var. See the `TODO(control-plane)` at the top of `room/dev.go`.
+**Dev tooling gate.** `dev` and `devcmd` are gated on the signed `dev` claim in
+the ticket and on nothing else: present and true means on, absent/false means
+off (docs/10 §10.6). The control plane mints the claim from a per-account
+allowlist (`HEARTH_DEV_TOKS` / `HEARTH_DEV_USERS`, `control/PROTOCOL.md` §3.3).
+There is no `HEARTH_DEV` env var any more — a server-wide flag would have handed
+world-mutating commands to every connected player.
+
+**Many worlds per process.** One process is one *instance* and hosts one or more
+worlds; the ticket's `worldId` picks the room and its `instanceId` must be this
+process (docs/10 §11). See `hosting/` and the Environment table below.
 
 ## Packages
 
@@ -65,17 +71,40 @@ $env:HEARTH_ALLOW_WARP = "1"; go run ./cmd/hearthd
 | Variable | Default | Meaning |
 |---|---|---|
 | `HEARTH_GAME_PORT` | `8082` | listen port |
-| `HEARTH_SEED` | `hearth-1` | world seed |
+| `HEARTH_INSTANCE_ID` | `local` | which instance this process is; a ticket for another instance is refused with `authfail: wrong-instance` |
+| `HEARTH_WORLDS` | — | JSON array of `{worldId, seed, instanceId, ws, name}`, the same shape `control/store.js` reads; entries for other instances are skipped |
+| `HEARTH_WORLDS_FILE` | `control/worlds.json` (found by walking up) | the same JSON in a file — one registry configures both processes |
+| `HEARTH_WORLD_ID` | `default` | single-world fallback id |
+| `HEARTH_WORLD_SEED` | `$HEARTH_SEED` | single-world fallback seed |
+| `HEARTH_SEED` | `hearth-1` | world seed (single-world fallback) |
+| `HEARTH_EAGER_WORLDS` | unset | build every hosted world at boot instead of on first join |
 | `HEARTH_PUBKEY_URL` | `http://localhost:8090/api/pubkey` | where the ticket public key is fetched once at boot |
 | `HEARTH_TICKET_PUBKEY` | — | base64 raw 32-byte Ed25519 key; when set, skips the fetch entirely |
 | `HEARTH_ALLOW_WARP` | unset | enables `{t:'warp'}`, the unvalidated test-only teleport |
-| `HEARTH_SAVE_PATH` | `world.save.json` (relative to the working directory) | persistence file |
+| `HEARTH_SAVE_DIR` | working directory | where `world.<worldId>.save.json` files are written |
+| `HEARTH_SAVE_PATH` | — | pin the save file; single-world processes only, ignored (with a warning) when several worlds are hosted |
 | `HEARTH_NO_PERSIST` | unset | disables persistence entirely |
 | `HEARTH_DEFS_PATH` | found by walking up for `shared/defs.json` | rules data |
 | `DEV` | unset | shortens crop growth 30x (`GROW_DIV`), as in the legacy server |
 
-The server never touches `server/save.json` — that file belongs to the legacy
-Node server.
+Each world saves to its own `world.<worldId>.save.json`, so the default setup
+writes `gameserver/world.default.save.json` and two worlds can never clobber each
+other. The server never touches `server/save.json` — that file belongs to the
+legacy Node server.
+
+### Hosting several worlds
+
+```sh
+cd gameserver
+HEARTH_INSTANCE_ID=local HEARTH_WORLDS='[{"worldId":"default","seed":"hearth-1","instanceId":"local","ws":"ws://localhost:8082"},
+                {"worldId":"frontier","seed":"seed-frontier","instanceId":"local","ws":"ws://localhost:8082"}]' go run ./cmd/hearthd
+```
+
+Give the control plane the same registry (it reads `HEARTH_WORLDS` /
+`control/worlds.json` identically) and `POST /api/join {"worldId":"frontier"}`
+binds a ticket to that world. Rooms are built lazily on first join — worldgen is
+seconds and hundreds of MB, so a process does not pay for a world nobody is in;
+`HEARTH_EAGER_WORLDS=1` builds them all at boot instead.
 
 ## Tests
 
@@ -103,6 +132,11 @@ Coverage worth knowing about:
   and forge-vs-workbench), server-derived action/tool for `gather` and `dig`
   against a lying client, crop growth timing under both `GROW_DIV` values, and
   chest transfers clamping so nothing is minted or destroyed.
+- `hosting/hosting_test.go` — registry parsing and instance filtering, the
+  `wrong-instance` / `unknown-world` refusals, lazy creation building each world
+  exactly once under eight concurrent first-joins (run with `-race`), per-world
+  save files, and — the one that matters most — that a broadcast in one world
+  never reaches a player in another.
 - `room/persist_test.go` — structures, digs, torches, furniture, farms and chest
   contents survive a save/load round trip, and a corrupt save cannot make the
   room index a tile out of bounds.
@@ -135,18 +169,30 @@ It needs a **freshly started** game server (harvested nodes take up to five
 minutes to respawn, and the suite expects an untouched world):
 
 ```sh
-rm -f gameserver/world.save.json                       # a run dirties the world
+rm -f gameserver/world.*.save.json                     # a run dirties the world
 node control/index.js                                  # terminal 1
 cd gameserver && HEARTH_ALLOW_WARP=1 go run ./cmd/hearthd   # terminal 2
 node gameserver/test-go.mjs                            # terminal 3
 ```
 
-Delete `world.save.json` and restart the server between runs: nodes near spawn
+Delete `world.default.save.json` and restart the server between runs: nodes near spawn
 are on respawn timers afterwards, and a lit monolith would change creature
 strength for the next run.
 
-The suite runs with `HEARTH_DEV` **unset**, so its `DEV` stage asserts that
-`dev` and `devcmd` are refused and mutate nothing.
+The suite's tickets carry no `dev` claim, so its `DEV` stage asserts that `dev`
+and `devcmd` are refused and mutate nothing.
+
+## Multi-world suite
+
+`test-multiworld.mjs` starts its own control plane and game server on private
+ports (8390/8382 by default), configures two worlds on this instance and a third
+allocated elsewhere, and asserts over the wire that routing works, that a
+broadcast in one world never reaches the other, and that a valid ticket for
+another instance is refused with `authfail: wrong-instance`:
+
+```sh
+node gameserver/test-multiworld.mjs
+```
 
 ## Rules data
 

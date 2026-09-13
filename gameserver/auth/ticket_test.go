@@ -165,3 +165,93 @@ func TestVerifyNodeIssuedTicket(t *testing.T) {
 		t.Fatalf("expected ErrExpired past the TTL, got %v", err)
 	}
 }
+
+// --- the optional `dev` claim (control/PROTOCOL.md §2, docs/10 §10.6) --------
+
+// issueRaw signs an arbitrary payload object, so a test can mint a ticket whose
+// JSON genuinely lacks the `dev` key rather than carrying an explicit null.
+func issueRaw(t *testing.T, priv ed25519.PrivateKey, obj map[string]any) string {
+	t.Helper()
+	raw, err := json.Marshal(obj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seg := b64url(raw)
+	return seg + "." + b64url(ed25519.Sign(priv, []byte(seg)))
+}
+
+func basePayloadMap() map[string]any {
+	now := time.Now().UnixMilli()
+	return map[string]any{
+		"userId": "u_abc123", "worldId": "default", "instanceId": "local",
+		"name": "Wanderer", "iat": now, "exp": now + 30_000, "jti": "jti-1",
+	}
+}
+
+func TestVerifyDevClaim(t *testing.T) {
+	pub, priv := keypair(t)
+	v, err := NewVerifier(pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	yes, no := true, false
+	cases := []struct {
+		name string
+		obj  map[string]any
+		want *bool
+	}{
+		{"present-true", map[string]any{"dev": true}, &yes},
+		{"present-false", map[string]any{"dev": false}, &no},
+		{"absent", nil, nil},
+		{"explicit-null", map[string]any{"dev": nil}, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			obj := basePayloadMap()
+			for k, val := range tc.obj {
+				obj[k] = val
+			}
+			got, err := v.Verify(issueRaw(t, priv, obj), time.Now())
+			if err != nil {
+				t.Fatalf("ticket rejected: %v", err)
+			}
+			switch {
+			case tc.want == nil && got.Dev != nil:
+				t.Fatalf("Dev = %v, want nil (no claim)", *got.Dev)
+			case tc.want != nil && got.Dev == nil:
+				t.Fatalf("Dev = nil, want %v", *tc.want)
+			case tc.want != nil && *got.Dev != *tc.want:
+				t.Fatalf("Dev = %v, want %v", *got.Dev, *tc.want)
+			}
+		})
+	}
+}
+
+// A non-boolean `dev` must not be silently coerced into a claim: the ticket is
+// rejected as bad JSON rather than yielding a spurious true.
+func TestVerifyDevClaimWrongType(t *testing.T) {
+	pub, priv := keypair(t)
+	v, err := NewVerifier(pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []any{"true", 1, map[string]any{}} {
+		obj := basePayloadMap()
+		obj["dev"] = bad
+		if _, err := v.Verify(issueRaw(t, priv, obj), time.Now()); !errors.Is(err, ErrBadJSON) {
+			t.Fatalf("dev=%v (%T): err = %v, want ErrBadJSON", bad, bad, err)
+		}
+	}
+}
+
+// A nil claim must stay off the wire when a Payload round-trips through JSON,
+// so re-marshalling can never manufacture one.
+func TestPayloadOmitsAbsentDev(t *testing.T) {
+	raw, err := json.Marshal(livePayload())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "dev") {
+		t.Fatalf("marshalled payload mentions dev: %s", raw)
+	}
+}

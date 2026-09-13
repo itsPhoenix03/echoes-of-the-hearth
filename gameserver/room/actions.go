@@ -649,7 +649,7 @@ func (r *Room) handleUse(p *Player, m map[string]any) {
 		return
 	}
 	r.sendInv(p)
-	r.send(p, map[string]any{"t": "stat", "hunger": math.Ceil(p.Hunger), "thirst": math.Ceil(p.Thirst)})
+	r.send(p, map[string]any{"t": "stat", "hunger": statInt(p.Hunger), "thirst": statInt(p.Thirst)})
 }
 
 // --- chests ---------------------------------------------------------------

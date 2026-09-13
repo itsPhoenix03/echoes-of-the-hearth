@@ -5,6 +5,7 @@ dist/
 # runtime state (world save — delete-able, never commit)
 server/save.json
 gameserver/world.save.json
+gameserver/world.*.save.json
 
 # logs & scratch
 *.log

@@ -26,11 +26,16 @@ type Payload struct {
 	IAT        int64  `json:"iat"`
 	Exp        int64  `json:"exp"`
 	JTI        string `json:"jti"`
-	// Dev is the optional dev-tools claim (docs/09 §7). A pointer so "the
-	// control plane did not say" stays distinguishable from an explicit false;
-	// Node does not mint this field yet, so today it is always nil and the game
-	// server falls back to its HEARTH_DEV env var.
-	Dev *bool `json:"dev"`
+	// Dev is the optional dev-tools claim (docs/09 §7, docs/10 §10.6): the
+	// control plane sets it in /api/join from the account's own permissions,
+	// never from anything the client sends. A pointer so "the field was absent"
+	// stays visible to callers, but it no longer changes the answer: absent,
+	// null and false all mean "not a dev" (control/PROTOCOL.md §2 — Node only
+	// ever emits `true`). A non-boolean `dev` rejects the whole ticket as
+	// bad-json rather than being coerced. `omitempty` keeps a nil claim off the
+	// wire when a Payload is re-marshalled, so a round trip cannot manufacture
+	// a claim that was never made.
+	Dev *bool `json:"dev,omitempty"`
 }
 
 // Verifier holds the cached public key. It is immutable after construction and

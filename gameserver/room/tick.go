@@ -114,7 +114,7 @@ func (r *Room) survivalTick() {
 	for _, q := range r.players {
 		q.Hunger = math.Max(0, q.Hunger-0.055) // empty in ~15 min
 		q.Thirst = math.Max(0, q.Thirst-0.083) // empty in ~10 min
-		r.send(q, map[string]any{"t": "stat", "hunger": math.Ceil(q.Hunger), "thirst": math.Ceil(q.Thirst)})
+		r.send(q, map[string]any{"t": "stat", "hunger": statInt(q.Hunger), "thirst": statInt(q.Thirst)})
 
 		idx := ti(q.X, q.Y)
 		tile := r.world.Tiles[idx]

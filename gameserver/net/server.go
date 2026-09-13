@@ -22,18 +22,35 @@ const (
 	// world data is sent before a valid ticket, so an idle socket here costs
 	// only a file descriptor — but it should still not cost one forever.
 	authTimeout = 10 * time.Second
+	// roomTimeout bounds how long a connection waits for its room. A world that
+	// is built lazily takes a couple of seconds to generate, and a second player
+	// arriving mid-build waits for the same build, so this is generous.
+	roomTimeout = 45 * time.Second
 	// maxFrame is generous for a client frame (they are all tiny) while still
 	// bounding what a hostile peer can make us buffer.
 	maxFrame = 64 * 1024
 )
 
-// Server wires the HTTP listener to the room.
+// Rooms routes an authenticated ticket binding to the room that serves it. It
+// is implemented by hosting.Manager; the interface keeps the socket layer from
+// depending on how worlds are configured or when they are built.
+//
+// Resolve may block — a lazily built world takes a couple of seconds to
+// generate — so it is given a context and called before the room is joined.
+type Rooms interface {
+	Resolve(ctx context.Context, instanceID, worldID string) (*room.Room, error)
+}
+
+// AuthFailReason is implemented by resolution errors a client may be told
+// about. Anything else becomes a generic reason, so internal failures do not
+// leak out of the handshake.
+type AuthFailReason interface{ AuthFailReason() string }
+
+// Server wires the HTTP listener to the hosted rooms.
 type Server struct {
-	Room     *room.Room
+	Rooms    Rooms
 	Verifier *auth.Verifier
 	Logger   *log.Logger
-	// WorldID, when non-empty, is checked against the ticket's worldId.
-	WorldID string
 }
 
 // Handler returns the HTTP handler serving the game WebSocket.
@@ -59,14 +76,27 @@ func (s *Server) serveWS(w http.ResponseWriter, r *http.Request) {
 	c.SetReadLimit(maxFrame)
 
 	ctx := r.Context()
-	sess, err := s.handshake(ctx, c, r.RemoteAddr)
+	sess, payload, err := s.handshake(ctx, c, r.RemoteAddr)
 	if err != nil {
 		// handshake already sent authfail where appropriate.
 		_ = c.Close(ws.StatusPolicyViolation, "auth")
 		return
 	}
 
-	if err := s.Room.Join(ctx, sess); err != nil {
+	// Routing happens here and nowhere else: the ticket's worldId picks the
+	// room, and its instanceId must be this process. A connection therefore
+	// only ever holds a reference to one room, which is what keeps worlds
+	// isolated — there is no path by which a frame crosses between them.
+	rctx, cancel := context.WithTimeout(ctx, roomTimeout)
+	rm, err := s.Rooms.Resolve(rctx, payload.InstanceID, payload.WorldID)
+	cancel()
+	if err != nil {
+		s.authFail(ctx, c, resolveReason(err))
+		_ = c.Close(ws.StatusPolicyViolation, "auth")
+		return
+	}
+
+	if err := rm.Join(ctx, sess); err != nil {
 		_ = c.Close(ws.StatusGoingAway, "shutting down")
 		return
 	}
@@ -75,21 +105,32 @@ func (s *Server) serveWS(w http.ResponseWriter, r *http.Request) {
 	// buffered channel. It never touches room state.
 	go s.writeLoop(c, sess)
 
-	s.readLoop(ctx, c, sess)
+	s.readLoop(ctx, c, rm, sess)
 
 	sess.Close()
-	s.Room.Leave(sess)
+	rm.Leave(sess)
 	_ = c.Close(ws.StatusNormalClosure, "bye")
 }
 
-// handshake reads the single `auth` frame and verifies its ticket offline.
-func (s *Server) handshake(ctx context.Context, c *ws.Conn, addr string) (*room.Session, error) {
+// resolveReason picks the authfail reason for a routing failure.
+func resolveReason(err error) string {
+	var r AuthFailReason
+	if errors.As(err, &r) {
+		return r.AuthFailReason()
+	}
+	return "world-unavailable"
+}
+
+// handshake reads the single `auth` frame and verifies its ticket offline. It
+// returns the session and the verified payload; routing on the payload's world
+// binding is the caller's job.
+func (s *Server) handshake(ctx context.Context, c *ws.Conn, addr string) (*room.Session, *auth.Payload, error) {
 	actx, cancel := context.WithTimeout(ctx, authTimeout)
 	defer cancel()
 
 	_, data, err := c.Read(actx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var m struct {
 		T      string `json:"t"`
@@ -97,23 +138,20 @@ func (s *Server) handshake(ctx context.Context, c *ws.Conn, addr string) (*room.
 	}
 	if err := json.Unmarshal(data, &m); err != nil || m.T != "auth" {
 		s.authFail(actx, c, "malformed")
-		return nil, errors.New("net: first frame was not auth")
+		return nil, nil, errors.New("net: first frame was not auth")
 	}
 	payload, err := s.Verifier.Verify(m.Ticket, time.Now())
 	if err != nil {
 		s.authFail(actx, c, err.Error())
-		return nil, err
-	}
-	if s.WorldID != "" && payload.WorldID != s.WorldID {
-		s.authFail(actx, c, "wrong-world")
-		return nil, errors.New("net: ticket is for another world")
+		return nil, nil, err
 	}
 	// Identity comes from the ticket, never from a client-sent field (§1). The
-	// same goes for the dev-tools claim: it rides in the signed payload, so a
-	// client cannot grant itself the F9/F10 commands.
+	// same goes for the world binding and the dev-tools claim: both ride in the
+	// signed payload, so a client can neither pick its own world nor grant
+	// itself the F9/F10 commands.
 	sess := room.NewSession(room.NewSessionID(), payload.UserID, payload.Name, addr)
 	sess.DevClaim = payload.Dev
-	return sess, nil
+	return sess, payload, nil
 }
 
 func (s *Server) authFail(ctx context.Context, c *ws.Conn, reason string) {
@@ -123,9 +161,10 @@ func (s *Server) authFail(ctx context.Context, c *ws.Conn, reason string) {
 	_ = c.Write(wctx, ws.MessageText, b)
 }
 
-// readLoop decodes frames and hands them to the room. It never dereferences a
-// player; the room resolves the session to its player itself.
-func (s *Server) readLoop(ctx context.Context, c *ws.Conn, sess *room.Session) {
+// readLoop decodes frames and hands them to this connection's room — the one
+// its ticket bound it to, fixed for the life of the socket. It never
+// dereferences a player; the room resolves the session to its player itself.
+func (s *Server) readLoop(ctx context.Context, c *ws.Conn, rm *room.Room, sess *room.Session) {
 	for {
 		typ, data, err := c.Read(ctx)
 		if err != nil {
@@ -139,7 +178,7 @@ func (s *Server) readLoop(ctx context.Context, c *ws.Conn, sess *room.Session) {
 			continue // the legacy server silently ignores unparseable frames
 		}
 		select {
-		case s.Room.Inbox() <- room.Inbound{S: sess, Data: m}:
+		case rm.Inbox() <- room.Inbound{S: sess, Data: m}:
 		case <-sess.Closed():
 			return
 		case <-ctx.Done():

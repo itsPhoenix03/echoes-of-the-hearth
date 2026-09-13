@@ -62,10 +62,13 @@ function nextJti() {
   return `${Date.now().toString(36)}-${jtiCounter.toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-export function issueTicket({ userId, worldId, instanceId, name }) {
+export function issueTicket({ userId, worldId, instanceId, name, dev }) {
   const iat = Date.now();
   const exp = iat + TICKET_TTL_MS;
   const payload = { userId, worldId, instanceId, name, iat, exp, jti: nextJti() };
+  // Omitted entirely when not granted, so tickets for normal accounts stay
+  // byte-identical to the pre-dev-claim format. Go reads absent as false.
+  if (dev === true) payload.dev = true;
   const payloadB64 = b64url(Buffer.from(JSON.stringify(payload), 'utf8'));
   const sig = edSign(null, Buffer.from(payloadB64, 'ascii'), keys.privateKey);
   return `${payloadB64}.${b64url(sig)}`;

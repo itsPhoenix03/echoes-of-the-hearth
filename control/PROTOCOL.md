@@ -10,7 +10,7 @@ to connect — the ticket alone must be enough for Go to authorize a connection.
 ### `POST /api/join`
 Request body (JSON):
 ```json
-{ "name": "Wanderer", "tok": "<client's localStorage['hearth-tok']>" }
+{ "name": "Wanderer", "tok": "<client's localStorage['hearth-tok']>", "worldId": "default" }
 ```
 - `tok`: required string, the client's persistent identity token (see
   `src/main.ts` around `localStorage.getItem("hearth-tok")`). Missing/non-string
@@ -19,6 +19,12 @@ Request body (JSON):
   strip `[\x00-\x1f\x7f]`, trim, cap at 18 chars; if the result is shorter than
   2 chars, fall back to `"Keeper"`. A fallback never overwrites a previously
   saved name for that `tok`; a real name is treated as an explicit rename.
+- `worldId`: **optional** string, a world the client would like to join (from
+  `GET /api/worlds`). Missing, non-string, or unknown -> the default world (see
+  §3). This is a *request*, not an assertion: the ticket always binds the world
+  the control plane resolved, never the string the client sent.
+- **Any other field in the body is ignored.** In particular `dev` is not read
+  from the request at any point — see §3.3.
 
 Response `200`:
 ```json
@@ -29,10 +35,29 @@ Response `200`:
   "name": "Wanderer"
 }
 ```
+`ws` and `worldId` are the *resolved* world's, and match the `worldId` /
+`instanceId` inside the signed ticket. The client connects to `ws` and presents
+`ticket`.
+
+### `GET /api/worlds`
+The player-facing world list — what a lobby UI renders.
+```json
+{
+  "defaultWorldId": "default",
+  "worlds": [
+    { "worldId": "default", "name": "The Hearth", "seed": "hearth-1", "ws": "ws://localhost:8082" },
+    { "worldId": "frontier", "name": "frontier", "seed": "seed-frontier", "ws": "ws://localhost:8083" }
+  ]
+}
+```
+Exactly these four fields per entry. `instanceId` is an internal allocation
+detail and is deliberately **not** in this response; it reaches Go only through
+the signed ticket.
 
 ### `GET /api/health`
+Ops endpoint, unchanged in shape — the full registry including `instanceId`:
 ```json
-{ "ok": true, "worlds": [ { "worldId": "default", "seed": "hearth-1", "instanceId": "local", "ws": "ws://localhost:8082" } ] }
+{ "ok": true, "worlds": [ { "worldId": "default", "seed": "hearth-1", "instanceId": "local", "ws": "ws://localhost:8082", "name": "default" } ] }
 ```
 
 ### `GET /api/pubkey`
@@ -72,9 +97,25 @@ ticket := base64url(payload_json_bytes) + "." + base64url(signature_bytes)
     "name": "Wanderer",
     "iat": 1767657600000,
     "exp": 1767657630000,
-    "jti": "<opaque unique string>"
+    "jti": "<opaque unique string>",
+    "dev": true
   }
   ```
+  All fields except `dev` are always present.
+
+  **`dev` — optional boolean, the dev-tools claim.**
+  - Type: JSON `true`. It is **only ever emitted as `true`**.
+  - When the account does not hold the permission the key is **omitted from the
+    payload entirely** — not `"dev": false`, not `"dev": null`. Tickets for
+    normal accounts are therefore byte-identical to the pre-`dev` format.
+  - **Go must read an absent `dev` as `false`.** A `*bool` that stays `nil` is
+    fine as an internal representation, but there is no longer a
+    "control plane did not say" state to fall back on: absent means the account
+    is not a dev. Node never mints `"dev": false`, so if Go ever sees an
+    explicit `false` it came from somewhere else — treat it as false too.
+  - The claim is inside the signed payload, so tampering with it invalidates the
+    signature. `dev`/`devcmd` must be gated on this value and nothing else; the
+    `HEARTH_DEV` env fallback should now be removed (docs/09 §7, docs/10 §10.6).
   `iat`/`exp` are **milliseconds since Unix epoch** (JS `Date.now()`), not
   seconds. TTL is fixed at **30000 ms (30s)** — this is intentionally short;
   the ticket is meant to be consumed within seconds of issuance to open the
@@ -103,7 +144,8 @@ ticket := base64url(payload_json_bytes) + "." + base64url(signature_bytes)
    30-second TTL means clock skew between Node and Go should be kept small;
    do not add extra grace period beyond what's operationally necessary.
 7. Use `payload.userId`, `payload.worldId`, `payload.instanceId`, `payload.name`
-   as the authenticated identity for the new WebSocket connection.
+   as the authenticated identity for the new WebSocket connection, and
+   `payload.dev` (absent == false) as the sole authority for `dev` / `devcmd`.
    `payload.jti` is available if Go wants to defend against replay within the
    TTL window (e.g. an in-memory seen-set with a 30s+ expiry); Node does not
    track ticket usage itself, since it never sees the WebSocket connect.
@@ -115,8 +157,55 @@ wrapping, no PEM. Go should `base64.StdEncoding.DecodeString` (standard
 alphabet, not url-safe — this field is plain base64, unlike the ticket itself)
 and pass the resulting 32 bytes directly as `ed25519.PublicKey`.
 
-## 3. What Node deliberately does NOT own
-Node's profile store holds only `{ userId, tok, name, createdAt, lastSeen }`.
+## 3. World registry and permissions (control-plane config)
+
+Configuration only — Go never reads any of this. It matters to Go solely
+because it determines the `worldId` / `instanceId` a ticket binds.
+
+### 3.1 Worlds
+The registry is a list of `{ worldId, seed, instanceId, ws, name? }`. Sources,
+first one that yields at least one valid entry wins:
+
+1. `HEARTH_WORLDS` — a JSON array, for containers with no writable file system.
+2. `control/worlds.json` (override the path with `HEARTH_WORLDS_FILE`) — a JSON
+   array, the normal way to host several worlds:
+   ```json
+   [
+     { "worldId": "default",  "name": "The Hearth", "seed": "hearth-1",      "instanceId": "local",  "ws": "ws://localhost:8082" },
+     { "worldId": "frontier", "name": "Frontier",   "seed": "seed-frontier", "instanceId": "inst-2", "ws": "ws://localhost:8083" }
+   ]
+   ```
+3. The historical single-world env vars — `HEARTH_WORLD_ID`,
+   `HEARTH_WORLD_SEED`, `HEARTH_INSTANCE_ID`, `HEARTH_GAME_WS`,
+   `HEARTH_WORLD_NAME` — defaulting to
+   `default` / `hearth-1` / `local` / `ws://localhost:8082`. This is what you
+   get with no config at all, so an existing dev setup is unaffected.
+
+`worldId` and `ws` are required per entry; `seed`, `instanceId` and `name`
+default to `hearth-1`, `local` and the `worldId` respectively. Malformed or
+duplicate entries are logged and skipped rather than taking the service down.
+
+### 3.2 The default world
+`HEARTH_DEFAULT_WORLD_ID` names the fallback; if unset (or naming a world that
+is not configured) the **first entry in config order** is the default. A join
+with a missing or unknown `worldId` resolves here.
+
+### 3.3 The `dev` permission
+Granted by an operator allowlist read once at boot:
+- `HEARTH_DEV_TOKS` — comma-separated `tok` values, and/or
+- `HEARTH_DEV_USERS` — comma-separated `userId` values.
+
+An account matching either list gets `dev: true` in its ticket. There is no DB
+and no admin UI yet, so this is the smallest mechanism that is still
+*per-account* rather than server-wide; it is re-evaluated on every join and
+stored on the profile record, so when a real users table lands only
+`isDevGranted()` in `control/store.js` changes. `POST /api/join` never reads a
+`dev` field from the request body — a client posting `{"dev":true}` gets an
+ordinary ticket with no `dev` key (asserted in `control/test.mjs`).
+
+## 4. What Node deliberately does NOT own
+Node's profile store holds only `{ userId, tok, name, dev, createdAt, lastSeen }`
+— account state, where `dev` is a permission, not a game setting.
 Inventory, tools, gear, hp, hunger, thirst, x, y, and anything else about the
 world are Go's exclusively — Node never reads or writes them, and the ticket
 payload carries no such fields.

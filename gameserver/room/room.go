@@ -31,6 +31,16 @@
 // spot (dropSlow). A stalled client therefore costs one dropped session, never
 // a stalled world tick — which is the whole reason this is a single-goroutine
 // room rather than a lock-per-player one.
+//
+// # One goroutine per room, and rooms share nothing
+//
+// A process may host several worlds (see hosting/). That makes this contract
+// MORE important, not less: each Room gets its own Run goroutine and its own
+// unshared state, so "the room goroutine owns everything" still describes the
+// whole of the mutable world. The only thing two rooms may share is the
+// generated *world.World itself (read-only) and the defs table, both immutable
+// after construction. Nothing here is keyed by world — a Room simply never sees
+// another Room's players, which is why a broadcast cannot cross worlds.
 package room
 
 import (
@@ -59,12 +69,14 @@ type Config struct {
 	// Defs, when non-nil, is used instead of loading shared/defs.json.
 	Defs *defs.Defs
 	// Dev mirrors the legacy server's DEV env var: it shortens crop growth by
-	// GROW_DIV (30x). It does NOT gate the warp teleport — that is AllowWarp,
-	// nor the dev commands — that is DevTools.
+	// GROW_DIV (30x). It is a growth knob, not a permission: it does NOT gate
+	// the warp teleport — that is AllowWarp — nor the `dev`/`devcmd` commands,
+	// which are gated solely on the ticket's signed `dev` claim (see dev.go).
 	Dev bool
-	// DevTools is the fallback gate for `dev`/`devcmd` when the ticket carries
-	// no dev claim (HEARTH_DEV). See the TODO at the top of dev.go.
-	DevTools bool
+	// WorldID names the world this room hosts. It is the key the room manager
+	// routes on and the key its save file is named for; empty means the
+	// single-world default.
+	WorldID string
 	// World, when non-nil, is used instead of generating one. Generation takes
 	// a couple of seconds, so tests (and any future multi-room process sharing
 	// one seed) can hand in a pre-generated, read-only world.
@@ -231,6 +243,10 @@ func New(cfg Config) (*Room, error) {
 
 func (r *Room) now() int64 { return r.nowFn() }
 
+// WorldID is the world this room hosts, as configured. Empty in the
+// single-world default and in tests that do not set it.
+func (r *Room) WorldID() string { return r.cfg.WorldID }
+
 // Spawn is the authoritative spawn tile.
 func (r *Room) Spawn() [2]int { return r.spawn }
 
@@ -358,7 +374,7 @@ func (r *Room) onJoin(s *Session) {
 		"seed": r.cfg.Seed, "worldVersion": world.WorldVersion, "size": world.SIZE,
 		"chunk": 64,
 		"x":     p.X, "y": p.Y, "z": p.Z,
-		"hp": p.HP, "maxHp": r.defs.MaxHP, "hunger": p.Hunger, "thirst": p.Thirst,
+		"hp": p.HP, "maxHp": r.defs.MaxHP, "hunger": statInt(p.Hunger), "thirst": statInt(p.Thirst),
 		"inv": p.Inv, "tools": keysOf(p.Tools), "gear": keysOf(p.Gear), "wornGear": p.Worn,
 		"players": others,
 		"time":    r.time, "day": r.day, "mono": r.mono[:], "won": r.won,
@@ -367,6 +383,13 @@ func (r *Room) onJoin(s *Session) {
 		// do in server/index.js rather than being folded into the chunk stream.
 		"weather":  nullable(r.weather.kind),
 		"infected": r.infectedTiles(),
+		// Slice 4. There are exactly two medics and both are pure functions of
+		// the seed, so they ride in `init` whole rather than being streamed with
+		// the chunks that contain them. The field names are the ones the client
+		// already declares (src/main.ts), so it can feed this array straight
+		// into its own medicBlockTiles() helper — the hut tiles it must block
+		// are derivable from hutX/hutY and need no second representation.
+		"medics": r.medicsWire(),
 	})
 	r.pushChunks(p)
 	r.broadcast(map[string]any{"t": "pj", "id": s.ID, "x": p.X, "y": p.Y, "name": p.Name})

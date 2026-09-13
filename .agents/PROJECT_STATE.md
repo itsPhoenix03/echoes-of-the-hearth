@@ -1,6 +1,6 @@
 # Project state — Echoes of the Hearth
 
-**Last updated:** 2026-09-07 — **Go game server, Slices 1-4 COMPLETE** (branch `go-migration`).
+**Last updated:** 2026-09-13 — **Go migration COMPLETE** (Slices 1-4 + integration) (branch `go-migration`).
 Previous entry: 2026-08-30 — small-fixes pass (settings wiring, `ui.reset()`, scene-owned
 tint timers, medic-hut creature blocking, README accuracy) plus **server-authoritative
 movement validation**. Prior entry:
@@ -149,26 +149,65 @@ path is not broken. `go build` / `go vet` / `gofmt` / `go test ./...`, `npx tsc 
 second run against a live server fails at `gather` because nodes near spawn are on respawn
 timers. Delete `gameserver/world.save.json` between runs.
 
-### Still open
+### Integration gaps — all closed 2026-09-13
 
-1. **Dev commands fall back to a `HEARTH_DEV` env var.** Per `docs/09_...` §7 they should be
-   gated on a ticket claim. `Session.DevClaim` is wired and ready, but `control/` does not yet
-   sign a `dev` boolean into the ticket. Once it does, **delete the env fallback** — an
-   operator flag that hands world-mutating commands to every connected player does not belong
-   in production. `TODO(control-plane)` at the top of `gameserver/room/dev.go`.
-2. **Medics are not on the wire.** The client used to derive them from the whole generated
-   world, which a streaming client cannot do. Needs a protocol addition.
-3. **The legacy `?legacy=1` client path against :8081 is untested** — written but never
-   exercised (agents were barred from binding 8081 while the dev server ran).
-4. **`hunger`/`thirst` are floats in Go, ints in the legacy server.** The HUD rounds; decide
-   which side owns it.
-5. **Multi-world** — the whole point of the split. One hardcoded world today; `control/` has
-   the registry shaped as a list so it is a data change, and the room is already one goroutine
-   per world.
-6. **A dead branch preserved verbatim:** `server/index.js:1231` nests `if (distHome < 1)`
-   inside `if (distHome > 60)`, so the legacy leash despawn never fires. The Go port keeps the
-   dead branch and `TestLeashedCreatureNeverDespawnsAtHome` pins it — "fixing" it would
-   silently shorten every creature's lifetime. That is a balance decision, not a port bug.
+1. **Medics are on the wire.** `init.medics` carries the eight fields the client's type
+   declares (`id, islandId, sprite, x, y, hutSprite, hutX, hutY`), so the client feeds them
+   straight into its existing `medicBlockTiles()`. Placed lazily as their anchor chunk
+   arrives, via the same `placePendingNotes()` pattern the other landmarks use — `init`
+   lands before any chunk, so both medics start pending. Verified in a real browser: sprite,
+   hut, client-side hut collision, and a full pay-then-heal (HP 2->10, wood 500->492).
+2. **Run scripts.** `tools/dev/stack.mjs` starts control + game + client with one Ctrl-C
+   stopping all three; zero dependencies, because the repo has kept zero and `set X=1&&` in
+   package.json was Windows-only. `npm start`, `start:dev`, `stack:servers`, `start:legacy`,
+   plus `test:go` / `test:control` / `test:legacy` / `test:parity`. The old `npm start`
+   pointed the client at :8090 while starting only the legacy server on :8081.
+3. **`HEARTH_DEV` is deleted.** Dev panels are gated solely on the `dev` claim the control
+   plane signs per-account, from the `HEARTH_DEV_TOKS`/`HEARTH_DEV_USERS` operator allowlist
+   — never from client input (a client POSTing `{"dev":true}` gets nothing; asserted).
+   Node emits the key only as `true` and omits it otherwise. `stack.mjs --dev` prints a hint
+   because it alone does NOT grant the panels.
+4. **Legacy `?legacy=1` path verified** — it works as written, no fixes needed. Terrain,
+   movement, medics, gathering and the F10 panel all exercised against :8081. Keep it.
+5. **Vitals are integers on the wire.** The server applies `ceil` at every boundary
+   (`init`, `stat`, `use`), matching `server/index.js`. `ceil` is load-bearing: starvation
+   fires at `<= 0`, so a bar must read `1` until the value truly reaches zero. `src/ui.ts`
+   dropped its defensive rounding. Note the legacy server sent `init` vitals *raw* — Go is
+   deliberately consistent where the legacy one was not.
+6. **Multi-world hosting.** `gameserver/hosting` routes every connection on the verified
+   ticket: `instanceId` not hosted here -> `authfail: wrong-instance`; unknown `worldId` ->
+   `unknown-world`. Rooms are **lazy** (worldgen is 5-6s and hundreds of MB, so eager boot
+   would stall on worlds nobody joined); `HEARTH_EAGER_WORLDS=1` flips it. The registry uses
+   the same shapes and precedence as `control/store.js` so one config drives both processes.
+   Saves are `world.<worldId>.save.json`, and `worldId` is charset-restricted because it
+   names a file. Cross-world isolation is asserted directly, and `-race` is clean.
+
+**Zero-config default still works** (`worldId: default`, seed `hearth-1`, `instanceId: local`)
+— `test-go.mjs` and the client depend on it.
+
+### Verification at this update
+
+| Gate | Result |
+|---|---|
+| `gameserver/test-go.mjs` | ALL TESTS PASSED, **zero skips** |
+| `gameserver/test-multiworld.mjs` | ALL MULTI-WORLD TESTS PASSED |
+| `control/test.mjs` | ALL TESTS PASSED |
+| Root `test.mjs` vs legacy Node server | ALL TESTS PASSED |
+| `go build` / `vet` / `gofmt` / `go test` (+ `-race` on hosting) | clean |
+| `tsc --noEmit` / `vite build` / worldgen parity | clean / green / exact on 5 seeds |
+
+**Both wire suites need `HEARTH_ALLOW_WARP=1` and a FRESH server** — they are stateful; a
+second run against a live server fails at `gather` because nodes are on respawn timers.
+Delete `gameserver/world*.save.json` between runs.
+
+### Remaining, genuinely optional
+
+- `control/worlds.json` is not checked in; the single-world env fallback covers the default.
+  Add one only when actually hosting several worlds. Format in `docs/10` §11.2.
+- Not verified: medic visibility for a *second* connected client, and medic placement across
+  a reconnect into an already-chunked world (the `medicSpr.has` guard covers duplicates).
+- The dead leash-despawn branch from `server/index.js:1231` is preserved verbatim and pinned
+  by a test. Balance decision, not a port bug.
 
 ### Landed: server-authoritative movement
 

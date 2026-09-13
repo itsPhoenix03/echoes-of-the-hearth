@@ -266,3 +266,20 @@ func (r *Room) medicAccept(p *Player, medic *world.Medic, m map[string]any, now 
 		"hp":   p.HP, "healed": healed,
 	})
 }
+
+// medicsWire renders the room's medics for the `init` frame. The shape mirrors
+// findMedicSpawns() in shared/world.js field for field, which is what the
+// client's `medics` declaration is typed against; MedicBlockTiles()'s server
+// view and the client's medicBlockTiles() both derive from hutX/hutY alone.
+func (r *Room) medicsWire() []map[string]any {
+	out := make([]map[string]any, 0, len(r.medics))
+	for i := range r.medics {
+		m := &r.medics[i]
+		out = append(out, map[string]any{
+			"id": m.ID, "islandId": m.IslandID, "sprite": m.Sprite,
+			"x": m.X, "y": m.Y,
+			"hutSprite": m.HutSprite, "hutX": m.HutX, "hutY": m.HutY,
+		})
+	}
+	return out
+}

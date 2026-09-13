@@ -19,7 +19,7 @@
 // whatever /api/join returns), HEARTH_SEED (default hearth-1).
 
 import WebSocket from 'ws';
-import { genWorld, findMedicSpawns, SIZE, MONOLITHS, CORE } from '../shared/world.js';
+import { genWorld, findMedicSpawns, medicBlockTiles, SIZE, MONOLITHS, CORE } from '../shared/world.js';
 import { NODE, MAX_HP, MEDICINE_HEAL } from '../shared/defs.js';
 
 const CONTROL = process.env.HEARTH_CONTROL_URL || 'http://localhost:8090';
@@ -78,6 +78,43 @@ console.log('A joined:', initA.id, 'spawn', initA.x, initA.y);
 if (initA.seed !== SEED) fail('init.seed mismatch: ' + initA.seed);
 if (initA.size !== SIZE) fail('init.size mismatch: ' + initA.size);
 if (initA.tiles !== undefined) fail('init carried terrain — it must arrive as chunks');
+
+// init.medics (protocol §3): the client no longer generates the world, so the medic roster
+// has to arrive on the wire. The shape must be exactly findMedicSpawns()'s, because the
+// client feeds it straight into medicBlockTiles() to build its hut collision set.
+{
+  const wantMedics = findMedicSpawns(world);
+  if (!Array.isArray(initA.medics)) fail('init.medics missing or not an array: ' + JSON.stringify(initA.medics));
+  if (initA.medics.length !== wantMedics.length)
+    fail(`init.medics has ${initA.medics.length} entries, want ${wantMedics.length}`);
+  const MEDIC_KEYS = ['id', 'islandId', 'sprite', 'x', 'y', 'hutSprite', 'hutX', 'hutY'];
+  for (let i = 0; i < wantMedics.length; i++) {
+    const got = initA.medics[i], want = wantMedics[i];
+    const keys = Object.keys(got).sort();
+    if (keys.join(',') !== [...MEDIC_KEYS].sort().join(','))
+      fail(`init.medics[${i}] keys ${keys.join(',')} != ${[...MEDIC_KEYS].sort().join(',')}`);
+    for (const k of MEDIC_KEYS) {
+      if (got[k] !== want[k]) fail(`init.medics[${i}].${k} = ${got[k]}, want ${want[k]} (findMedicSpawns)`);
+    }
+    for (const k of ['x', 'y', 'hutX', 'hutY']) {
+      if (!Number.isInteger(got[k])) fail(`init.medics[${i}].${k} is not an integer tile: ${got[k]}`);
+    }
+  }
+  // the client's own helper must accept the wire objects unchanged
+  const block = medicBlockTiles(initA.medics);
+  if (block.size !== wantMedics.length)
+    fail(`medicBlockTiles(init.medics) yielded ${block.size} tiles, want ${wantMedics.length}`);
+  for (const md of wantMedics) {
+    if (!block.has(md.hutY * SIZE + md.hutX)) fail('medicBlockTiles missed hut tile for ' + md.id);
+  }
+  console.log('init.medics OK:', initA.medics.map((m) => `${m.id}@${m.x},${m.y}`).join(' '));
+}
+
+// hunger/thirst are integers on the wire (protocol §3) — the server keeps fractional
+// precision internally but must round with ceil() at the boundary, as server/index.js does.
+for (const k of ['hunger', 'thirst']) {
+  if (!Number.isInteger(initA[k])) fail(`init.${k} = ${initA[k]} — the wire carries integers`);
+}
 
 // B joins — A must see pj
 const B = await client();
@@ -138,6 +175,8 @@ A.send({ t: 'use', k: 'water' });
 const stat = await A.wait('stat');
 await sleep(200);
 if (A.state.inv.water !== 0) fail('drink failed');
+if (!Number.isInteger(stat.hunger) || !Number.isInteger(stat.thirst))
+  fail(`stat carried fractional vitals: hunger=${stat.hunger} thirst=${stat.thirst}`);
 console.log('water collect + drink OK, thirst =', stat.thirst);
 
 // demolition: attack own workbench until destroyed, expect half wood refunded
@@ -661,8 +700,8 @@ if (A.msgs.some((m) => m.t === 'wave')) fail('MONO: a refused Engine build still
 console.log('MONO engine build correctly refused with the monoliths unlit');
 
 // --- Stage DEV: the dev/devcmd gate ---
-// The server under test runs without HEARTH_DEV and the control plane does not yet mint a
-// `dev` ticket claim, so both must be refused with the legacy off-message and must mutate
+// The gate is the ticket's signed `dev` claim and nothing else (docs/10 §10.6); these tickets
+// carry no claim, so both must be refused with the legacy off-message and must mutate
 // nothing. If this ever starts passing the gate, the tester panel is reachable in production.
 A.msgs = A.msgs.filter((m) => m.t !== 'msg');
 const devInvBefore = A.state.inv?.starmetal || 0;
@@ -671,7 +710,7 @@ if (!A.msgs.some((m) => m.t === 'msg' && /Dev mode/.test(m.s)))
   fail('DEV: `dev` was neither granted nor refused — no Dev mode message');
 await sleep(200);
 if ((A.state.inv?.starmetal || 0) !== devInvBefore)
-  fail('DEV: the dev kit was granted with no dev claim and no HEARTH_DEV!');
+  fail('DEV: the dev kit was granted to a ticket with no dev claim!');
 A.msgs = A.msgs.filter((m) => m.t !== 'msg' && m.t !== 'mono');
 A.send({ t: 'devcmd', cmd: 'mono', i: 0 }); await sleep(400);
 if (A.msgs.some((m) => m.t === 'mono')) fail('DEV: devcmd mono ran with no dev claim!');

@@ -45,6 +45,18 @@ const colorFor = (id: string) => {
   return Phaser.Display.Color.HSLToColor((h % 360) / 360, 0.6, 0.55).color;
 };
 
+/** A medic and its hut, exactly as the Go server sends them in `init` (§3). */
+type Medic = {
+  id: string;
+  islandId: string;
+  sprite: string;
+  x: number;
+  y: number;
+  hutSprite: string;
+  hutX: number;
+  hutY: number;
+};
+
 const CRE_TEX: Record<string, string> = {
   crawler: "creature",
   stalker: "stalker",
@@ -232,8 +244,9 @@ class Hearth extends Phaser.Scene {
   faceX = 1;
   faceY = 0;
   zToggleAt = 0;
-  medics: { id: string; islandId: string; sprite: string; x: number; y: number;
-            hutSprite: string; hutX: number; hutY: number }[] = [];
+  medics: Medic[] = [];
+  /** Medics whose anchor terrain has not streamed in yet; placed as their chunk arrives. */
+  pendingMedics: Medic[] = [];
   medicSpr = new Map<string, Phaser.GameObjects.Sprite>();
   medicHutSpr = new Map<string, Phaser.GameObjects.Image>();
   medicBlock = new Set<number>();
@@ -1202,6 +1215,9 @@ class Hearth extends Phaser.Scene {
       if (m.chunk) this.chunkSize = m.chunk;
       if (m.tools) this.tools = new Set(m.tools);
       if (m.gear) this.gear = new Set(m.gear);
+      // §3: the Go server sends the medic roster in `init`; buildWorld() keeps what we
+      // set here (the legacy path derives the same spawns locally instead).
+      this.medics = Array.isArray(m.medics) ? m.medics : [];
       this.buildWorld(m.seed, m.removed, m.mud, m.infected, m.brokenBergs);
       for (const [i, kind, hp, dir, lvl] of m.structures || [])
         for (let l = 1; l <= (lvl || 1); l++)
@@ -1813,6 +1829,37 @@ class Hearth extends Phaser.Scene {
     this.pendingNotes = still;
   }
 
+  /** Place the medics whose hut + stand tiles have streamed in; the rest wait for theirs. */
+  private placePendingMedics() {
+    if (!this.pendingMedics.length) return;
+    const still: Medic[] = [];
+    for (const md of this.pendingMedics) {
+      if (!this.world.loadedAt(md.x, md.y) || !this.world.loadedAt(md.hutX, md.hutY)) {
+        still.push(md);
+        continue;
+      }
+      if (this.medicSpr.has(md.id)) continue;
+      // decorative hut first — the medic stands in front of it, so it must sort behind
+      const hp = this.isoE(md.hutX, md.hutY);
+      this.medicHutSpr.set(
+        md.id,
+        this.add
+          .image(hp.x, hp.y + 16, md.hutSprite)
+          .setOrigin(0.5, 0.92)
+          .setDepth(this.iso(md.hutX, md.hutY).y + 18)
+          .setVisible(this.z === 0),
+      );
+      const mdp = this.isoE(md.x, md.y);
+      const s = this.add
+        .sprite(mdp.x, mdp.y + 16, md.sprite)
+        .setOrigin(0.5, 0.92)
+        .setDepth(this.iso(md.x, md.y).y + 18)
+        .setVisible(this.z === 0);
+      this.medicSpr.set(md.id, s);
+    }
+    this.pendingMedics = still;
+  }
+
   /**
    * Apply one `chunk` frame: terrain layers into the store, then the sprites for
    * everything the chunk introduced. A corrupt chunk is dropped whole by the store (§4.3),
@@ -1831,6 +1878,7 @@ class Hearth extends Phaser.Scene {
     // Repainting is coalesced to one pass per frame: a join delivers 25 chunks at once.
     this.terrainDirty = true;
     this.placePendingNotes();
+    this.placePendingMedics();
   }
 
   spawnNode(i: number) {
@@ -2037,29 +2085,14 @@ class Hearth extends Phaser.Scene {
     }
 
     // Medics are derived from the WHOLE generated world, which the streaming client no
-    // longer has. Slice 1's Go server has no medic protocol either, so they exist only on
-    // the legacy path; the Go path will receive them over the wire in a later slice.
-    this.medics = LEGACY && this.legacyGen ? findMedicSpawns(this.world) : [];
+    // longer has: the Go server sends the roster in `init` (assigned before this call),
+    // while the legacy path generated the world itself and derives the spawns locally.
+    if (LEGACY && this.legacyGen) this.medics = findMedicSpawns(this.world);
     this.medicBlock = medicBlockTiles(this.medics);
-    for (const md of this.medics) {
-      // decorative hut first — the medic stands in front of it, so it must sort behind
-      const hp = this.isoE(md.hutX, md.hutY);
-      this.medicHutSpr.set(
-        md.id,
-        this.add
-          .image(hp.x, hp.y + 16, md.hutSprite)
-          .setOrigin(0.5, 0.92)
-          .setDepth(this.iso(md.hutX, md.hutY).y + 18)
-          .setVisible(this.z === 0),
-      );
-      const mdp = this.isoE(md.x, md.y);
-      const s = this.add
-        .sprite(mdp.x, mdp.y + 16, md.sprite)
-        .setOrigin(0.5, 0.92)
-        .setDepth(this.iso(md.x, md.y).y + 18)
-        .setVisible(this.z === 0);
-      this.medicSpr.set(md.id, s);
-    }
+    // Their sprites need terrain under them and `init` lands before any chunk does, so
+    // they are placed lazily as their anchor chunk arrives — same as pendingNotes above.
+    this.pendingMedics = this.medics.slice();
+    this.placePendingMedics();
 
     const mp = this.isoE(this.px, this.py);
     this.me = new Rig(this, mp.x, mp.y, colorFor(this.myName)); // same hash others use for us

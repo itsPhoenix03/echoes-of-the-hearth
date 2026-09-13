@@ -554,17 +554,17 @@ func TestSelfDestroyedEngineCancelsWave(t *testing.T) {
 
 // --- dev gating -----------------------------------------------------------
 
-// The gate: a ticket claim wins, and with no claim the env-derived config
-// decides. Both directions matter — a stray true would hand every player the
-// world-mutating commands.
-func TestDevGateClaimOverridesConfig(t *testing.T) {
+// The gate: the signed ticket claim is the only authority. Absent is false,
+// explicit false is false, and nothing on the server side can override either —
+// there is no env fallback any more. Both directions matter: a stray true would
+// hand every player the world-mutating commands.
+func TestDevGateIsTicketClaimOnly(t *testing.T) {
 	f := newFixture(t)
 	yes, no := true, false
 
-	f.r.cfg.DevTools = false
 	f.p.S.DevClaim = nil
 	if f.r.devAllowed(f.p) {
-		t.Fatal("no claim and HEARTH_DEV unset must refuse")
+		t.Fatal("a ticket with no dev claim must refuse")
 	}
 	f.reset()
 	f.r.handleDev(f.p)
@@ -575,18 +575,13 @@ func TestDevGateClaimOverridesConfig(t *testing.T) {
 		t.Fatalf("the refused dev kit still granted materials: wood=%d", f.p.Inv["wood"])
 	}
 
-	f.r.cfg.DevTools = true
-	if !f.r.devAllowed(f.p) {
-		t.Fatal("HEARTH_DEV should allow when the ticket says nothing")
-	}
 	f.p.S.DevClaim = &no
 	if f.r.devAllowed(f.p) {
-		t.Fatal("an explicit dev:false claim must beat HEARTH_DEV")
+		t.Fatal("an explicit dev:false claim must refuse")
 	}
-	f.r.cfg.DevTools = false
 	f.p.S.DevClaim = &yes
 	if !f.r.devAllowed(f.p) {
-		t.Fatal("an explicit dev:true claim must beat an unset HEARTH_DEV")
+		t.Fatal("an explicit dev:true claim must allow")
 	}
 
 	// and the kit itself

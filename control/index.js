@@ -4,7 +4,7 @@
 
 import http from 'node:http';
 import crypto from 'node:crypto';
-import { getProfile, putProfile, getWorlds } from './store.js';
+import { getProfile, putProfile, getWorlds, resolveWorld, getDefaultWorld, isDevGranted } from './store.js';
 import { issueTicket, getPublicKeyRawB64 } from './ticket.js';
 
 const PORT = Number(process.env.CONTROL_PORT) || 8090;
@@ -56,17 +56,23 @@ function handleJoin(req, res) {
     const sanitized = sanitizeName(body.name);
     let profile = getProfile(tok);
     if (!profile) {
-      profile = { userId: genUserId(), tok, name: sanitized || 'Keeper', createdAt: now, lastSeen: now };
+      profile = { userId: genUserId(), tok, name: sanitized || 'Keeper', dev: false, createdAt: now, lastSeen: now };
     } else {
       profile.lastSeen = now;
       // A real (non-fallback) name is an explicit rename; a fallback never clobbers a saved name.
       if (sanitized) profile.name = sanitized;
     }
+    // The dev permission is account state, resolved from the operator allowlist —
+    // body.dev is read nowhere, so a client cannot grant itself the tester panel.
+    profile.dev = isDevGranted(profile);
     putProfile(profile);
 
-    const world = getWorlds()[0];   // single-world scope; a list makes multi-world a data change later
+    // Allocation: the client may ASK for a world; we bind the one we resolved.
+    // Unknown or missing falls back to the default world.
+    const world = resolveWorld(typeof body.worldId === 'string' ? body.worldId.slice(0, 64) : null);
     const ticket = issueTicket({
       userId: profile.userId, worldId: world.worldId, instanceId: world.instanceId, name: profile.name,
+      dev: profile.dev,
     });
     sendJson(res, 200, { ticket, ws: world.ws, worldId: world.worldId, name: profile.name });
   }).catch((err) => sendJson(res, 400, { error: err.message }));
@@ -74,6 +80,15 @@ function handleJoin(req, res) {
 
 function handleHealth(_req, res) {
   sendJson(res, 200, { ok: true, worlds: getWorlds() });
+}
+
+// Player-facing world list: display fields plus the address to connect to.
+// instanceId is an internal allocation detail and stays out of this response.
+function handleWorlds(_req, res) {
+  sendJson(res, 200, {
+    defaultWorldId: getDefaultWorld().worldId,
+    worlds: getWorlds().map((w) => ({ worldId: w.worldId, name: w.name, seed: w.seed, ws: w.ws })),
+  });
 }
 
 function handlePubkey(_req, res) {
@@ -92,6 +107,7 @@ const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://localhost');
   if (req.method === 'POST' && url.pathname === '/api/join') return handleJoin(req, res);
   if (req.method === 'GET' && url.pathname === '/api/health') return handleHealth(req, res);
+  if (req.method === 'GET' && url.pathname === '/api/worlds') return handleWorlds(req, res);
   if (req.method === 'GET' && url.pathname === '/api/pubkey') return handlePubkey(req, res);
   sendJson(res, 404, { error: 'not found' });
 });
