@@ -465,7 +465,10 @@ Recommended stored shape:
 Recommended module model:
 
 ```ts
-type ModuleSlot = 'floor' | 'wallNE' | 'wallNW' | 'roof' | 'fixture' | 'decor';
+// NOTE: shipped as 'floor' | 'wall' | 'roof' | 'fixture' | 'decor' — the wall art in
+// this pack is a tile-filling block, not an edge panel, so a wall owns its tile.
+// See docs/10_GO_WIRE_PROTOCOL.md §12 for what was actually built.
+type ModuleSlot = 'floor' | 'wall' | 'roof' | 'fixture' | 'decor';
 
 type BuiltModule = {
   id: string;
@@ -499,8 +502,8 @@ Client rendering rules:
 Suggested protocol seam:
 
 ```json
-{ "t": "buildmod", "seq": 17, "i": 1234, "kind": "mod_wall_stone", "slot": "wallNE", "dir": 0 }
-{ "t": "module", "seq": 17, "module": { "id": "m42", "i": 1234, "kind": "mod_wall_stone", "slot": "wallNE", "dir": 0, "hp": 40 } }
+{ "t": "buildmod", "seq": 17, "i": 1234, "kind": "mod_wall_stone", "slot": "wall", "dir": 0 }
+{ "t": "mod", "i": 1234, "slot": "wall", "kind": "mod_wall_stone", "hp": 40, "dir": 0 }
 ```
 
 Return a rejection message containing `seq` when validation fails so the client can clear or retain its preview without guessing. Derive cost and HP from shared definitions; never accept them from the client.

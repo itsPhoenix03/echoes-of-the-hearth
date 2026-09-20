@@ -84,7 +84,8 @@ func (r *Room) posBlocked(x, y float64, z int, fromX, fromY float64) bool {
 	if ok && s.Kind != "shelter" && !r.defs.DecorNonBlk[s.Kind] && s.Kind != "farmplot" {
 		return true
 	}
-	return false
+	// a modular wall fills its tile the way a palisade does; a door does not
+	return r.wallBlocks(i)
 }
 
 // warped is called after ANY server-side reposition — otherwise the client's
@@ -203,13 +204,6 @@ func (r *Room) handlePos(p *Player, m map[string]any) {
 	// never chose; collision-checking it could strand them underground, so only
 	// check entries and normal steps
 	if !(zChange && nz == 0) && r.posBlocked(nx, ny, nz, p.X, p.Y) {
-		snapback()
-		return
-	}
-	// modular wall edges block a crossing, not a tile — a step that passes
-	// through one is refused even though both endpoints are walkable. A layer
-	// change is a scripted teleport and never crosses anything.
-	if !zChange && nz == 0 && r.crossingBlocked(p.X, p.Y, nx, ny) {
 		snapback()
 		return
 	}

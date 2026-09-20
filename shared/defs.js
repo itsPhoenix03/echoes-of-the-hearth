@@ -857,8 +857,7 @@ const D = {
   },
   "MODULE_SLOTS": [
     "floor",
-    "wallNE",
-    "wallNW",
+    "wall",
     "roof",
     "fixture",
     "decor"
@@ -896,7 +895,7 @@ export const MATERIALS = D.MATERIALS;
 // bag, so one tile can carry a floor, two wall edges, a roof, a fixture and a
 // decor piece without five placeable slots cluttering the inventory.
 export const MODULES = D.MODULES;
-// the concrete tile slots; a 'wall' module picks wallNE or wallNW via dir.
+// the concrete tile slots. A wall owns its whole tile (the art is a block).
 export const MODULE_SLOTS = D.MODULE_SLOTS;
 
 export const emptyInv = () => Object.fromEntries(D.INV_KEYS.map((k) => [k, 0]));

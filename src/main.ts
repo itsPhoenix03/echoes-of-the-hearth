@@ -97,6 +97,7 @@ const MODFAIL_MSG: Record<string, string> = {
   "slot-occupied": "That slot is already filled.",
   unsupported: "Nothing there to hold it up — build a floor or a wall first.",
   "no-anchor": "A bridge must reach back to land or to another segment.",
+  occupied: "Someone is standing there — you cannot wall them in.",
   cost: "You do not have the materials.",
 };
 // medicResult/medicOffer failure reasons -> short player-facing text (server protocol is machine-readable only)
@@ -326,9 +327,11 @@ class Hearth extends Phaser.Scene {
   placeDir = 0;
   /** Modular building. modSpr is keyed "tileIndex:slot" — several per tile. */
   modSpr = new Map<string, Phaser.GameObjects.Sprite>();
+  /** Warm pools under lantern hooks, keyed like modSpr. */
+  modGlow = new Map<string, Phaser.GameObjects.Arc>();
+  /** True while the player stands under their own roof (drives the toast). */
+  sheltered = false;
   placingMod: string | null = null;
-  /** Which edge a wall module will take; ignored by every other category. */
-  modEdge: "wallNE" | "wallNW" = "wallNE";
   lastRoofTile = -1;
   modSeq = 0;
   updateUI!: (st: UIState) => void;
@@ -413,12 +416,6 @@ class Hearth extends Phaser.Scene {
       this.setPlacingMod(null);
     });
     this.input.keyboard!.on("keydown-R", () => {
-      if (this.placingMod) {
-        // walls are the only category with two placements; flipping the edge
-        // re-runs the ghost geometry on the next frame
-        this.modEdge = this.modEdge === "wallNE" ? "wallNW" : "wallNE";
-        return;
-      }
       if (
         this.placing &&
         ((RECIPES as any)[this.placing]?.rot || this.placing === "wall")
@@ -1147,6 +1144,7 @@ class Hearth extends Phaser.Scene {
     }
     // modules exist on the surface only; underground they fade with everything else
     for (const s of this.modSpr.values()) s.setAlpha(surfA);
+    for (const g of this.modGlow.values()) g.setAlpha(z === 0 ? 0.12 : 0.03);
     this.lastRoofTile = -1; // re-evaluate roof fade for the new layer
     this.monoSpr.forEach((s) => s.setAlpha(surfA));
     for (const s of this.decorSpr.values()) s.setAlpha(surfA);
@@ -1229,16 +1227,13 @@ class Hearth extends Phaser.Scene {
       .join(", ");
     showMsg(
       `Building ${NAMES[kind] || kind} (${cost}) — click a tile` +
-        (def.slot === "wall" ? ", R flips the edge" : "") +
         " (ESC cancels)",
     );
   }
 
   /** The slot the currently selected module would occupy. */
   modSlotFor(kind: string): string {
-    const def = (MODULES as any)[kind];
-    if (!def) return "floor";
-    return def.slot === "wall" ? this.modEdge : def.slot;
+    return (MODULES as any)[kind]?.slot ?? "floor";
   }
 
   onClick(ptr: Phaser.Input.Pointer) {
@@ -2038,26 +2033,21 @@ class Hearth extends Phaser.Scene {
    */
   // --- modular building ----------------------------------------------------
   //
-  // Slot geometry must match the server's collision convention (wire spec §12.3):
-  //   wallNE on (x,y) is the edge to (x+1,y) — screen offset (+TW/4, +TH/4)
-  //   wallNW on (x,y) is the edge to (x,y+1) — screen offset (-TW/4, +TH/4)
-  // Floors lie flat under entities, roofs draw above their walls, fixtures and
-  // decor use the ordinary standing-sprite rules.
+  // Slot geometry. A wall fills its tile (wire spec §12.3) and is drawn like any
+  // other standing structure — the art is a block with a diamond top and a ground
+  // shadow, so anything else leaves it floating between tiles. Floors lie flat
+  // under entities and roofs draw above everything on the tile.
   modPlacement(slot: string, x: number, y: number) {
     const p = this.isoE(x, y);
     switch (slot) {
       case "floor":
-        return { x: p.x, y: p.y, ox: 0.5, oy: 0.5, depth: p.y - 8, flip: false };
-      case "wallNE":
-        return { x: p.x + TW / 4, y: p.y + TH / 4 + 14, ox: 0.5, oy: 0.55,
-                 depth: p.y + TH / 4 + 18, flip: false };
-      case "wallNW":
-        return { x: p.x - TW / 4, y: p.y + TH / 4 + 14, ox: 0.5, oy: 0.55,
-                 depth: p.y + TH / 4 + 18, flip: true };
+        return { x: p.x, y: p.y, ox: 0.5, oy: 0.5, depth: p.y - 8 };
+      case "wall":
+        return { x: p.x, y: p.y + 16, ox: 0.5, oy: 0.86, depth: p.y + 20 };
       case "roof":
-        return { x: p.x, y: p.y - 12, ox: 0.5, oy: 0.9, depth: p.y + 40, flip: false };
+        return { x: p.x, y: p.y - 6, ox: 0.5, oy: 0.86, depth: p.y + 44 };
       default: // fixture, decor
-        return { x: p.x, y: p.y + 20, ox: 0.5, oy: 0.92, depth: p.y + 20, flip: false };
+        return { x: p.x, y: p.y + 20, ox: 0.5, oy: 0.92, depth: p.y + 20 };
     }
   }
 
@@ -2070,11 +2060,14 @@ class Hearth extends Phaser.Scene {
     const at = (s: string) => this.modSpr.has(`${i}:${s}`);
     switch (slot) {
       case "roof":
-        return at("wallNE") || at("wallNW") || at("fixture");
+        return (
+          at("fixture") ||
+          [i - 1, i + 1, i - SIZE, i + SIZE].some((n) => this.modSpr.has(`${n}:wall`))
+        );
       case "fixture":
         return at("floor");
       case "decor":
-        return at("floor") || at("wallNE") || at("wallNW");
+        return at("floor") || at("wall");
       default:
         return true; // floors and walls stand on their own
     }
@@ -2095,7 +2088,6 @@ class Hearth extends Phaser.Scene {
       .sprite(g.x, g.y, kind)
       .setOrigin(g.ox, g.oy)
       .setDepth(g.depth)
-      .setFlipX(g.flip)
       .setAlpha(this.z !== 0 ? 0.15 : 1);
     spr.setData("slot", slot).setData("i", i).setData("kind", kind).setData("hp", hp).setData("dir", dir);
     // same pop-in as a structure, so placing reads as weight landing
@@ -2103,6 +2095,17 @@ class Hearth extends Phaser.Scene {
     spr.setScale(0.6).setY(finalY - 10);
     this.tweens.add({ targets: spr, scaleX: 1, scaleY: 1, y: finalY, duration: 160, ease: "Back.easeOut" });
     this.modSpr.set(key, spr);
+    if (kind === "mod_lantern_hook") {
+      // same warm additive pool the lantern decor uses, so a lit porch reads at night
+      this.modGlow.set(
+        key,
+        this.add
+          .circle(g.x, g.y - 6, 52, 0xffcc88, 0.12)
+          .setDepth(g.depth - 1)
+          .setBlendMode(Phaser.BlendModes.ADD)
+          .setAlpha(this.z !== 0 ? 0.03 : 0.12),
+      );
+    }
     if (slot === "roof") this.lastRoofTile = -1; // force one roof-fade pass
   }
 
@@ -2110,6 +2113,9 @@ class Hearth extends Phaser.Scene {
     const key = `${i}:${slot}`;
     this.modSpr.get(key)?.destroy();
     this.modSpr.delete(key);
+    this.modGlow.get(key)?.destroy();
+    this.modGlow.delete(key);
+    if (slot === "roof") this.lastRoofTile = -1;
   }
 
   /**
@@ -2120,6 +2126,13 @@ class Hearth extends Phaser.Scene {
     const tile = ((this.py | 0) * SIZE + (this.px | 0)) | 0;
     if (tile === this.lastRoofTile) return;
     this.lastRoofTile = tile;
+    // a roof overhead is real shelter server-side (§12.7) — say so once, on entry
+    const nowSheltered = this.z === 0 && this.modSpr.has(`${tile}:roof`);
+    if (nowSheltered !== this.sheltered) {
+      this.sheltered = nowSheltered;
+      if (nowSheltered)
+        showMsg("🏠 Under your roof — storms, desert heat and cold pass you by.", 2500);
+    }
     for (const spr of this.modSpr.values()) {
       if (spr.getData("slot") !== "roof") continue;
       const i = spr.getData("i") as number;
@@ -2436,6 +2449,9 @@ class Hearth extends Phaser.Scene {
       st.kind !== "farmplot"
     )
       return true;
+    // a modular wall fills its tile the way a palisade does; a door does not
+    const wall = this.modSpr.get(`${(y | 0) * SIZE + (x | 0)}:wall`);
+    if (wall && (MODULES as any)[wall.getData("kind")]?.blocks) return true;
     // TASK 2d: landmark blocked tiles
     if (LANDMARK_BLOCK && LANDMARK_BLOCK.has((y | 0) * SIZE + (x | 0)))
       return true;
@@ -3068,7 +3084,7 @@ class Hearth extends Phaser.Scene {
       const g = this.unIso(wp.x, wp.y);
       const slot = this.modSlotFor(this.placingMod);
       const pl = this.modPlacement(slot, g.x, g.y);
-      this.ghost.setPosition(pl.x, pl.y).setOrigin(pl.ox, pl.oy).setFlipX(pl.flip);
+      this.ghost.setPosition(pl.x, pl.y).setOrigin(pl.ox, pl.oy);
       const gi = g.y * SIZE + g.x;
       // mirror of the server's refusal list — advisory, the server still decides
       const overWater = this.world.tiles[gi] === T.WATER;

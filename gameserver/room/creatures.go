@@ -730,7 +730,7 @@ func (r *Room) stepCreature(c *Creature, strength int, nowMs int64) {
 	swims := canSwim[typ]
 	_, occupied := r.structures[ni]
 	if !inBounds(ni) || (r.tileAt(ni) == world.TWater && !swims) || r.medicTiles[ni] ||
-		(occupied && r.creBlocked(ni)) || r.crossingBlocked(c.X, c.Y, nx, ny) {
+		(occupied && r.creBlocked(ni)) || r.wallBlocks(ni) {
 		moved := false
 		for _, rot := range [2]float64{35 * math.Pi / 180, -35 * math.Pi / 180} {
 			tryAng := moveAng + rot
@@ -739,7 +739,7 @@ func (r *Room) stepCreature(c *Creature, strength int, nowMs int64) {
 			tni := ti(tnx, tny)
 			_, tOcc := r.structures[tni]
 			if inBounds(tni) && (r.tileAt(tni) != world.TWater || swims) && !r.medicTiles[tni] &&
-				(!tOcc || !r.creBlocked(tni)) && !r.crossingBlocked(c.X, c.Y, tnx, tny) {
+				(!tOcc || !r.creBlocked(tni)) && !r.wallBlocks(tni) {
 				nx, ny, ni = tnx, tny, tni
 				moved = true
 				break

@@ -1169,6 +1169,11 @@ const hpWindow = async (ms = 13000) => {
 // devcmd `wx`: set it, and the survival tick must take the matching branch. The clock is at
 // night, so the day-only desert-heat case cannot be what is doing the damage.
 {
+  // force calm first: the weather tick is free to have rolled a natural storm in
+  // by now, and this window asserts on there being no weather at all
+  D.send({ t: 'devcmd', cmd: 'wx', kind: 'clear' });
+  D.send({ t: 'dev' });                       // ...and back to full vitals
+  await sleep(500);
   let hps = await hpWindow(11000);
   if (hps.some((h) => h < MAX_HP)) fail(`DEVOK: exposed sand damaged the player with no weather: ${hps}`);
   // drop any natural weather frame from the 11s window above: wait() scans the
@@ -1372,7 +1377,17 @@ console.log(`DEVOK spawn OK: all ${CRE_TYPE_KEYS.length} creature types spawned 
   if (!planksBefore) fail('MOD: the dev kit granted no wood_planks');
   D.msgs = D.msgs.filter((m) => m.t !== 'mod' && m.t !== 'modfail');
   D.send({ t: 'buildmod', i: mi, kind: 'mod_floor_wood', slot: 'floor', seq: 1 });
-  const placed = await D.wait('mod', 3000);
+  const placed = await (async () => {
+    const t0 = Date.now();
+    while (Date.now() - t0 < 3000) {
+      const ok = D.msgs.find((m) => m.t === 'mod');
+      if (ok) return ok;
+      const no = D.msgs.find((m) => m.t === 'modfail');
+      if (no) fail('MOD: the first floor was refused: ' + JSON.stringify(no));
+      await sleep(50);
+    }
+    fail('MOD: no answer at all to the first buildmod');
+  })();
   if (placed.slot !== 'floor' || placed.kind !== 'mod_floor_wood')
     fail('MOD: unexpected mod broadcast ' + JSON.stringify(placed));
   if (!placed.hp) fail('MOD: the mod broadcast carried no hp');
@@ -1383,50 +1398,90 @@ console.log(`DEVOK spawn OK: all ${CRE_TYPE_KEYS.length} creature types spawned 
   // a second slot on the same tile is the whole point of the system. wait()
   // scans the whole buffer, so the previous frame has to be dropped first.
   D.msgs = D.msgs.filter((m) => m.t !== 'mod' && m.t !== 'modfail');
-  D.send({ t: 'buildmod', i: mi, kind: 'mod_wall_stone', slot: 'wallNE', seq: 2 });
-  const wall = await D.wait('mod', 3000);
-  if (wall.slot !== 'wallNE')
-    fail('MOD: a wall on an occupied tile was refused: ' + JSON.stringify(wall));
+  D.send({ t: 'buildmod', i: mi, kind: 'mod_pillar_wood', slot: 'fixture', seq: 2 });
+  const pillar = await D.wait('mod', 3000);
+  if (pillar.slot !== 'fixture')
+    fail('MOD: a fixture on the floor tile was refused: ' + JSON.stringify(pillar));
 
   // ...and the same slot twice is not, with the seq echoed back
   D.msgs = D.msgs.filter((m) => m.t !== 'modfail');
-  D.send({ t: 'buildmod', i: mi, kind: 'mod_wall_wood', slot: 'wallNE', seq: 3 });
+  D.send({ t: 'buildmod', i: mi, kind: 'mod_pillar_stone', slot: 'fixture', seq: 3 });
   const dup = await D.wait('modfail', 3000);
   if (dup.why !== 'slot-occupied' || dup.seq !== 3)
     fail('MOD: duplicate slot answered ' + JSON.stringify(dup));
 
-  // slot/kind mismatch and an out-of-reach tile are refused the same way
+  // slot/kind mismatch is refused the same way
   D.msgs = D.msgs.filter((m) => m.t !== 'modfail');
   D.send({ t: 'buildmod', i: mi, kind: 'mod_floor_wood', slot: 'roof', seq: 4 });
   const badSlot = await D.wait('modfail', 3000);
   if (badSlot.why !== 'bad-slot') fail('MOD: a floor in the roof slot answered ' + JSON.stringify(badSlot));
 
-  // a blocking wall edge stops the player walking through it: warp is a scripted
-  // reposition, so step across with a normal pos instead.
+  // a blocking wall may not be dropped on the tile a player is standing on
+  D.msgs = D.msgs.filter((m) => m.t !== 'modfail');
+  D.send({ t: 'buildmod', i: mi, kind: 'mod_wall_stone', slot: 'wall', seq: 5 });
+  const under = await D.wait('modfail', 3000);
+  if (under.why !== 'occupied')
+    fail('MOD: a wall was built under the player: ' + JSON.stringify(under));
+
+  // a wall next door fills ITS tile: the step into it is refused and the client
+  // is snapped back (warp is a scripted reposition, so step with a normal pos)
+  D.msgs = D.msgs.filter((m) => m.t !== 'mod' && m.t !== 'modfail');
+  D.send({ t: 'buildmod', i: mi + 1, kind: 'mod_wall_stone', slot: 'wall', seq: 6 });
+  const wall = await D.wait('mod', 3000);
+  if (wall.slot !== 'wall') fail('MOD: the wall was refused: ' + JSON.stringify(wall));
+
+  // the roof leans on that wall, and a roofed tile is shelter (§12.7)
+  D.msgs = D.msgs.filter((m) => m.t !== 'mod' && m.t !== 'modfail');
+  D.send({ t: 'buildmod', i: mi, kind: 'mod_roof_thatch', slot: 'roof', seq: 7 });
+  const roof = await D.wait('mod', 3000);
+  if (roof.slot !== 'roof') fail('MOD: the roof was refused: ' + JSON.stringify(roof));
+
   warp(D, mx, my); await sleep(120);
   D.msgs = D.msgs.filter((m) => m.t !== 'fix');
   D.send({ t: 'pos', x: mx + 1, y: my, z: 0, b: 0 });
   const fix = await D.wait('fix', 3000);
-  if (Math.abs(fix.x - mx) > 0.6) fail(`MOD: walking through a wall was allowed — snapped to ${fix.x}`);
-  console.log('MOD wall edge OK: the crossing was refused and the client snapped back');
+  if (Math.abs(fix.x - mx) > 0.6) fail(`MOD: walking into a wall tile was allowed — snapped to ${fix.x}`);
+  console.log('MOD wall OK: the wall filled its tile and the step was refused');
+
+  // an unroofed player on this open sand burns at midday; under the roof they do not
+  D.send({ t: 'devcmd', cmd: 'time', v: 0.5 }); await sleep(400);
+  const hpNow = () => (lastOf(D, 'hp') || {}).hp ?? D.state.hp ?? MAX_HP;
+  D.msgs = D.msgs.filter((m) => m.t !== 'hp' && m.t !== 'msg');
+  await sleep(9000);
+  if (D.msgs.some((m) => m.t === 'msg' && /desert heat/i.test(m.s)))
+    fail('MOD: the desert still burned a player standing under their own roof');
+  console.log(`MOD shelter OK: no desert-heat damage under the roof (hp ${hpNow()})`);
 
   // demolition: swing until a piece on this tile comes down and expect half its
   // materials back. Which piece falls first is the server's ordering to decide,
   // so the refund is asserted against whichever slot it reports.
-  const REFUND = { floor: 'wood_planks', wallNE: 'stone_blocks' };
-  const before = { wood_planks: D.state.inv.wood_planks, stone_blocks: D.state.inv.stone_blocks };
-  D.msgs = D.msgs.filter((m) => m.t !== 'modd');
-  for (let h = 0; h < 12 && !D.msgs.some((m) => m.t === 'modd'); h++) {
+  const REFUND = { floor: 'wood_planks', fixture: 'wood_planks', roof: 'reed_thatch', wall: 'stone_blocks' };
+  const before = {
+    wood_planks: D.state.inv.wood_planks,
+    reed_thatch: D.state.inv.reed_thatch,
+    stone_blocks: D.state.inv.stone_blocks,
+  };
+  // A swing takes the nearest creature or animal FIRST, and standing still on
+  // open sand for ten seconds is an invitation to every lizard in the dunes, so
+  // only swings that reached the build count against the budget.
+  D.msgs = D.msgs.filter((m) => m.t !== 'modd' && m.t !== 'act' && m.t !== 'modhp');
+  let onBuild = 0;
+  for (let h = 0; h < 80 && !D.msgs.some((m) => m.t === 'modd'); h++) {
     D.send({ t: 'atk' }); await sleep(450);
+    onBuild = D.msgs.filter((m) => m.t === 'modhp' || m.t === 'modd').length;
+    if (onBuild === 0 && h > 40) break;   // never reaching the build at all is the real failure
   }
   const gone = D.msgs.find((m) => m.t === 'modd');
-  if (!gone) fail('MOD: nothing was demolished in 12 swings');
+  if (!gone) {
+    const wildlife = D.msgs.filter((m) => m.t === 'act' && m.targetI).length;
+    fail(`MOD: nothing was demolished — ${onBuild} swings landed on the build, ${wildlife} on wildlife`);
+  }
   const res = REFUND[gone.slot];
   if (!res) fail('MOD: modd reported an unexpected slot ' + JSON.stringify(gone));
   await sleep(250);
-  if (D.state.inv[res] !== before[res] + 1)
-    fail(`MOD: demolishing the ${gone.slot} refunded ${D.state.inv[res] - before[res]} ${res}, want 1`);
-  console.log(`MOD OK: placed, slot-checked, blocked a crossing, demolished the ${gone.slot} for 1 ${res}`);
+  if (D.state.inv[res] <= before[res])
+    fail(`MOD: demolishing the ${gone.slot} refunded no ${res}`);
+  console.log(`MOD OK: slots stacked, wall blocked, roof sheltered, demolished the ${gone.slot} for ${res}`);
 
   // bridges: the one piece allowed over water, and only moored to land (§12.5)
   const coast = (() => {

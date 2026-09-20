@@ -370,7 +370,7 @@ export function initUI(
       if (bsig !== buildSig) {
         buildSig = bsig;
         let html = '<b>Building</b> <span style="color:#888">(B to close)</span><br>' +
-          '<span style="color:#8ab;font-size:11px">Pieces are paid for in crafted materials · R flips a wall to the other edge</span>';
+          '<span style="color:#8ab;font-size:11px">Paid for in crafted materials · a roof over your tile shelters you from the weather</span>';
         const order = ['floor', 'wall', 'roof', 'fixture', 'decor'];
         const label: Record<string, string> = {
           floor: 'Floors', wall: 'Walls & openings', roof: 'Roofs',

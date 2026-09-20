@@ -802,10 +802,9 @@ edges, a roof, a fixture and a decor piece at once. Modules therefore have their
 own store keyed **`tile:slot`**, and the two systems do not mix: a tile carrying
 a legacy structure refuses modules, and vice versa.
 
-Slots are `floor`, `wallNE`, `wallNW`, `roof`, `fixture`, `decor`
-(`MODULE_SLOTS` in `shared/defs.json`). Each module kind declares a *category* in
-`MODULES[kind].slot`; a `wall` kind may occupy either wall edge, every other
-category names its slot exactly.
+Slots are `floor`, `wall`, `roof`, `fixture`, `decor` (`MODULE_SLOTS` in
+`shared/defs.json`), and each module kind names its slot directly in
+`MODULES[kind].slot`.
 
 **Modules are not inventory items.** `MODULES[kind].cost` is spent straight from
 the player's bag in building materials — the `MATERIALS` tier (`wood_planks`,
@@ -830,34 +829,37 @@ tiles and refunds half its materials, mirroring structure demolition.
 ### 12.2 Server → client
 
 ```jsonc
-{ "t": "mod",     "i": 1234, "slot": "wallNE", "kind": "mod_wall_stone", "hp": 40, "dir": 0 }
-{ "t": "modhp",   "i": 1234, "slot": "wallNE", "hp": 22 }   // damaged, still standing
-{ "t": "modd",    "i": 1234, "slot": "wallNE" }             // destroyed or demolished
+{ "t": "mod",     "i": 1234, "slot": "wall", "kind": "mod_wall_stone", "hp": 40, "dir": 0 }
+{ "t": "modhp",   "i": 1234, "slot": "wall", "hp": 22 }     // damaged, still standing
+{ "t": "modd",    "i": 1234, "slot": "wall" }               // destroyed or demolished
 { "t": "modfail", "seq": 17, "why": "slot-occupied" }       // unicast to the sender only
 ```
 
 `modfail` echoes the request's `seq` so the client clears that exact preview
 instead of guessing. `why` is one of `unknown-module`, `bad-slot`, `bad-tile`,
 `outdoors-only`, `too-far`, `water`, `blocked`, `tile-occupied`,
-`slot-occupied`, `unsupported`, `no-anchor`, `cost`. It is advisory text for the UI — the authoritative fact
+`slot-occupied`, `unsupported`, `occupied`, `no-anchor`, `cost`. It is advisory text for the UI — the authoritative fact
 is simply that no `mod` broadcast followed.
 
 Existing modules arrive with their chunk (§8.3 `mods`), never in `init`.
 
-### 12.3 Wall edges and collision
+### 12.3 Walls fill their tile
 
-A wall module does not fill its tile — it stands on one edge of it, so a player
-can stand inside a room they have walled in. Each edge in the world has exactly
-one owning tile:
+A wall owns its whole tile, exactly as the legacy palisade does: `posBlocked`
+refuses it, creature steering refuses it, and the client's `blockedAt` mirrors
+both. A room is a ring of wall tiles around floor tiles.
 
-	wallNE on tile (x,y)  is the edge between (x,y) and (x+1,y)
-	wallNW on tile (x,y)  is the edge between (x,y) and (x,y+1)
+An earlier pass modelled walls as *edges* (`wallNE`/`wallNW`) and it was wrong on
+both counts. The art is drawn as a tile-filling block — a diamond top, two side
+faces and a ground shadow — so an edge-mounted sprite rendered as a post floating
+between tiles with no meaningful facing to rotate; and a player could wall
+themselves in on all four edges of their own tile with no way out. Saves written
+under the old model load through `legacySlot()`, which folds both edges onto the
+one `wall` slot.
 
-The server refuses a `pos` that crosses a blocking edge (and snaps the client
-back), and creature steering tests the same rule, so a walled enclosure keeps
-wolves out as well as players. `mod_door` is a wall that does not block;
-floors, roofs, fixtures and decor never block anything. The client renderer must
-use the same convention or the ghost preview and the collision will disagree.
+`mod_door` is a wall that does not block. Floors, roofs, fixtures and decor never
+block anything, and a blocking wall may not be placed on a tile a player is
+standing on (`occupied`).
 
 ### 12.4 Support and cascade
 
@@ -866,8 +868,8 @@ One rule, enforced server-side on both placement and removal:
 | slot | needs |
 |---|---|
 | `floor` | nothing — free-standing |
-| `wallNE` / `wallNW` | nothing — a fence or a screen is a legitimate build |
-| `roof` | a wall edge or a fixture **on its own tile** |
+| `wall` | nothing — a fence or a screen is a legitimate build |
+| `roof` | a fixture on its own tile, or a wall on a **neighbouring** tile — its own tile has to stay walkable |
 | `fixture` | a floor on its own tile |
 | `decor` | a floor or a wall on its own tile |
 
@@ -900,3 +902,17 @@ The snapshot carries `modules` as an object keyed `"tile:slot"` with
 `{kind, hp, dir, owner}`. A load skips any entry whose key is malformed, whose
 tile is out of bounds, or whose kind or slot no longer exists in the defs, so
 rolling `shared/defs.json` back can never crash the server.
+
+### 12.7 What a build is for
+
+Modules are not decoration. A roof over a player's tile is **shelter**: the
+survival tick skips the sandstorm, blizzard, desert-heat and glacial-cold cases
+for a roofed player, the same protection the z=2 shelter interior gives, without
+leaving the surface. Hunger and thirst are deliberately *not* covered — a roof is
+not a larder.
+
+Because a roof needs a pillar under it or a wall beside it (§12.4), a sheltered
+tile is always part of a real structure. The rest follows from the collision
+rules: a ring of walls keeps creatures out (their steering tests the same tiles),
+a door lets you in and out, bridges cross water, and `mod_lantern_hook` lights
+the result at night.

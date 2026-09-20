@@ -66,17 +66,17 @@ func TestBuildModPlacesAndCharges(t *testing.T) {
 
 	// a second slot on the SAME tile is the whole point of the system
 	f.reset()
-	f.r.handleBuildMod(f.p, map[string]any{"t": "buildmod", "seq": float64(2), "i": float64(i), "kind": "mod_wall_stone", "slot": "wallNE", "dir": float64(1)})
-	if w, ok := f.r.moduleAt(i, "wallNE"); !ok || w.Dir != 1 {
+	f.r.handleBuildMod(f.p, map[string]any{"t": "buildmod", "seq": float64(2), "i": float64(i), "kind": "mod_wall_stone", "slot": "wall"})
+	if _, ok := f.r.moduleAt(i, "wall"); !ok {
 		t.Fatalf("wall on the same tile was refused: %v", f.lastOfType("modfail"))
 	}
 	// ...but the same slot twice is not
 	f.reset()
-	f.r.handleBuildMod(f.p, map[string]any{"t": "buildmod", "seq": float64(3), "i": float64(i), "kind": "mod_wall_wood", "slot": "wallNE"})
+	f.r.handleBuildMod(f.p, map[string]any{"t": "buildmod", "seq": float64(3), "i": float64(i), "kind": "mod_wall_wood", "slot": "wall"})
 	if m := f.lastOfType("modfail"); m == nil || m["why"] != "slot-occupied" {
 		t.Fatalf("expected slot-occupied, got %v", m)
 	}
-	if f.r.modules[modKey(i, "wallNE")].Kind != "mod_wall_stone" {
+	if f.r.modules[modKey(i, "wall")].Kind != "mod_wall_stone" {
 		t.Fatal("a refused placement overwrote the occupant")
 	}
 }
@@ -147,8 +147,8 @@ func TestModuleDemolishRefunds(t *testing.T) {
 	f.stand(float64(f.r.spawn[0]), float64(f.r.spawn[1]), 0)
 	stock(f)
 	i := modTile(t, f, 2)
-	f.r.handleBuildMod(f.p, map[string]any{"t": "buildmod", "i": float64(i), "kind": "mod_wall_stone", "slot": "wallNW"})
-	mod, ok := f.r.moduleAt(i, "wallNW")
+	f.r.handleBuildMod(f.p, map[string]any{"t": "buildmod", "i": float64(i), "kind": "mod_wall_stone", "slot": "wall"})
+	mod, ok := f.r.moduleAt(i, "wall")
 	if !ok {
 		t.Fatal("setup: wall not placed")
 	}
@@ -156,7 +156,7 @@ func TestModuleDemolishRefunds(t *testing.T) {
 
 	f.reset()
 	f.r.hitModule(f.p, mod, 100) // one overwhelming blow
-	if _, still := f.r.moduleAt(i, "wallNW"); still {
+	if _, still := f.r.moduleAt(i, "wall"); still {
 		t.Fatal("module survived a lethal hit")
 	}
 	if len(f.r.modOrder) != 0 {
@@ -165,7 +165,7 @@ func TestModuleDemolishRefunds(t *testing.T) {
 	if got := f.p.Inv["stone_blocks"] - before; got != 1 {
 		t.Fatalf("expected half of 3 stone_blocks back (1), got %d", got)
 	}
-	if m := f.lastOfType("modd"); m == nil || m["slot"] != "wallNW" {
+	if m := f.lastOfType("modd"); m == nil || m["slot"] != "wall" {
 		t.Fatalf("no modd broadcast, got %v", m)
 	}
 }
@@ -177,7 +177,7 @@ func TestModulesSurviveSaveLoad(t *testing.T) {
 	i := modTile(t, f, 3)
 	f.r.handleBuildMod(f.p, map[string]any{"t": "buildmod", "i": float64(i), "kind": "mod_floor_stone", "slot": "floor"})
 	// a wall, not a roof: a roof needs something on the tile to rest on (§12.4)
-	f.r.handleBuildMod(f.p, map[string]any{"t": "buildmod", "i": float64(i), "kind": "mod_wall_wood", "slot": "wallNW"})
+	f.r.handleBuildMod(f.p, map[string]any{"t": "buildmod", "i": float64(i), "kind": "mod_wall_wood", "slot": "wall"})
 	saved := f.r.modulesSnapshot()
 	if len(saved) != 2 {
 		t.Fatalf("snapshot holds %d modules, want 2", len(saved))
@@ -192,82 +192,74 @@ func TestModulesSurviveSaveLoad(t *testing.T) {
 	if len(g.r.modules) != 2 || len(g.r.modOrder) != 2 {
 		t.Fatalf("loaded %d modules (%d mirrored), want 2", len(g.r.modules), len(g.r.modOrder))
 	}
-	if m, ok := g.r.moduleAt(i, "wallNW"); !ok || m.Kind != "mod_wall_wood" {
+	if m, ok := g.r.moduleAt(i, "wall"); !ok || m.Kind != "mod_wall_wood" {
 		t.Fatalf("the wall did not survive the round trip: %+v", g.r.modules)
 	}
 }
 
-// --- wall edges ------------------------------------------------------------
+// --- walls -----------------------------------------------------------------
 
-// A wall stops a crossing, not a tile: both endpoints stay walkable, which is
-// the only way a player can stand inside a room they have walled in.
-func TestWallEdgeBlocksOneCrossing(t *testing.T) {
+// A wall fills its tile, like the palisade it is drawn as: you cannot walk onto
+// it, and you cannot have one dropped on top of you.
+func TestWallBlocksItsTile(t *testing.T) {
 	f := newFixture(t)
 	i := modTile(t, f, 0)
 	x, y := float64(i%world.SIZE), float64(i/world.SIZE)
-	f.stand(x, y, 0)
+	f.stand(x+1, y, 0)
 	stock(f)
 
-	// wallNE on (x,y) owns the edge between (x,y) and (x+1,y)
-	f.r.handleBuildMod(f.p, map[string]any{"t": "buildmod", "i": float64(i), "kind": "mod_wall_stone", "slot": "wallNE"})
-	if _, ok := f.r.moduleAt(i, "wallNE"); !ok {
-		t.Fatalf("setup: wall not placed: %v", f.lastOfType("modfail"))
+	f.r.handleBuildMod(f.p, map[string]any{"t": "buildmod", "i": float64(i), "kind": "mod_wall_stone", "slot": "wall"})
+	if _, ok := f.r.moduleAt(i, "wall"); !ok {
+		t.Fatalf("wall not placed: %v", f.lastOfType("modfail"))
+	}
+	if !f.r.posBlocked(x, y, 0, x+1, y) {
+		t.Fatal("a stone wall left its tile walkable")
 	}
 
-	if !f.r.crossingBlocked(x, y, x+1, y) {
-		t.Fatal("stepping through a stone wall was allowed")
+	// the movement validator refuses the step and snaps the client back
+	f.reset()
+	f.now += 500
+	f.r.handlePos(f.p, map[string]any{"t": "pos", "x": x, "y": y})
+	if f.p.X != x+1 {
+		t.Fatalf("player walked into a wall tile: %.2f,%.2f", f.p.X, f.p.Y)
 	}
-	if !f.r.crossingBlocked(x+1, y, x, y) {
-		t.Fatal("a wall must block both directions")
-	}
-	if f.r.crossingBlocked(x, y, x, y+1) {
-		t.Fatal("a wallNE blocked the wallNW edge too")
-	}
-	if f.r.crossingBlocked(x, y, x-1, y) {
-		t.Fatal("a wallNE blocked the far side of its own tile")
-	}
-	// a diagonal that would slip around the corner is still refused
-	if !f.r.crossingBlocked(x, y, x+1, y+1) {
-		t.Fatal("a diagonal step slipped through the wall")
+	if m := f.lastOfType("fix"); m == nil {
+		t.Fatal("a refused move must snap the client back")
 	}
 }
 
-func TestDoorDoesNotBlock(t *testing.T) {
+func TestDoorIsAWallYouCanWalkThrough(t *testing.T) {
 	f := newFixture(t)
 	i := modTile(t, f, 1)
 	x, y := float64(i%world.SIZE), float64(i/world.SIZE)
-	f.stand(x, y, 0)
+	f.stand(x+1, y, 0)
 	stock(f)
-	f.r.handleBuildMod(f.p, map[string]any{"t": "buildmod", "i": float64(i), "kind": "mod_door", "slot": "wallNE"})
-	if _, ok := f.r.moduleAt(i, "wallNE"); !ok {
-		t.Fatalf("setup: door not placed: %v", f.lastOfType("modfail"))
+	f.r.handleBuildMod(f.p, map[string]any{"t": "buildmod", "i": float64(i), "kind": "mod_door", "slot": "wall"})
+	if _, ok := f.r.moduleAt(i, "wall"); !ok {
+		t.Fatalf("door not placed: %v", f.lastOfType("modfail"))
 	}
-	if f.r.crossingBlocked(x, y, x+1, y) {
-		t.Fatal("a door is a wall you can walk through")
+	if f.r.posBlocked(x, y, 0, x+1, y) {
+		t.Fatal("a door blocked its tile")
 	}
 }
 
-// The movement validator must refuse a pos that crosses a wall, and say so with
-// the usual fix snapback rather than silently accepting it.
-func TestHandlePosRefusesWallCrossing(t *testing.T) {
+// You cannot be walled in where you stand — that was the trap the edge model
+// allowed, and it is refused outright now.
+func TestNoWallUnderAPlayer(t *testing.T) {
 	f := newFixture(t)
 	i := modTile(t, f, 2)
 	x, y := float64(i%world.SIZE), float64(i/world.SIZE)
 	f.stand(x, y, 0)
 	stock(f)
-	f.r.handleBuildMod(f.p, map[string]any{"t": "buildmod", "i": float64(i), "kind": "mod_wall_wood", "slot": "wallNE"})
-	if _, ok := f.r.moduleAt(i, "wallNE"); !ok {
-		t.Fatalf("setup: wall not placed: %v", f.lastOfType("modfail"))
+	f.r.handleBuildMod(f.p, map[string]any{"t": "buildmod", "i": float64(i), "kind": "mod_wall_wood", "slot": "wall"})
+	if m := f.lastOfType("modfail"); m == nil || m["why"] != "occupied" {
+		t.Fatalf("a wall was built on the tile the player stands on: %v", m)
 	}
-
+	// a door is not blocking, so it is allowed underfoot
 	f.reset()
-	f.now += 500
-	f.r.handlePos(f.p, map[string]any{"t": "pos", "x": x + 1, "y": y})
-	if f.p.X != x || f.p.Y != y {
-		t.Fatalf("player walked through a wall to %.2f,%.2f", f.p.X, f.p.Y)
-	}
-	if m := f.lastOfType("fix"); m == nil {
-		t.Fatal("a refused move must snap the client back")
+	f.r.handleBuildMod(f.p, map[string]any{"t": "buildmod", "i": float64(i), "kind": "mod_door", "slot": "wall"})
+	if _, ok := f.r.moduleAt(i, "wall"); !ok {
+		t.Fatalf("a door underfoot was refused: %v", f.lastOfType("modfail"))
 	}
 }
 
@@ -435,5 +427,73 @@ func TestCuttingASpanDropsTheRest(t *testing.T) {
 	}
 	if got := f.p.Inv["wood_planks"] - planks; got != 2 {
 		t.Fatalf("the cut span refunded %d wood_planks, want 2 (one per segment)", got)
+	}
+}
+
+// --- what a build is FOR ---------------------------------------------------
+
+// A roof is shelter: the desert stops burning you the moment one is over your
+// head, and hunger still does not care that you are indoors.
+func TestRoofShelters(t *testing.T) {
+	f := newFixture(t)
+	// a sand tile with a neighbour to put the wall on
+	sand := -1
+	for i := 0; i < world.SIZE*world.SIZE-1; i++ {
+		if f.r.world.Tiles[i] == world.TSand && f.r.world.Tiles[i+1] == world.TSand &&
+			!world.LandmarkBlock[i] && !world.LandmarkBlock[i+1] {
+			sand = i
+			break
+		}
+	}
+	if sand < 0 {
+		t.Fatal("no sand pair in the world")
+	}
+	x, y := float64(sand%world.SIZE), float64(sand/world.SIZE)
+	f.stand(x, y, 0)
+	stock(f)
+	f.r.time = 0.5 // midday: the desert-heat branch is armed
+	f.p.HP = f.r.defs.MaxHP
+
+	f.r.survivalTick()
+	if f.p.HP == f.r.defs.MaxHP {
+		t.Fatal("setup: exposed midday sand did not burn the player")
+	}
+
+	// wall the neighbouring tile, roof this one, and the burning stops
+	f.r.handleBuildMod(f.p, map[string]any{"t": "buildmod", "i": float64(sand + 1), "kind": "mod_wall_stone", "slot": "wall"})
+	f.r.handleBuildMod(f.p, map[string]any{"t": "buildmod", "i": float64(sand), "kind": "mod_roof_thatch", "slot": "roof"})
+	if !f.r.roofed(sand) {
+		t.Fatalf("roof not placed: %v", f.lastOfType("modfail"))
+	}
+	hp := f.p.HP
+	f.r.survivalTick()
+	if f.p.HP != hp {
+		t.Fatalf("the desert still burned a roofed player: %d -> %d", hp, f.p.HP)
+	}
+
+	// ...but a roof is not a larder
+	f.p.Hunger = 0
+	f.r.survivalTick()
+	if f.p.HP >= hp {
+		t.Fatal("a roof cancelled starvation — shelter must only cover the environment")
+	}
+}
+
+// Taking down the wall a roof leans on brings the roof with it.
+func TestRoofFallsWithItsWall(t *testing.T) {
+	f := newFixture(t)
+	i := modTile(t, f, 0)
+	n := i + 1
+	f.stand(float64(i%world.SIZE), float64(i/world.SIZE), 0)
+	stock(f)
+	f.r.handleBuildMod(f.p, map[string]any{"t": "buildmod", "i": float64(n), "kind": "mod_wall_wood", "slot": "wall"})
+	f.r.handleBuildMod(f.p, map[string]any{"t": "buildmod", "i": float64(i), "kind": "mod_roof_thatch", "slot": "roof"})
+	if !f.r.roofed(i) {
+		t.Fatalf("setup: roof not placed: %v", f.lastOfType("modfail"))
+	}
+	wall, _ := f.r.moduleAt(n, "wall")
+	f.r.hitModule(f.p, wall, 100)
+	if f.r.roofed(i) {
+		t.Fatal("the roof stayed up after the wall holding it came down")
 	}
 }

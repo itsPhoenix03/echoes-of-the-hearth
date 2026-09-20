@@ -82,14 +82,18 @@ func (r *Room) removeModule(i int, slot string) {
 	}
 }
 
-// slotFits reports whether a module kind may occupy a given tile slot. A
-// 'wall' module picks one of the two isometric edges; every other category
-// names its slot directly.
-func slotFits(defSlot, slot string) bool {
-	if defSlot == "wall" {
-		return slot == "wallNE" || slot == "wallNW"
+// slotFits reports whether a module kind may occupy a given tile slot. Every
+// category names its slot directly — the art draws walls as tile-filling blocks,
+// so a wall owns its tile rather than one of its edges.
+func slotFits(defSlot, slot string) bool { return defSlot == slot }
+
+// legacySlot maps the edge slots an older save may hold onto the tile slot that
+// replaced them, so a world built before the rework still loads.
+func legacySlot(slot string) string {
+	if slot == "wallNE" || slot == "wallNW" {
+		return "wall"
 	}
-	return defSlot == slot
+	return slot
 }
 
 // modFail tells the sender why a placement was refused, echoing its seq so the
@@ -151,6 +155,10 @@ func (r *Room) handleBuildMod(p *Player, m map[string]any) {
 	}
 	if _, taken := r.moduleAt(i, slot); taken {
 		r.modFail(p, seq, "slot-occupied")
+		return
+	}
+	if def.Blocks && r.playerOnTile(i) {
+		r.modFail(p, seq, "occupied")
 		return
 	}
 	if !r.supported(i, slot) {
@@ -258,7 +266,7 @@ func (r *Room) recheckBridges(p *Player, removed int) {
 //
 //	floor   free-standing
 //	wall    free-standing — a fence or a screen is a legitimate build
-//	roof    needs a wall edge or a fixture on its OWN tile to rest on
+//	roof    needs a fixture on its own tile, or a wall on a neighbouring one
 //	fixture needs a floor on its own tile
 //	decor   needs a floor or a wall on its own tile to hang from
 //
@@ -267,21 +275,27 @@ func (r *Room) recheckBridges(p *Player, removed int) {
 // The alternative — leaving orphans floating — reads as a bug to a player.
 func (r *Room) supported(i int, slot string) bool {
 	switch slot {
-	case "floor", "wallNE", "wallNW":
+	case "floor", "wall":
 		return true
 	case "roof":
-		_, ne := r.moduleAt(i, "wallNE")
-		_, nw := r.moduleAt(i, "wallNW")
-		_, fx := r.moduleAt(i, "fixture")
-		return ne || nw || fx
+		// its own tile must stay walkable, so a roof leans on a fixture here or
+		// on a wall next door — the shape of an actual hut
+		if _, fx := r.moduleAt(i, "fixture"); fx {
+			return true
+		}
+		for _, n := range neighbours4(i) {
+			if _, w := r.moduleAt(n, "wall"); w {
+				return true
+			}
+		}
+		return false
 	case "fixture":
 		_, fl := r.moduleAt(i, "floor")
 		return fl
 	case "decor":
 		_, fl := r.moduleAt(i, "floor")
-		_, ne := r.moduleAt(i, "wallNE")
-		_, nw := r.moduleAt(i, "wallNW")
-		return fl || ne || nw
+		_, w := r.moduleAt(i, "wall")
+		return fl || w
 	}
 	return false
 }
@@ -291,6 +305,14 @@ func (r *Room) supported(i int, slot string) bool {
 // can in turn strand the roof the fixture was holding. Materials go back to the
 // player who caused it, at the same half rate as a deliberate demolition.
 func (r *Room) cascadeUnsupported(p *Player, i int) {
+	// a wall holds up the roofs around it, so the neighbours are re-checked too
+	for _, n := range neighbours4(i) {
+		if _, roofed := r.moduleAt(n, "roof"); roofed && !r.supported(n, "roof") {
+			mod, _ := r.moduleAt(n, "roof")
+			r.refundModule(p, mod)
+			r.destroyModule(n, "roof")
+		}
+	}
 	// checked in dependency order, deepest first, so one pass usually settles it
 	for again := true; again; {
 		again = false
@@ -331,20 +353,19 @@ func (r *Room) refundModule(p *Player, mod *Module) []string {
 	return back
 }
 
-// Wall edges.
+// Walls.
 //
-// A wall module does not fill its tile — it stands on one edge of it and stops
-// a crossing of that edge only, which is what lets a player stand inside a
-// walled room. The convention, shared with the client renderer:
+// A wall module fills its tile, the way the legacy palisade does and the way the
+// art is drawn: a block with a diamond top, two side faces and a ground shadow.
+// An earlier pass modelled walls as edges (wallNE/wallNW) and it failed on both
+// counts — the block art rendered as a post floating between tiles, and a player
+// could fence themselves in on all four edges of the tile they were standing on
+// with no way out. A room is now a ring of wall tiles around floor tiles, which
+// is what the sprites look like and what players already know from palisades.
 //
-//	wallNE on tile (x,y)  is the edge between (x,y) and (x+1,y)
-//	wallNW on tile (x,y)  is the edge between (x,y) and (x,y+1)
-//
-// so each edge in the world has exactly one owning tile and there is no way to
-// express the same barrier twice. Doors are walls that do not block; floors,
-// roofs, fixtures and decor never block anything.
-func (r *Room) edgeBlocks(i int, slot string) bool {
-	mod, ok := r.moduleAt(i, slot)
+// mod_door is the deliberate exception: a wall you can walk through.
+func (r *Room) wallBlocks(i int) bool {
+	mod, ok := r.moduleAt(i, "wall")
 	if !ok {
 		return false
 	}
@@ -352,45 +373,24 @@ func (r *Room) edgeBlocks(i int, slot string) bool {
 	return known && def.Blocks
 }
 
-// crossingBlocked reports whether walking from one tile to another passes
-// through a blocking wall edge. Both axes are tested, so a diagonal step cannot
-// slip through the corner where two walls meet.
-func (r *Room) crossingBlocked(fromX, fromY, toX, toY float64) bool {
-	x0, y0 := int(fromX), int(fromY)
-	x1, y1 := int(toX), int(toY)
-	if x0 == x1 && y0 == y1 {
-		return false
-	}
-	// Walk one tile at a time along x then y. A pos message is speed-budgeted
-	// to roughly one tile, so this loop is short; it is bounded anyway because
-	// anything longer has already been rejected by the speed check.
-	for x := x0; x != x1; {
-		step := 1
-		if x1 < x {
-			step = -1
-		}
-		lo := x
-		if step < 0 {
-			lo = x - 1
-		}
-		if lo >= 0 && lo < world.SIZE-1 && r.edgeBlocks(y0*world.SIZE+lo, "wallNE") {
+// roofed reports whether a tile has a roof over it. A roof is what makes a
+// modular build worth the materials: it is shelter from the weather and from
+// biome exposure, the same protection the z=2 shelter interior gives, without
+// leaving the surface. Support (§12.4) already guarantees a roofed tile is part
+// of a real structure — a pillar under it or a wall beside it.
+func (r *Room) roofed(i int) bool {
+	_, ok := r.moduleAt(i, "roof")
+	return ok
+}
+
+// playerOnTile reports whether any player is standing on a tile. Placing a
+// blocking wall under someone is the other half of the trap the edge model
+// allowed, so it is refused.
+func (r *Room) playerOnTile(i int) bool {
+	for _, q := range r.playerOrder {
+		if q.Z == 0 && ti(q.X, q.Y) == i {
 			return true
 		}
-		x += step
-	}
-	for y := y0; y != y1; {
-		step := 1
-		if y1 < y {
-			step = -1
-		}
-		lo := y
-		if step < 0 {
-			lo = y - 1
-		}
-		if lo >= 0 && lo < world.SIZE-1 && r.edgeBlocks(lo*world.SIZE+x1, "wallNW") {
-			return true
-		}
-		y += step
 	}
 	return false
 }
@@ -472,9 +472,13 @@ func (r *Room) loadModules(saved map[string]*persist.Module) {
 		if !ok || i < 0 || i >= world.SIZE*world.SIZE {
 			continue
 		}
+		slot = legacySlot(slot) // saves written before walls became tile pieces
 		def, known := r.defs.Modules[pm.Kind]
 		if !known || !r.defs.ModuleSlotSet[slot] || !slotFits(def.Slot, slot) {
 			continue
+		}
+		if _, dup := r.moduleAt(i, slot); dup {
+			continue // both edges of one tile collapse onto the same wall slot
 		}
 		hp := pm.HP
 		if hp <= 0 {

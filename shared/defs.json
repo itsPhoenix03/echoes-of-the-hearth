@@ -851,8 +851,7 @@
   },
   "MODULE_SLOTS": [
     "floor",
-    "wallNE",
-    "wallNW",
+    "wall",
     "roof",
     "fixture",
     "decor"
