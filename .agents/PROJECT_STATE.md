@@ -1,7 +1,7 @@
 # Project state — Echoes of the Hearth
 
-**Last updated:** 2026-09-20 · branch `go-migration` · session dump:
-`session-context-dump/2026-09-20_1330__go-migration-complete.md`
+**Last updated:** 2026-09-20 · branch `dev` · session dump:
+`session-context-dump/2026-09-20_1700__modular-building.md`
 
 This is the status source of truth. Update it in the same pass as any session dump.
 It describes the project **as it is now** — history lives in the session dumps.
@@ -149,6 +149,19 @@ save files. Cross-world isolation asserted directly; `-race` clean.
 **One live session per identity**: a second ticket for a live `userId` evicts the first, which
 receives `{t:'kick',reason:'replaced'}`. This fixes the duplicate-browser-tab clone.
 
+### Modular building
+A second placement system beside legacy `structures`, keyed **`tile:slot`** so one tile can
+carry a floor, two wall edges, a roof, a fixture and a decor piece at once. 19 module kinds
+(every `mod_*` asset) paid for out of a new **materials tier** — 10 crafted intermediates
+(`wood_planks`, `stone_blocks`, `glass_pane`, …) that are ordinary recipes; modules themselves
+are never inventory items. `buildmod` in, `mod`/`modhp`/`modd`/`modfail` out, modules streamed
+with their chunk. Walls block **the tile edge, not the tile**, in both the pos validator and
+creature steering; doors do not. Support is one rule (roof→wall/fixture, fixture→floor,
+decor→either) and removal cascades with half refunds. Bridge segments are the one piece allowed
+over water and must stay moored to land; cutting a span drops the rest and stops counting as
+swimming. Wire spec §12; `gameserver/room/modules.go`, `modules_test.go`, MOD stage of
+`test-go.mjs`.
+
 ### Dev tooling
 F9 kit and F10 panel, gated on the ticket's `dev` claim. `HEARTH_DEV_ALL=1` (set by
 `npm run start:dev`) grants it to **loopback requests only** — checked per-request, not on the
@@ -190,6 +203,9 @@ you must reconnect after enabling it.**
 6. **Cold multi-world first join** waits ~6s for worldgen with no progress shown.
 7. **z=2 shelter interiors are unvalidated for x/y** — the server has no `shelterAnchor`, so
    inside a shelter a client can walk through walls. It must still *walk* there.
+9. **Demolition is ownerless.** `handleAtk` picks the nearest structure, then the nearest
+   module, within 2.4 tiles and refunds to whoever swung — `owner` is recorded on both and
+   never checked. Free griefing in co-op; the guide's §2 rule 5 asks for owner-only demolish.
 8. Minor: `buildDevPanel()` closes over the scene that built it (stale after quit-and-rejoin);
    `pj` is broadcast to the joining player itself (cosmetic — the client's own-id guard means no
    ghost renders); `control/worlds.json` is not checked in (env fallback covers the default);
@@ -207,11 +223,12 @@ you must reconnect after enabling it.**
 
 ## 7. Next feature work
 
-1. **Modular building system** — `docs/PLAYER_BUILDING_CUSTOMIZATION_GUIDE.md`. Floor/wall/
-   roof/fixture/decor slots, `buildmod` protocol, support and cascade rules, slot-filtered
-   ghost preview, bridge-over-water. The biggest remaining feature and the only thing that
-   unlocks the ~30 unused `building_materials` assets. Touches the build protocol and
-   persistence — and now has to land in Go, not `server/index.js`.
+1. ~~**Modular building system**~~ **SHIPPED** (§4). What the guide still lists as open and
+   this pass did not do: no module rotation beyond the two wall edges, modules are surface-only
+   (`z=0`), and demolition is still ownerless — anyone may knock anything down (see §5.9).
+   Smaller leftovers from `docs/PLAYER_BUILDING_CUSTOMIZATION_GUIDE.md`: crop weather coupling,
+   the `frostroot` crop and per-crop tile gating, a crop picker (the client hard-codes
+   "wheat if fiber≥2 else glowcap"), and per-stage crop art.
 2. **`PLAN.md` systems with zero code** — fire spread automata, water flow/trenches, blight
    evolution, convergence events, transport networks, Blighted Heart mini-dungeons,
    roles/classes. Fire spread and blight evolution were judged highest value. These are exactly
