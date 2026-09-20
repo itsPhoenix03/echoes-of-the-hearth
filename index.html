@@ -8,7 +8,7 @@
     body { margin: 0; background: #111; overflow: hidden; font-family: monospace; }
     /* --uiz is set from main.ts: keeps the interface a constant on-screen size while the
        browser page zoom changes (the camera clamps the world view by the same factor). */
-    #hud, #objective, #msg, #quickbar, #btns, #craftPanel, #chestPanel, #medicPanel, #devPanel, .modal {
+    #hud, #objective, #msg, #quickbar, #btns, #craftPanel, #buildPanel, #chestPanel, #medicPanel, #devPanel, .modal {
       zoom: var(--uiz, 1);
     }
     #hud { position: fixed; top: 8px; left: 8px; color: #fff; background: rgba(0,0,0,.55);
@@ -47,6 +47,11 @@
     #craftPanel { position: fixed; bottom: 52px; right: 8px; width: 300px; max-height: 60vh; overflow-y: auto;
                   background: rgba(10,15,20,.92); color: #fff; border: 1px solid #57a; border-radius: 8px;
                   padding: 12px; font-size: 13px; z-index: 12; display: none; }
+    #buildPanel { position: fixed; bottom: 52px; right: 316px; width: 300px; max-height: 60vh; overflow-y: auto;
+                  background: rgba(10,15,20,.92); color: #fff; border: 1px solid #57a; border-radius: 8px;
+                  padding: 12px; font-size: 13px; z-index: 12; display: none; }
+    #buildPanel .slotgroup { color: #8ab; margin: 8px 0 2px; font-size: 11px; text-transform: uppercase; }
+    .recipe button.sel { border-color: #8f8; background: #24402a; }
     .recipe { margin: 6px 0; display: flex; align-items: center; gap: 8px; }
     .recipe button { background: #2a3a4a; color: #fff; border: 1px solid #57a; border-radius: 4px;
                      padding: 4px 8px; font-family: monospace; cursor: pointer; min-width: 120px; text-align: left; }
@@ -405,10 +410,12 @@
   <div id="btns">
     <button id="invBtn">Bag [I]</button>
     <button id="craftBtn">Craft [C]</button>
+    <button id="buildBtn">Build [B]</button>
     <button id="helpBtn">? [H]</button>
     <button id="quitBtn">Quit</button>
   </div>
   <div id="craftPanel"></div>
+  <div id="buildPanel"></div>
   <div id="chestPanel"><div class="chest-body"></div></div>
   <div id="medicPanel"></div>
   <div id="invModal" class="modal">
@@ -420,7 +427,8 @@
     <table>
       <tr><td><kbd>W A S D</kbd> / arrows</td><td>Move (mud slows you; cliffs need jumping; falls hurt)</td></tr>
       <tr><td><kbd>SPACE</kbd></td><td>Jump — clears 2-level ledges</td></tr>
-      <tr><td><kbd>F</kbd></td><td>Attack monsters / animals · demolish structures (half refund)</td></tr>
+      <tr><td><kbd>F</kbd></td><td>Attack monsters / animals · demolish structures and building pieces (half refund)</td></tr>
+      <tr><td><kbd>B</kbd></td><td>Build panel — floors, walls, roofs, fixtures and decor built from crafted materials (<kbd>R</kbd> flips a wall to the other edge)</td></tr>
       <tr><td><kbd>E</kbd></td><td>Gather · read notes · enter/exit mines &amp; shelters · dig (underground) · awaken monoliths · collect water at shores</td></tr>
       <tr><td><kbd>E</kbd> on farm plot</td><td>Plant (wheat needs 2 fiber, glowcap needs 1 essence) / harvest when fully grown</td></tr>
       <tr><td><kbd>E</kbd> on a chest</td><td>Open shared chest storage — deposit and withdraw resources</td></tr>

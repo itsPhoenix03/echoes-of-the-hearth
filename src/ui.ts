@@ -1,4 +1,4 @@
-import { RECIPES, NAMES, RESOURCES, MATERIALS, canAfford } from '../shared/defs.js';
+import { RECIPES, NAMES, RESOURCES, MATERIALS, MODULES, canAfford } from '../shared/defs.js';
 // Decor kinds that are zone-restricted (for UI greying)
 const DECOR_ZONE_IN  = new Set(Object.entries(RECIPES as any).filter(([,r]: any) => r.decor && r.zone === 'in').map(([k]) => k));
 const DECOR_ZONE_OUT = new Set(Object.entries(RECIPES as any).filter(([,r]: any) => r.decor && r.zone === 'out').map(([k]) => k));
@@ -63,10 +63,12 @@ export function initUI(
   onVehicle: (k: 'boat' | 'sboat') => void,
   onChestMove: (i: number, res: string, n: number) => void,
   onMedicAccept: (medicId: string, offerId: string) => void,
-  onMedicDecline: (medicId: string) => void
+  onMedicDecline: (medicId: string) => void,
+  onSelectModule: (kind: string | null) => void
 ) {
   let selected: string | null = null;
-  let invSig = '', panelSig = '';
+  let selectedMod: string | null = null;
+  let invSig = '', panelSig = '', buildSig = '';
   let chestOpenI = -1;
   let chestSlots: Record<string, number> = {};
   let chestSig = '';
@@ -88,12 +90,19 @@ export function initUI(
     const m = $(id);
     m.style.display = m.style.display === 'block' ? 'none' : 'block';
   };
+  const toggleBuildPanel = () => {
+    const p = $('buildPanel');
+    p.style.display = p.style.display === 'block' ? 'none' : 'block';
+    buildSig = '';
+  };
   $('craftBtn').onclick = togglePanel;
+  $('buildBtn').onclick = toggleBuildPanel;
   $('invBtn').onclick = () => toggleModal('invModal');
   $('helpBtn').onclick = () => toggleModal('helpModal');
   document.addEventListener('keydown', (e) => {
     if (e.repeat) return;
     if (e.key === 'c' || e.key === 'C') togglePanel();
+    if (e.key === 'b' || e.key === 'B') toggleBuildPanel();
     if (e.key === 'i' || e.key === 'I') toggleModal('invModal');
     if (e.key === 'h' || e.key === 'H') toggleModal('helpModal');
     if (e.key === 'Escape') {
@@ -101,6 +110,7 @@ export function initUI(
       $('helpModal').style.display = 'none';
       closeChestPanel();
       if (selected) { selected = null; invSig = ''; onSelectPlace(null); }
+      if (selectedMod) { selectedMod = null; buildSig = ''; onSelectModule(null); }
     }
   });
 
@@ -111,6 +121,17 @@ export function initUI(
     const res = btn.dataset.res;
     const n = parseInt(btn.dataset.n || '0', 10);
     if (n) onChestMove(chestOpenI, res, n);
+  });
+
+  // Delegated build-panel clicks. Selecting a module is a toggle, and selecting
+  // one cancels any structure placement — the scene shares one ghost between them.
+  $('buildPanel').addEventListener('click', (e) => {
+    const btn = (e.target as HTMLElement).closest('button') as HTMLButtonElement | null;
+    if (!btn || !btn.dataset.mod) return;
+    selectedMod = selectedMod === btn.dataset.mod ? null : btn.dataset.mod!;
+    if (selectedMod && selected) { selected = null; invSig = ''; onSelectPlace(null); }
+    buildSig = '';
+    onSelectModule(selectedMod);
   });
 
   // Delegated clicks: elements are only rebuilt when state changes, so clicks land reliably.
@@ -126,6 +147,7 @@ export function initUI(
     else if (el.dataset.k && RECIPES[el.dataset.k]?.place) {
       selected = selected === el.dataset.k ? null : el.dataset.k!;
       invSig = '';
+      if (selected && selectedMod) { selectedMod = null; buildSig = ''; onSelectModule(null); }
       onSelectPlace(selected);
       if (selected) $('invModal').style.display = 'none';   // clear the view for placing
     }
@@ -338,6 +360,36 @@ export function initUI(
             (r.station && !stationOk ? ` <span class="need">near ${NAMES[r.station]}</span>` : '') + `</div>`;
         }
         $('craftPanel').innerHTML = html;
+      }
+    }
+
+    // build panel — modular pieces, grouped by the slot they occupy. Costs are
+    // paid in crafted materials, so affordability reads the same inventory.
+    if ($('buildPanel').style.display === 'block') {
+      const bsig = JSON.stringify([st.inv, selectedMod, st.zone]);
+      if (bsig !== buildSig) {
+        buildSig = bsig;
+        let html = '<b>Building</b> <span style="color:#888">(B to close)</span><br>' +
+          '<span style="color:#8ab;font-size:11px">Pieces are paid for in crafted materials · R flips a wall to the other edge</span>';
+        const order = ['floor', 'wall', 'roof', 'fixture', 'decor'];
+        const label: Record<string, string> = {
+          floor: 'Floors', wall: 'Walls & openings', roof: 'Roofs',
+          fixture: 'Fixtures', decor: 'Decor',
+        };
+        for (const group of order) {
+          const kinds = Object.entries(MODULES as any)
+            .filter(([, d]) => (d as any).slot === group);
+          if (!kinds.length) continue;
+          html += `<div class="slotgroup">${label[group]}</div>`;
+          for (const [key, d] of kinds as [string, any][]) {
+            const ok = canAfford(st.inv, d.cost);
+            const cost = Object.entries(d.cost).map(([k, v]) => `${icon(k)}${v}`).join(' ');
+            html += `<div class="recipe"><button data-mod="${key}" class="${selectedMod === key ? 'sel' : ''}" ${ok ? '' : 'disabled'}>` +
+              `${NAMES[key] || key}</button> <span class="cost">${cost}</span>` +
+              (selectedMod === key ? ' <span style="color:#8f8">placing</span>' : '') + '</div>';
+          }
+        }
+        $('buildPanel').innerHTML = html;
       }
     }
   }, api);

@@ -70,6 +70,8 @@ export interface ChunkMsg {
   digs?: number[];
   /** [localIdx, kind, hp, dir, lvl] — `dir` drives fence/decor orientation and must survive. */
   structs?: any[][];
+  /** [localIdx, slot, kind, hp, dir] — modular building; several entries per tile. */
+  mods?: any[][];
 }
 
 /** Everything a freshly applied chunk introduced, in WORLD tile indices. */
@@ -81,6 +83,7 @@ export interface ChunkDelta {
   bergs: number[];
   digs: number[];
   structs: { i: number; kind: string; hp: number; dir: number; lvl: number }[];
+  mods: { i: number; slot: string; kind: string; hp: number; dir: number }[];
 }
 
 export class TileStore {
@@ -210,6 +213,7 @@ export class TileStore {
       bergs: [],
       digs: [],
       structs: [],
+      mods: [],
     };
     for (const e of m.nodes || []) {
       if (!Array.isArray(e) || !inRange(e[0])) continue;
@@ -245,6 +249,18 @@ export class TileStore {
         hp: hp | 0,
         dir: has5 ? a | 0 : 0,
         lvl: (has5 ? b : a) | 0 || 1,
+      });
+    }
+
+    for (const e of m.mods || []) {
+      if (!Array.isArray(e) || !inRange(e[0])) continue;
+      const [local, slot, kind, hp, dir] = e;
+      delta.mods.push({
+        i: world(local),
+        slot: String(slot),
+        kind: String(kind),
+        hp: hp | 0,
+        dir: dir | 0,
       });
     }
 
