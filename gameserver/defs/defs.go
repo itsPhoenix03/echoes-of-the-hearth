@@ -49,6 +49,7 @@ type Recipe struct {
 	Zone       string         `json:"zone"` // "in", "out", "both" or ""
 	Rot        bool           `json:"rot"`
 	Flat       bool           `json:"flat"`
+	Material   bool           `json:"material"` // crafted intermediate: spent on modules, never placed
 	EngineOnly bool           `json:"engineOnly"`
 }
 
@@ -65,6 +66,18 @@ type Crop struct {
 	SeedCost  map[string]int `json:"seedCost"`
 	GrowTicks int            `json:"growTicks"`
 	Yield     map[string]int `json:"yield"`
+}
+
+// Module is one entry of MODULES: a piece of modular construction. Modules are
+// not inventory items — Cost is spent straight from the player's bag by the
+// buildmod handler, which is what lets one tile carry a floor, two wall edges, a
+// roof, a fixture and a decor piece at once.
+type Module struct {
+	Slot   string         `json:"slot"` // floor | wall | roof | fixture | decor
+	Cost   map[string]int `json:"cost"`
+	HP     int            `json:"hp"`
+	Blocks bool           `json:"blocks"` // wall edges that stop a crossing (doors do not)
+	Water  bool           `json:"water"`  // may be built over open water (bridge segments)
 }
 
 // TradeRule is one weighted entry of a MEDIC_TRADE_POOLS island pool.
@@ -91,6 +104,9 @@ type Defs struct {
 	Placeables      []string               `json:"PLACEABLES"`
 	DecorNonBlockL  []string               `json:"DECOR_NONBLOCKING"`
 	Crops           map[string]Crop        `json:"CROPS"`
+	Materials       []string               `json:"MATERIALS"`
+	Modules         map[string]Module      `json:"MODULES"`
+	ModuleSlots     []string               `json:"MODULE_SLOTS"`
 	InvKeys         []string               `json:"INV_KEYS"`
 	MedicTradePools map[string][]TradeRule `json:"MEDIC_TRADE_POOLS"`
 
@@ -100,7 +116,10 @@ type Defs struct {
 	WoodenSet    map[string]bool `json:"-"`
 	DecorNonBlk  map[string]bool `json:"-"`
 	// InvKeySet answers "is this a real inventory slot" without a linear scan.
-	InvKeySet map[string]bool `json:"-"`
+	InvKeySet   map[string]bool `json:"-"`
+	MaterialSet map[string]bool `json:"-"`
+	// ModuleSlotSet answers "is this a real tile slot" for the buildmod handler.
+	ModuleSlotSet map[string]bool `json:"-"`
 }
 
 func (d *Defs) finish() error {
@@ -118,6 +137,8 @@ func (d *Defs) finish() error {
 	d.WoodenSet = set(d.Wooden)
 	d.DecorNonBlk = set(d.DecorNonBlockL)
 	d.InvKeySet = set(d.InvKeys)
+	d.MaterialSet = set(d.Materials)
+	d.ModuleSlotSet = set(d.ModuleSlots)
 	return nil
 }
 

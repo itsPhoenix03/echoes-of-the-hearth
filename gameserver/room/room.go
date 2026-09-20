@@ -142,6 +142,10 @@ type Room struct {
 	mudTiles    map[int]bool
 	sectorChops map[int]int // 16x16 sector key -> trees felled
 	farms       map[int]*Farm
+	// Modular building, keyed "tile:slot". modOrder is the insertion-order
+	// mirror: chunk frames, saves and demolition ties all read it (§3).
+	modules     map[string]*Module
+	modOrder    []string
 	chestInv    map[int]map[string]int
 	brokenBergs map[int]bool
 	wave        *waveState
@@ -274,6 +278,7 @@ func New(cfg Config) (*Room, error) {
 		mudTiles:      map[int]bool{},
 		sectorChops:   map[int]int{},
 		farms:         map[int]*Farm{},
+		modules:       map[string]*Module{},
 		chestInv:      map[int]map[string]int{},
 		brokenBergs:   map[int]bool{},
 		chunkCache:    map[int]*staticChunk{},
@@ -636,6 +641,8 @@ func (r *Room) onMessage(in Inbound) {
 		r.handleCraft(p, in.Data)
 	case "build":
 		r.handleBuild(p, in.Data)
+	case "buildmod":
+		r.handleBuildMod(p, in.Data)
 	case "dig":
 		r.handleDig(p, in.Data)
 	case "plant":
@@ -839,8 +846,9 @@ func (r *Room) loadSave() error {
 		}
 		r.chestInv[i] = cp
 	}
-	r.cfg.Logger.Printf("[hearth] save loaded: day %d, %d structures, %d digs, %d farms, %d profiles",
-		r.day, len(r.structures), len(r.digs), len(r.farms), len(r.profiles))
+	r.loadModules(snap.Modules)
+	r.cfg.Logger.Printf("[hearth] save loaded: day %d, %d structures, %d modules, %d digs, %d farms, %d profiles",
+		r.day, len(r.structures), len(r.modules), len(r.digs), len(r.farms), len(r.profiles))
 	return nil
 }
 
@@ -861,6 +869,7 @@ func (r *Room) saveGame() error {
 		Furn:        map[string]*persist.Furn{},
 		Farms:       map[string]*persist.Farm{},
 		ChestInv:    map[string]map[string]int{},
+		Modules:     r.modulesSnapshot(),
 	}
 	for i, at := range r.removed {
 		snap.Removed = append(snap.Removed, persist.NodeRespawn{I: i, Remaining: maxInt64(0, at-now)})

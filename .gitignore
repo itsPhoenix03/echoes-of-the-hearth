@@ -15,6 +15,8 @@ vite.log
 # environment / secrets
 .env
 .env.*
+# derived-userId HMAC key: machine-local, and rotating it orphans every save
+control/.id-secret
 
 # editor & OS noise
 .vscode/

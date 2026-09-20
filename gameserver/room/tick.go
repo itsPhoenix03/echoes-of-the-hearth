@@ -119,8 +119,9 @@ func (r *Room) survivalTick() {
 		idx := ti(q.X, q.Y)
 		tile := r.world.Tiles[idx]
 
-		// Thermal water damage (BEFORE the weather checks) — boats protect.
-		if tile == world.TWater && q.Z == 0 && q.B == 0 {
+		// Thermal water damage (BEFORE the weather checks) — boats protect, and
+		// so does a bridge: standing on the deck is not being in the water.
+		if tile == world.TWater && q.Z == 0 && q.B == 0 && !r.isBridge(idx) {
 			if wt := r.world.WaterTemp[idx]; wt > 0 {
 				q.ThermN++
 				prot := (wt == 1 && q.Worn == "furcloak") || (wt == 2 && q.Worn == "heatcloak")
@@ -145,18 +146,22 @@ func (r *Room) survivalTick() {
 
 		delta := 0
 		var msg string
+		// A roof over your head is shelter — the whole point of building one, and
+		// the reason the materials tier exists (§12.7). It covers the four
+		// environmental cases ONLY: hunger and thirst still kill you indoors.
+		roofed := q.Z == 0 && r.roofed(idx)
 		switch {
 		case q.Z != 0:
 			// underground or indoors: sheltered from the weather
-		case r.weather.kind == "sandstorm" && tile == world.TSand && !r.nearAnyStruct(q, 2):
+		case !roofed && r.weather.kind == "sandstorm" && tile == world.TSand && !r.nearAnyStruct(q, 2):
 			// any structure within 2 tiles counts as shelter from the sand
 			delta, msg = -1, "The sandstorm flays you — shelter beside a structure!"
-		case r.weather.kind == "snowstorm" && tile == world.TSnow && !r.nearStruct(q, "campfire", 6):
+		case !roofed && r.weather.kind == "snowstorm" && tile == world.TSnow && !r.nearStruct(q, "campfire", 6):
 			// only a campfire keeps the blizzard off, and it reaches 6 tiles
 			delta, msg = -1, "The blizzard freezes you — get to a campfire!"
-		case tile == world.TSand && !r.isNight() && q.Worn != "heatcloak":
+		case !roofed && tile == world.TSand && !r.isNight() && q.Worn != "heatcloak":
 			delta, msg = -1, "The desert heat sears you! Craft a Heat Cloak."
-		case tile == world.TSnow && q.Worn != "furcloak":
+		case !roofed && tile == world.TSnow && q.Worn != "furcloak":
 			delta, msg = -1, "The glacial cold bites! Craft a Fur Cloak."
 		case q.Hunger <= 0 || q.Thirst <= 0:
 			delta = -1

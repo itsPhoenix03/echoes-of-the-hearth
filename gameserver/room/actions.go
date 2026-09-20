@@ -829,6 +829,11 @@ func (r *Room) handleAtk(p *Player, m map[string]any) {
 		}
 	}
 	if bsi < 0 {
+		// no legacy structure either: fall through to modular construction,
+		// which is the only way to take a placed module back down
+		if mod, _ := r.nearestModule(p, 2.4); mod != nil {
+			r.hitModule(p, mod, dmg)
+		}
 		return
 	}
 	s := r.structures[bsi]

@@ -19,6 +19,7 @@ import {
   emptyInv,
   DECOR_NONBLOCKING,
   FURNITURE,
+  MODULES,
 } from "../shared/defs.js";
 import { isNightTime, NIGHT_START } from "../shared/time.js";
 import { Rig, makePartTextures } from "./rig.ts";
@@ -82,6 +83,22 @@ const DECOR_TEX: Record<string, string> = {
   reed_vase: "reed_bundle",
   trophy_antler: "bone_totem",
   fence: "mod_railing",
+};
+// buildmod rejection reasons -> short player-facing text (wire spec §12.2)
+const MODFAIL_MSG: Record<string, string> = {
+  "unknown-module": "That piece does not exist.",
+  "bad-slot": "That piece does not fit there.",
+  "bad-tile": "That is not a valid tile.",
+  "outdoors-only": "Modular building only works outdoors.",
+  "too-far": "Too far away — move closer.",
+  water: "You cannot build on water yet.",
+  blocked: "Something already occupies that ground.",
+  "tile-occupied": "A structure already stands on that tile.",
+  "slot-occupied": "That slot is already filled.",
+  unsupported: "Nothing there to hold it up — build a floor or a wall first.",
+  "no-anchor": "A bridge must reach back to land or to another segment.",
+  occupied: "Someone is standing there — you cannot wall them in.",
+  cost: "You do not have the materials.",
 };
 // medicResult/medicOffer failure reasons -> short player-facing text (server protocol is machine-readable only)
 const MEDIC_REASON_MSG: Record<string, string> = {
@@ -308,6 +325,15 @@ class Hearth extends Phaser.Scene {
   ghost: Phaser.GameObjects.Sprite | null = null;
   placing: string | null = null;
   placeDir = 0;
+  /** Modular building. modSpr is keyed "tileIndex:slot" — several per tile. */
+  modSpr = new Map<string, Phaser.GameObjects.Sprite>();
+  /** Warm pools under lantern hooks, keyed like modSpr. */
+  modGlow = new Map<string, Phaser.GameObjects.Arc>();
+  /** True while the player stands under their own roof (drives the toast). */
+  sheltered = false;
+  placingMod: string | null = null;
+  lastRoofTile = -1;
+  modSeq = 0;
   updateUI!: (st: UIState) => void;
   uiApi!: any;
   cropSpr = new Map<number, Phaser.GameObjects.Image>(); // farmplot i -> crop overlay sprite
@@ -385,7 +411,10 @@ class Hearth extends Phaser.Scene {
     );
     this.input.keyboard!.on("keydown-SPACE", () => this.jump());
     this.input.keyboard!.on("keydown-F", () => this.attack());
-    this.input.keyboard!.on("keydown-ESC", () => this.setPlacing(null));
+    this.input.keyboard!.on("keydown-ESC", () => {
+      this.setPlacing(null);
+      this.setPlacingMod(null);
+    });
     this.input.keyboard!.on("keydown-R", () => {
       if (
         this.placing &&
@@ -1113,6 +1142,10 @@ class Hearth extends Phaser.Scene {
       const glowA2 = z === 1 ? 0.03 : 0.13;
       e.glow?.setAlpha(glowA2).setData("baseA", glowA2);
     }
+    // modules exist on the surface only; underground they fade with everything else
+    for (const s of this.modSpr.values()) s.setAlpha(surfA);
+    for (const g of this.modGlow.values()) g.setAlpha(z === 0 ? 0.12 : 0.03);
+    this.lastRoofTile = -1; // re-evaluate roof fade for the new layer
     this.monoSpr.forEach((s) => s.setAlpha(surfA));
     for (const s of this.decorSpr.values()) s.setAlpha(surfA);
     for (const s of this.mountainSpr) s.setAlpha(surfA);
@@ -1157,6 +1190,10 @@ class Hearth extends Phaser.Scene {
   }
 
   setPlacing(kind: string | null) {
+    // the two placement modes share one ghost sprite, so selecting a structure
+    // drops any modular selection (cleared directly — setPlacingMod calls back
+    // into this method)
+    if (kind) this.placingMod = null;
     this.placing = kind;
     this.ghost?.destroy();
     this.ghost = null;
@@ -1172,7 +1209,52 @@ class Hearth extends Phaser.Scene {
     }
   }
 
+  /**
+   * Enter modular build mode. Mutually exclusive with structure placing: the
+   * two share one ghost sprite and one click handler.
+   */
+  setPlacingMod(kind: string | null) {
+    if (kind) this.setPlacing(null);
+    this.placingMod = kind;
+    this.ghost?.destroy();
+    this.ghost = null;
+    if (!kind) return;
+    const def = (MODULES as any)[kind];
+    if (!def) return;
+    this.ghost = this.add.sprite(0, 0, kind).setAlpha(0.55).setDepth(999999);
+    const cost = Object.entries(def.cost)
+      .map(([k, v]) => `${v} ${NAMES[k] || k}`)
+      .join(", ");
+    showMsg(
+      `Building ${NAMES[kind] || kind} (${cost}) — click a tile` +
+        " (ESC cancels)",
+    );
+  }
+
+  /** The slot the currently selected module would occupy. */
+  modSlotFor(kind: string): string {
+    return (MODULES as any)[kind]?.slot ?? "floor";
+  }
+
   onClick(ptr: Phaser.Input.Pointer) {
+    if (this.ready && this.placingMod) {
+      const wp = this.cameras.main.getWorldPoint(ptr.x, ptr.y);
+      const { x, y } = this.unIso(wp.x, wp.y);
+      if (x < 0 || y < 0 || x >= SIZE || y >= SIZE) return;
+      if (this.z !== 0) {
+        showMsg("Modular building only works outdoors.");
+        return;
+      }
+      this.send({
+        t: "buildmod",
+        i: y * SIZE + x,
+        kind: this.placingMod,
+        slot: this.modSlotFor(this.placingMod),
+        dir: 0,
+        seq: ++this.modSeq,
+      });
+      return;
+    }
     if (!this.ready || !this.placing) return;
     const wp = this.cameras.main.getWorldPoint(ptr.x, ptr.y);
     const { x, y } = this.unIso(wp.x, wp.y);
@@ -1513,6 +1595,15 @@ class Hearth extends Phaser.Scene {
           this.uiApi.updateChest(m.i, m.slots || {});
         }
       }
+    } else if (m.t === "mod") {
+      this.addModule(m.i, m.slot, m.kind, m.hp, m.dir | 0);
+    } else if (m.t === "modhp") {
+      this.modSpr.get(`${m.i}:${m.slot}`)?.setData("hp", m.hp);
+    } else if (m.t === "modd") {
+      this.removeModule(m.i, m.slot);
+    } else if (m.t === "modfail") {
+      // advisory only — the authoritative fact is that no `mod` arrived
+      showMsg(MODFAIL_MSG[m.why] || "You cannot build that here.", 2000);
     } else if (m.t === "sd") {
       if (m.i === this.engineI) this.engineHp = m.hp > 0 ? m.hp : null;
       const s = this.structSpr.get(m.i);
@@ -1940,6 +2031,119 @@ class Hearth extends Phaser.Scene {
    * everything the chunk introduced. A corrupt chunk is dropped whole by the store (§4.3),
    * so nothing here can ever paint half a chunk.
    */
+  // --- modular building ----------------------------------------------------
+  //
+  // Slot geometry. A wall fills its tile (wire spec §12.3) and is drawn like any
+  // other standing structure — the art is a block with a diamond top and a ground
+  // shadow, so anything else leaves it floating between tiles. Floors lie flat
+  // under entities and roofs draw above everything on the tile.
+  modPlacement(slot: string, x: number, y: number) {
+    const p = this.isoE(x, y);
+    switch (slot) {
+      case "floor":
+        return { x: p.x, y: p.y, ox: 0.5, oy: 0.5, depth: p.y - 8 };
+      case "wall":
+        return { x: p.x, y: p.y + 16, ox: 0.5, oy: 0.86, depth: p.y + 20 };
+      case "roof":
+        return { x: p.x, y: p.y - 6, ox: 0.5, oy: 0.86, depth: p.y + 44 };
+      default: // fixture, decor
+        return { x: p.x, y: p.y + 20, ox: 0.5, oy: 0.92, depth: p.y + 20 };
+    }
+  }
+
+  /**
+   * Mirror of the server's support rule (wire spec §12.3) — roofs rest on a wall
+   * or a fixture, fixtures on a floor, decor on a floor or a wall. Advisory only:
+   * it colours the ghost, the server still decides.
+   */
+  modSupported(i: number, slot: string): boolean {
+    const at = (s: string) => this.modSpr.has(`${i}:${s}`);
+    switch (slot) {
+      case "roof":
+        return (
+          at("fixture") ||
+          [i - 1, i + 1, i - SIZE, i + SIZE].some((n) => this.modSpr.has(`${n}:wall`))
+        );
+      case "fixture":
+        return at("floor");
+      case "decor":
+        return at("floor") || at("wall");
+      default:
+        return true; // floors and walls stand on their own
+    }
+  }
+
+  /** True when a bridge deck covers this tile — you walk on it, not in it. */
+  bridgeAt(i: number): boolean {
+    const spr = this.modSpr.get(`${i}:floor`);
+    return !!spr && (MODULES as any)[spr.getData("kind")]?.water === true;
+  }
+
+  addModule(i: number, slot: string, kind: string, hp: number, dir: number) {
+    const key = `${i}:${slot}`;
+    if (this.modSpr.has(key)) return;
+    if (!(MODULES as any)[kind]) return; // a kind this client does not know
+    const g = this.modPlacement(slot, i % SIZE, (i / SIZE) | 0);
+    const spr = this.add
+      .sprite(g.x, g.y, kind)
+      .setOrigin(g.ox, g.oy)
+      .setDepth(g.depth)
+      .setAlpha(this.z !== 0 ? 0.15 : 1);
+    spr.setData("slot", slot).setData("i", i).setData("kind", kind).setData("hp", hp).setData("dir", dir);
+    // same pop-in as a structure, so placing reads as weight landing
+    const finalY = spr.y;
+    spr.setScale(0.6).setY(finalY - 10);
+    this.tweens.add({ targets: spr, scaleX: 1, scaleY: 1, y: finalY, duration: 160, ease: "Back.easeOut" });
+    this.modSpr.set(key, spr);
+    if (kind === "mod_lantern_hook") {
+      // same warm additive pool the lantern decor uses, so a lit porch reads at night
+      this.modGlow.set(
+        key,
+        this.add
+          .circle(g.x, g.y - 6, 52, 0xffcc88, 0.12)
+          .setDepth(g.depth - 1)
+          .setBlendMode(Phaser.BlendModes.ADD)
+          .setAlpha(this.z !== 0 ? 0.03 : 0.12),
+      );
+    }
+    if (slot === "roof") this.lastRoofTile = -1; // force one roof-fade pass
+  }
+
+  removeModule(i: number, slot: string) {
+    const key = `${i}:${slot}`;
+    this.modSpr.get(key)?.destroy();
+    this.modSpr.delete(key);
+    this.modGlow.get(key)?.destroy();
+    this.modGlow.delete(key);
+    if (slot === "roof") this.lastRoofTile = -1;
+  }
+
+  /**
+   * Roofs hide the player standing under them. Recomputed only when the player
+   * changes tile — a roof-heavy base would otherwise pay this every frame.
+   */
+  updateRoofFade() {
+    const tile = ((this.py | 0) * SIZE + (this.px | 0)) | 0;
+    if (tile === this.lastRoofTile) return;
+    this.lastRoofTile = tile;
+    // a roof overhead is real shelter server-side (§12.7) — say so once, on entry
+    const nowSheltered = this.z === 0 && this.modSpr.has(`${tile}:roof`);
+    if (nowSheltered !== this.sheltered) {
+      this.sheltered = nowSheltered;
+      if (nowSheltered)
+        showMsg("🏠 Under your roof — storms, desert heat and cold pass you by.", 2500);
+    }
+    for (const spr of this.modSpr.values()) {
+      if (spr.getData("slot") !== "roof") continue;
+      const i = spr.getData("i") as number;
+      const near =
+        this.z === 0 &&
+        Math.abs((i % SIZE) - this.px) <= 1.5 &&
+        Math.abs(((i / SIZE) | 0) - this.py) <= 1.5;
+      spr.setAlpha(this.z !== 0 ? 0.15 : near ? 0.3 : 1);
+    }
+  }
+
   applyChunkMsg(m: ChunkMsg) {
     const d = this.world.applyChunk(m);
     if (!d) return;
@@ -1950,6 +2154,7 @@ class Hearth extends Phaser.Scene {
     for (const st of d.structs)
       for (let l = 1; l <= (st.lvl || 1); l++)
         this.addStruct(st.i, st.kind, st.hp, st.dir, l);
+    for (const md of d.mods) this.addModule(md.i, md.slot, md.kind, md.hp, md.dir);
     // Repainting is coalesced to one pass per frame: a join delivers 25 chunks at once.
     this.terrainDirty = true;
     this.placePendingNotes();
@@ -2244,6 +2449,9 @@ class Hearth extends Phaser.Scene {
       st.kind !== "farmplot"
     )
       return true;
+    // a modular wall fills its tile the way a palisade does; a door does not
+    const wall = this.modSpr.get(`${(y | 0) * SIZE + (x | 0)}:wall`);
+    if (wall && (MODULES as any)[wall.getData("kind")]?.blocks) return true;
     // TASK 2d: landmark blocked tiles
     if (LANDMARK_BLOCK && LANDMARK_BLOCK.has((y | 0) * SIZE + (x | 0)))
       return true;
@@ -2715,7 +2923,9 @@ class Hearth extends Phaser.Scene {
 
     // TASK 4c: boarding / disembarking boats or swimming at the water's edge
     if (this.z === 0) {
-      const onWater = this.tileAt(this.px, this.py) === T.WATER;
+      const onWater =
+        this.tileAt(this.px, this.py) === T.WATER &&
+        !this.bridgeAt((this.py | 0) * SIZE + (this.px | 0));
       if (onWater && !this.sailing && !this.swimming) {
         if (this.selectedVehicle && this.inv[this.selectedVehicle] > 0) {
           // sail with selected vehicle
@@ -2861,8 +3071,45 @@ class Hearth extends Phaser.Scene {
         s.setDepth(s.y);
       }
     }
-    // ghost placement preview
-    if (this.ghost) {
+    // roofs fade out while the player stands under them (no-op unless the
+    // player has changed tile)
+    if (this.modSpr.size) this.updateRoofFade();
+
+    // ghost placement preview — modular first: it uses slot geometry, not recipes
+    if (this.ghost && this.placingMod) {
+      const wp = this.cameras.main.getWorldPoint(
+        this.input.activePointer.x,
+        this.input.activePointer.y,
+      );
+      const g = this.unIso(wp.x, wp.y);
+      const slot = this.modSlotFor(this.placingMod);
+      const pl = this.modPlacement(slot, g.x, g.y);
+      this.ghost.setPosition(pl.x, pl.y).setOrigin(pl.ox, pl.oy);
+      const gi = g.y * SIZE + g.x;
+      // mirror of the server's refusal list — advisory, the server still decides
+      const overWater = this.world.tiles[gi] === T.WATER;
+      const isBridge = (MODULES as any)[this.placingMod]?.water === true;
+      // a bridge segment is the one piece allowed over water, and only when a
+      // neighbour is land or another segment (the server walks the whole span)
+      const anchored =
+        !overWater ||
+        (isBridge &&
+          [gi - 1, gi + 1, gi - SIZE, gi + SIZE].some(
+            (n) =>
+              n >= 0 && n < SIZE * SIZE &&
+              (this.world.tiles[n] !== T.WATER || this.bridgeAt(n)),
+          ));
+      const free =
+        g.x >= 0 && g.y >= 0 && g.x < SIZE && g.y < SIZE &&
+        !this.modSpr.has(`${gi}:${slot}`) &&
+        this.modSupported(gi, slot) &&
+        !this.structSpr.has(gi) &&
+        anchored &&
+        !LANDMARK_BLOCK.has(gi);
+      const ok =
+        this.z === 0 && free && Math.hypot(g.x - this.px, g.y - this.py) <= 6;
+      this.ghost.setTint(ok ? 0x88ff88 : 0xff6666);
+    } else if (this.ghost) {
       const wp = this.cameras.main.getWorldPoint(
         this.input.activePointer.x,
         this.input.activePointer.y,
@@ -3142,6 +3389,7 @@ function getUiApi(): ReturnType<typeof initUI> {
     (medicId, offerId) =>
       activeScene?.send({ t: "medic", medicId, action: "accept", offerId }),
     (medicId) => activeScene?.send({ t: "medic", medicId, action: "decline" }),
+    (kind) => activeScene?.setPlacingMod(kind),
   );
   return uiApiSingleton;
 }

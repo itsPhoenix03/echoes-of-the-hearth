@@ -84,7 +84,8 @@ func (r *Room) posBlocked(x, y float64, z int, fromX, fromY float64) bool {
 	if ok && s.Kind != "shelter" && !r.defs.DecorNonBlk[s.Kind] && s.Kind != "farmplot" {
 		return true
 	}
-	return false
+	// a modular wall fills its tile the way a palisade does; a door does not
+	return r.wallBlocks(i)
 }
 
 // warped is called after ANY server-side reposition — otherwise the client's

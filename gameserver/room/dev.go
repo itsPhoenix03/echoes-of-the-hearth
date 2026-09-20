@@ -85,6 +85,11 @@ func (r *Room) handleDev(p *Player) {
 	for k, v := range devKitInv {
 		p.Inv[k] = v
 	}
+	// building materials come from defs rather than the literal above, so a new
+	// material never needs a dev-kit edit to be testable
+	for _, k := range r.defs.Materials {
+		p.Inv[k] = 100
+	}
 	for _, t := range devKitTools {
 		p.Tools[t] = true
 	}
