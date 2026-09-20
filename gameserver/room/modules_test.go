@@ -176,7 +176,8 @@ func TestModulesSurviveSaveLoad(t *testing.T) {
 	stock(f)
 	i := modTile(t, f, 3)
 	f.r.handleBuildMod(f.p, map[string]any{"t": "buildmod", "i": float64(i), "kind": "mod_floor_stone", "slot": "floor"})
-	f.r.handleBuildMod(f.p, map[string]any{"t": "buildmod", "i": float64(i), "kind": "mod_roof_thatch", "slot": "roof"})
+	// a wall, not a roof: a roof needs something on the tile to rest on (§12.4)
+	f.r.handleBuildMod(f.p, map[string]any{"t": "buildmod", "i": float64(i), "kind": "mod_wall_wood", "slot": "wallNW"})
 	saved := f.r.modulesSnapshot()
 	if len(saved) != 2 {
 		t.Fatalf("snapshot holds %d modules, want 2", len(saved))
@@ -191,8 +192,8 @@ func TestModulesSurviveSaveLoad(t *testing.T) {
 	if len(g.r.modules) != 2 || len(g.r.modOrder) != 2 {
 		t.Fatalf("loaded %d modules (%d mirrored), want 2", len(g.r.modules), len(g.r.modOrder))
 	}
-	if m, ok := g.r.moduleAt(i, "roof"); !ok || m.Kind != "mod_roof_thatch" {
-		t.Fatalf("roof did not survive the round trip: %+v", g.r.modules)
+	if m, ok := g.r.moduleAt(i, "wallNW"); !ok || m.Kind != "mod_wall_wood" {
+		t.Fatalf("the wall did not survive the round trip: %+v", g.r.modules)
 	}
 }
 
@@ -267,5 +268,90 @@ func TestHandlePosRefusesWallCrossing(t *testing.T) {
 	}
 	if m := f.lastOfType("fix"); m == nil {
 		t.Fatal("a refused move must snap the client back")
+	}
+}
+
+// --- support and cascade ---------------------------------------------------
+
+func TestSupportRefusesFloatingPieces(t *testing.T) {
+	f := newFixture(t)
+	i := modTile(t, f, 0)
+	f.stand(float64(i%world.SIZE), float64(i/world.SIZE), 0)
+	stock(f)
+
+	// a roof with nothing under it, and a fixture with no floor
+	for _, c := range []struct{ kind, slot string }{
+		{"mod_roof_thatch", "roof"},
+		{"mod_pillar_wood", "fixture"},
+		{"mod_banner_blank", "decor"},
+	} {
+		f.reset()
+		f.r.handleBuildMod(f.p, map[string]any{"t": "buildmod", "i": float64(i), "kind": c.kind, "slot": c.slot})
+		if m := f.lastOfType("modfail"); m == nil || m["why"] != "unsupported" {
+			t.Fatalf("%s floating in mid-air was allowed: %v", c.kind, m)
+		}
+	}
+
+	// give it a floor and the fixture lands; the fixture then supports a roof
+	f.r.handleBuildMod(f.p, map[string]any{"t": "buildmod", "i": float64(i), "kind": "mod_floor_wood", "slot": "floor"})
+	f.r.handleBuildMod(f.p, map[string]any{"t": "buildmod", "i": float64(i), "kind": "mod_pillar_wood", "slot": "fixture"})
+	f.r.handleBuildMod(f.p, map[string]any{"t": "buildmod", "i": float64(i), "kind": "mod_roof_thatch", "slot": "roof"})
+	for _, slot := range []string{"floor", "fixture", "roof"} {
+		if _, ok := f.r.moduleAt(i, slot); !ok {
+			t.Fatalf("%s was refused once its support existed: %v", slot, f.lastOfType("modfail"))
+		}
+	}
+}
+
+// Knocking out the floor takes the pillar with it, and the roof the pillar was
+// holding — one blow, the whole stack, refunded.
+func TestCascadeTakesDownWhatItHeldUp(t *testing.T) {
+	f := newFixture(t)
+	i := modTile(t, f, 1)
+	f.stand(float64(i%world.SIZE), float64(i/world.SIZE), 0)
+	stock(f)
+	for _, c := range []struct{ kind, slot string }{
+		{"mod_floor_wood", "floor"},
+		{"mod_pillar_wood", "fixture"},
+		{"mod_roof_thatch", "roof"},
+	} {
+		f.r.handleBuildMod(f.p, map[string]any{"t": "buildmod", "i": float64(i), "kind": c.kind, "slot": c.slot})
+	}
+	if len(f.r.modOrder) != 3 {
+		t.Fatalf("setup placed %d modules, want 3", len(f.r.modOrder))
+	}
+	planks := f.p.Inv["wood_planks"]
+	thatch := f.p.Inv["reed_thatch"]
+
+	f.reset()
+	floor, _ := f.r.moduleAt(i, "floor")
+	f.r.hitModule(f.p, floor, 100)
+
+	if len(f.r.modules) != 0 || len(f.r.modOrder) != 0 {
+		t.Fatalf("%d modules survived the cascade: %v", len(f.r.modules), f.r.modOrder)
+	}
+	// floor (2 planks) + pillar (2 planks) both refund 1, thatch roof refunds 1
+	if got := f.p.Inv["wood_planks"] - planks; got != 2 {
+		t.Fatalf("cascade refunded %d wood_planks, want 2", got)
+	}
+	if got := f.p.Inv["reed_thatch"] - thatch; got != 1 {
+		t.Fatalf("cascade refunded %d reed_thatch, want 1", got)
+	}
+	seen := map[string]bool{}
+	for _, m := range f.seen {
+		if m["t"] == "modd" {
+			seen[m["slot"].(string)] = true
+		}
+	}
+	f.seen = append(f.seen, f.drain()...)
+	for _, m := range f.seen {
+		if m["t"] == "modd" {
+			seen[m["slot"].(string)] = true
+		}
+	}
+	for _, slot := range []string{"floor", "fixture", "roof"} {
+		if !seen[slot] {
+			t.Fatalf("no modd broadcast for the %s that came down", slot)
+		}
 	}
 }

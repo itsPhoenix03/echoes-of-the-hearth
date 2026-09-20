@@ -95,6 +95,7 @@ const MODFAIL_MSG: Record<string, string> = {
   blocked: "Something already occupies that ground.",
   "tile-occupied": "A structure already stands on that tile.",
   "slot-occupied": "That slot is already filled.",
+  unsupported: "Nothing there to hold it up — build a floor or a wall first.",
   cost: "You do not have the materials.",
 };
 // medicResult/medicOffer failure reasons -> short player-facing text (server protocol is machine-readable only)
@@ -2059,6 +2060,25 @@ class Hearth extends Phaser.Scene {
     }
   }
 
+  /**
+   * Mirror of the server's support rule (wire spec §12.3) — roofs rest on a wall
+   * or a fixture, fixtures on a floor, decor on a floor or a wall. Advisory only:
+   * it colours the ghost, the server still decides.
+   */
+  modSupported(i: number, slot: string): boolean {
+    const at = (s: string) => this.modSpr.has(`${i}:${s}`);
+    switch (slot) {
+      case "roof":
+        return at("wallNE") || at("wallNW") || at("fixture");
+      case "fixture":
+        return at("floor");
+      case "decor":
+        return at("floor") || at("wallNE") || at("wallNW");
+      default:
+        return true; // floors and walls stand on their own
+    }
+  }
+
   addModule(i: number, slot: string, kind: string, hp: number, dir: number) {
     const key = `${i}:${slot}`;
     if (this.modSpr.has(key)) return;
@@ -3045,6 +3065,7 @@ class Hearth extends Phaser.Scene {
       const free =
         g.x >= 0 && g.y >= 0 && g.x < SIZE && g.y < SIZE &&
         !this.modSpr.has(`${gi}:${slot}`) &&
+        this.modSupported(gi, slot) &&
         !this.structSpr.has(gi) &&
         this.world.tiles[gi] !== T.WATER &&
         !LANDMARK_BLOCK.has(gi);

@@ -839,7 +839,7 @@ tiles and refunds half its materials, mirroring structure demolition.
 `modfail` echoes the request's `seq` so the client clears that exact preview
 instead of guessing. `why` is one of `unknown-module`, `bad-slot`, `bad-tile`,
 `outdoors-only`, `too-far`, `water`, `blocked`, `tile-occupied`,
-`slot-occupied`, `cost`. It is advisory text for the UI — the authoritative fact
+`slot-occupied`, `unsupported`, `cost`. It is advisory text for the UI — the authoritative fact
 is simply that no `mod` broadcast followed.
 
 Existing modules arrive with their chunk (§8.3 `mods`), never in `init`.
@@ -859,7 +859,25 @@ wolves out as well as players. `mod_door` is a wall that does not block;
 floors, roofs, fixtures and decor never block anything. The client renderer must
 use the same convention or the ghost preview and the collision will disagree.
 
-### 12.4 Persistence
+### 12.4 Support and cascade
+
+One rule, enforced server-side on both placement and removal:
+
+| slot | needs |
+|---|---|
+| `floor` | nothing — free-standing |
+| `wallNE` / `wallNW` | nothing — a fence or a screen is a legitimate build |
+| `roof` | a wall edge or a fixture **on its own tile** |
+| `fixture` | a floor on its own tile |
+| `decor` | a floor or a wall on its own tile |
+
+Placement of an unsupported piece is refused with `unsupported`. Removal
+**cascades**: destroying a piece takes down whatever it was holding up, repeating
+until the tile is stable (pulling a floor strands the fixture, which strands the
+roof), and every piece that falls refunds half its materials to whoever knocked
+it down. The client mirrors the table to colour its ghost; the server decides.
+
+### 12.5 Persistence
 
 The snapshot carries `modules` as an object keyed `"tile:slot"` with
 `{kind, hp, dir, owner}`. A load skips any entry whose key is malformed, whose

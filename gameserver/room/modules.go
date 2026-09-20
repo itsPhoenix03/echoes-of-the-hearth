@@ -147,6 +147,10 @@ func (r *Room) handleBuildMod(p *Player, m map[string]any) {
 		r.modFail(p, seq, "slot-occupied")
 		return
 	}
+	if !r.supported(i, slot) {
+		r.modFail(p, seq, "unsupported")
+		return
+	}
 	if !canAfford(p.Inv, def.Cost) {
 		r.modFail(p, seq, "cost")
 		return
@@ -162,6 +166,86 @@ func (r *Room) handleBuildMod(p *Player, m map[string]any) {
 		"t": "mod", "i": i, "slot": slot, "kind": kind, "hp": mod.HP, "dir": dir,
 	})
 	r.sendInv(p)
+}
+
+// Support.
+//
+// One rule, applied server-side on both placement and removal (the asset guide
+// leaves the choice open; this is the choice):
+//
+//	floor   free-standing
+//	wall    free-standing — a fence or a screen is a legitimate build
+//	roof    needs a wall edge or a fixture on its OWN tile to rest on
+//	fixture needs a floor on its own tile
+//	decor   needs a floor or a wall on its own tile to hang from
+//
+// Placement refuses an unsupported piece; removal cascades, destroying whatever
+// the removed piece was holding up and refunding it to whoever knocked it down.
+// The alternative — leaving orphans floating — reads as a bug to a player.
+func (r *Room) supported(i int, slot string) bool {
+	switch slot {
+	case "floor", "wallNE", "wallNW":
+		return true
+	case "roof":
+		_, ne := r.moduleAt(i, "wallNE")
+		_, nw := r.moduleAt(i, "wallNW")
+		_, fx := r.moduleAt(i, "fixture")
+		return ne || nw || fx
+	case "fixture":
+		_, fl := r.moduleAt(i, "floor")
+		return fl
+	case "decor":
+		_, fl := r.moduleAt(i, "floor")
+		_, ne := r.moduleAt(i, "wallNE")
+		_, nw := r.moduleAt(i, "wallNW")
+		return fl || ne || nw
+	}
+	return false
+}
+
+// cascadeUnsupported removes everything on a tile that has lost its support,
+// repeating until the tile is stable — taking a floor out from under a fixture
+// can in turn strand the roof the fixture was holding. Materials go back to the
+// player who caused it, at the same half rate as a deliberate demolition.
+func (r *Room) cascadeUnsupported(p *Player, i int) {
+	// checked in dependency order, deepest first, so one pass usually settles it
+	for again := true; again; {
+		again = false
+		for _, slot := range []string{"fixture", "decor", "roof"} {
+			if _, ok := r.moduleAt(i, slot); !ok || r.supported(i, slot) {
+				continue
+			}
+			mod, _ := r.moduleAt(i, slot)
+			r.refundModule(p, mod)
+			r.destroyModule(i, slot)
+			again = true
+		}
+	}
+}
+
+// refundModule returns half of a module's materials to a player, if there is a
+// player to return them to. It is the shared half of demolition and cascade.
+func (r *Room) refundModule(p *Player, mod *Module) []string {
+	if p == nil {
+		return nil
+	}
+	def, ok := r.defs.Modules[mod.Kind]
+	if !ok {
+		return nil
+	}
+	keys := make([]string, 0, len(def.Cost))
+	for k := range def.Cost {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys) // deterministic message text
+	var back []string
+	for _, k := range keys {
+		if n := def.Cost[k] / 2; n > 0 {
+			p.Inv[k] += n
+			back = append(back, fmt.Sprintf("%d %s", n, k))
+		}
+	}
+	return back
 }
 
 // Wall edges.
@@ -257,21 +341,10 @@ func (r *Room) hitModule(p *Player, mod *Module, dmg int) {
 		r.broadcast(map[string]any{"t": "modhp", "i": mod.I, "slot": mod.Slot, "hp": mod.HP})
 		return
 	}
+	back := r.refundModule(p, mod)
 	r.destroyModule(mod.I, mod.Slot)
-	var back []string
-	if def, ok := r.defs.Modules[mod.Kind]; ok {
-		keys := make([]string, 0, len(def.Cost))
-		for k := range def.Cost {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys) // deterministic message text
-		for _, k := range keys {
-			if n := def.Cost[k] / 2; n > 0 {
-				p.Inv[k] += n
-				back = append(back, fmt.Sprintf("%d %s", n, k))
-			}
-		}
-	}
+	// whatever this piece was holding up comes down with it
+	r.cascadeUnsupported(p, mod.I)
 	r.sendInv(p)
 	msg := "Removed " + r.moduleName(mod.Kind)
 	if len(back) > 0 {
