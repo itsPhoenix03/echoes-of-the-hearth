@@ -68,6 +68,17 @@ type Crop struct {
 	Yield     map[string]int `json:"yield"`
 }
 
+// Module is one entry of MODULES: a piece of modular construction. Modules are
+// not inventory items — Cost is spent straight from the player's bag by the
+// buildmod handler, which is what lets one tile carry a floor, two wall edges, a
+// roof, a fixture and a decor piece at once.
+type Module struct {
+	Slot   string         `json:"slot"` // floor | wall | roof | fixture | decor
+	Cost   map[string]int `json:"cost"`
+	HP     int            `json:"hp"`
+	Blocks bool           `json:"blocks"` // wall edges that stop a crossing (doors do not)
+}
+
 // TradeRule is one weighted entry of a MEDIC_TRADE_POOLS island pool.
 type TradeRule struct {
 	Resource string `json:"resource"`
@@ -93,6 +104,8 @@ type Defs struct {
 	DecorNonBlockL  []string               `json:"DECOR_NONBLOCKING"`
 	Crops           map[string]Crop        `json:"CROPS"`
 	Materials       []string               `json:"MATERIALS"`
+	Modules         map[string]Module      `json:"MODULES"`
+	ModuleSlots     []string               `json:"MODULE_SLOTS"`
 	InvKeys         []string               `json:"INV_KEYS"`
 	MedicTradePools map[string][]TradeRule `json:"MEDIC_TRADE_POOLS"`
 
@@ -104,6 +117,8 @@ type Defs struct {
 	// InvKeySet answers "is this a real inventory slot" without a linear scan.
 	InvKeySet   map[string]bool `json:"-"`
 	MaterialSet map[string]bool `json:"-"`
+	// ModuleSlotSet answers "is this a real tile slot" for the buildmod handler.
+	ModuleSlotSet map[string]bool `json:"-"`
 }
 
 func (d *Defs) finish() error {
@@ -122,6 +137,7 @@ func (d *Defs) finish() error {
 	d.DecorNonBlk = set(d.DecorNonBlockL)
 	d.InvKeySet = set(d.InvKeys)
 	d.MaterialSet = set(d.Materials)
+	d.ModuleSlotSet = set(d.ModuleSlots)
 	return nil
 }
 

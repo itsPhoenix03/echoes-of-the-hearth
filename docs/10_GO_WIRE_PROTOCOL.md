@@ -287,7 +287,8 @@ omitted array means empty.
   "brokenBergs": [localIdx, ...],              // icebergs smashed by a reinforced hull
   "structs": [[localIdx, kind, hp, dir, lvl], ...],
   "furn":    [[localIdx, kind, z], ...],       // chests, beds, mine/shelter decor
-  "farms":   [[localIdx, crop, stage], ...]    // stage 0..2
+  "farms":   [[localIdx, crop, stage], ...],   // stage 0..2
+  "mods":    [[localIdx, slot, kind, hp, dir], ...]  // modular building (§12)
 }
 ```
 
@@ -791,3 +792,61 @@ same identity.
 
 Covered by `gameserver/room/admission_test.go`, `gameserver/hosting/hosting_test.go` and, over
 the wire, by the ADMIT stage of `gameserver/test-go.mjs`.
+
+---
+
+## 12. Modular building — `buildmod`
+
+Legacy `structures` is one entry per tile, which cannot hold a floor, two wall
+edges, a roof, a fixture and a decor piece at once. Modules therefore have their
+own store keyed **`tile:slot`**, and the two systems do not mix: a tile carrying
+a legacy structure refuses modules, and vice versa.
+
+Slots are `floor`, `wallNE`, `wallNW`, `roof`, `fixture`, `decor`
+(`MODULE_SLOTS` in `shared/defs.json`). Each module kind declares a *category* in
+`MODULES[kind].slot`; a `wall` kind may occupy either wall edge, every other
+category names its slot exactly.
+
+**Modules are not inventory items.** `MODULES[kind].cost` is spent straight from
+the player's bag in building materials — the `MATERIALS` tier (`wood_planks`,
+`stone_blocks`, `glass_pane`, ...), which are themselves ordinary crafted
+recipes. Nothing about a module ever enters `INV_KEYS`.
+
+### 12.1 Client → server
+
+| type | payload | notes |
+|---|---|---|
+| `buildmod` | `i, kind, slot, dir?, seq?` | range 6, `z=0`, dir is 0 or 1 |
+
+Placement is refused — with nothing charged — when the kind is unknown, the slot
+does not fit the kind, the tile is water, a landmark, a medic hut or already
+carries a legacy structure, the `tile:slot` is taken, the player is out of reach
+or indoors, or the materials are not in the bag.
+
+Modules are taken back down with the ordinary `atk` swing: an attack that finds
+no creature and no legacy structure in range hits the nearest module within 2.4
+tiles and refunds half its materials, mirroring structure demolition.
+
+### 12.2 Server → client
+
+```jsonc
+{ "t": "mod",     "i": 1234, "slot": "wallNE", "kind": "mod_wall_stone", "hp": 40, "dir": 0 }
+{ "t": "modhp",   "i": 1234, "slot": "wallNE", "hp": 22 }   // damaged, still standing
+{ "t": "modd",    "i": 1234, "slot": "wallNE" }             // destroyed or demolished
+{ "t": "modfail", "seq": 17, "why": "slot-occupied" }       // unicast to the sender only
+```
+
+`modfail` echoes the request's `seq` so the client clears that exact preview
+instead of guessing. `why` is one of `unknown-module`, `bad-slot`, `bad-tile`,
+`outdoors-only`, `too-far`, `water`, `blocked`, `tile-occupied`,
+`slot-occupied`, `cost`. It is advisory text for the UI — the authoritative fact
+is simply that no `mod` broadcast followed.
+
+Existing modules arrive with their chunk (§8.3 `mods`), never in `init`.
+
+### 12.3 Persistence
+
+The snapshot carries `modules` as an object keyed `"tile:slot"` with
+`{kind, hp, dir, owner}`. A load skips any entry whose key is malformed, whose
+tile is out of bounds, or whose kind or slot no longer exists in the defs, so
+rolling `shared/defs.json` back can never crash the server.

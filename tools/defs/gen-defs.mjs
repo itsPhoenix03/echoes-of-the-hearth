@@ -54,6 +54,14 @@ export const CROPS = D.CROPS;
 // never placed directly. Recipes carry material:true; this is the display order.
 export const MATERIALS = D.MATERIALS;
 
+// Modular building: kind -> { slot, cost (materials), hp, blocks? }. Modules are
+// NOT inventory items - the buildmod message spends their material cost from the
+// bag, so one tile can carry a floor, two wall edges, a roof, a fixture and a
+// decor piece without five placeable slots cluttering the inventory.
+export const MODULES = D.MODULES;
+// the concrete tile slots; a 'wall' module picks wallNE or wallNW via dir.
+export const MODULE_SLOTS = D.MODULE_SLOTS;
+
 export const emptyInv = () => Object.fromEntries(D.INV_KEYS.map((k) => [k, 0]));
 
 // island id -> weighted resource pool a medic on that island may request in a bargain.

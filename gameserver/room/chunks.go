@@ -160,6 +160,20 @@ func (r *Room) chunkMessage(cx, cy int) map[string]any {
 		}
 		m["structs"] = structs
 	}
+	// mods are [localIdx, slot, kind, hp, dir] — several per tile, so they are
+	// walked through the ordered mirror rather than a tile-keyed map.
+	var mods []any
+	for _, k := range r.modOrder {
+		mod := r.modules[k]
+		local, ok := inChunk(mod.I)
+		if !ok {
+			continue
+		}
+		mods = append(mods, []any{local, mod.Slot, mod.Kind, mod.HP, mod.Dir})
+	}
+	if len(mods) > 0 {
+		m["mods"] = mods
+	}
 	if v := sortedInChunk(r.furn, inChunk); len(v) > 0 {
 		furn := make([]any, 0, len(v))
 		for _, e := range v {

@@ -454,7 +454,25 @@ const D = {
     "glass_pane": "Glass Pane",
     "iron_beam": "Iron Beam",
     "crystal_lattice": "Crystal Lattice",
-    "starmetal_plate": "Starmetal Plate"
+    "starmetal_plate": "Starmetal Plate",
+    "mod_floor_wood": "Wooden Floor",
+    "mod_floor_stone": "Stone Floor",
+    "mod_floor_thatch": "Thatch Floor",
+    "mod_wall_wood": "Wooden Wall",
+    "mod_wall_stone": "Stone Wall",
+    "mod_wall_crystal": "Crystal Wall",
+    "mod_window": "Window",
+    "mod_door": "Door",
+    "mod_railing": "Railing",
+    "mod_roof_thatch": "Thatch Roof",
+    "mod_roof_shingle": "Shingle Roof",
+    "mod_roof_metal": "Metal Roof",
+    "mod_pillar_wood": "Wooden Pillar",
+    "mod_pillar_stone": "Stone Pillar",
+    "mod_arch": "Stone Arch",
+    "mod_stairs": "Stairs",
+    "mod_lantern_hook": "Lantern Hook",
+    "mod_banner_blank": "Blank Banner"
   },
   "FURNITURE": [
     "chest",
@@ -687,6 +705,153 @@ const D = {
     "iron_beam",
     "crystal_lattice",
     "starmetal_plate"
+  ],
+  "MODULES": {
+    "mod_floor_wood": {
+      "slot": "floor",
+      "cost": {
+        "wood_planks": 2
+      },
+      "hp": 15
+    },
+    "mod_floor_stone": {
+      "slot": "floor",
+      "cost": {
+        "stone_blocks": 2
+      },
+      "hp": 25
+    },
+    "mod_floor_thatch": {
+      "slot": "floor",
+      "cost": {
+        "reed_thatch": 2
+      },
+      "hp": 10
+    },
+    "mod_wall_wood": {
+      "slot": "wall",
+      "cost": {
+        "wood_planks": 3
+      },
+      "hp": 25,
+      "blocks": true
+    },
+    "mod_wall_stone": {
+      "slot": "wall",
+      "cost": {
+        "stone_blocks": 3
+      },
+      "hp": 40,
+      "blocks": true
+    },
+    "mod_wall_crystal": {
+      "slot": "wall",
+      "cost": {
+        "crystal_lattice": 2,
+        "glass_pane": 1
+      },
+      "hp": 50,
+      "blocks": true
+    },
+    "mod_window": {
+      "slot": "wall",
+      "cost": {
+        "wood_planks": 1,
+        "glass_pane": 1
+      },
+      "hp": 20,
+      "blocks": true
+    },
+    "mod_door": {
+      "slot": "wall",
+      "cost": {
+        "wood_planks": 2,
+        "rope_coil": 1
+      },
+      "hp": 20
+    },
+    "mod_railing": {
+      "slot": "wall",
+      "cost": {
+        "wood_planks": 1,
+        "rope_coil": 1
+      },
+      "hp": 10,
+      "blocks": true
+    },
+    "mod_roof_thatch": {
+      "slot": "roof",
+      "cost": {
+        "reed_thatch": 3
+      },
+      "hp": 15
+    },
+    "mod_roof_shingle": {
+      "slot": "roof",
+      "cost": {
+        "wood_planks": 3
+      },
+      "hp": 25
+    },
+    "mod_roof_metal": {
+      "slot": "roof",
+      "cost": {
+        "iron_beam": 2,
+        "starmetal_plate": 1
+      },
+      "hp": 45
+    },
+    "mod_pillar_wood": {
+      "slot": "fixture",
+      "cost": {
+        "wood_planks": 2
+      },
+      "hp": 20
+    },
+    "mod_pillar_stone": {
+      "slot": "fixture",
+      "cost": {
+        "stone_blocks": 2
+      },
+      "hp": 35
+    },
+    "mod_arch": {
+      "slot": "fixture",
+      "cost": {
+        "stone_blocks": 3
+      },
+      "hp": 35
+    },
+    "mod_stairs": {
+      "slot": "fixture",
+      "cost": {
+        "wood_planks": 3
+      },
+      "hp": 20
+    },
+    "mod_lantern_hook": {
+      "slot": "fixture",
+      "cost": {
+        "iron_beam": 1,
+        "rope_coil": 1
+      },
+      "hp": 10
+    },
+    "mod_banner_blank": {
+      "slot": "decor",
+      "cost": {
+        "cloth_roll": 1
+      },
+      "hp": 5
+    }
+  },
+  "MODULE_SLOTS": [
+    "floor",
+    "wallNE",
+    "wallNW",
+    "roof",
+    "fixture",
+    "decor"
   ]
 };
 
@@ -715,6 +880,14 @@ export const CROPS = D.CROPS;
 // crafted intermediates (planks, blocks, panes...) — spent on building modules,
 // never placed directly. Recipes carry material:true; this is the display order.
 export const MATERIALS = D.MATERIALS;
+
+// Modular building: kind -> { slot, cost (materials), hp, blocks? }. Modules are
+// NOT inventory items - the buildmod message spends their material cost from the
+// bag, so one tile can carry a floor, two wall edges, a roof, a fixture and a
+// decor piece without five placeable slots cluttering the inventory.
+export const MODULES = D.MODULES;
+// the concrete tile slots; a 'wall' module picks wallNE or wallNW via dir.
+export const MODULE_SLOTS = D.MODULE_SLOTS;
 
 export const emptyInv = () => Object.fromEntries(D.INV_KEYS.map((k) => [k, 0]));
 
