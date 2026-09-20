@@ -3,9 +3,9 @@
 // that's the Go game server's job. Built-ins only, no Express.
 
 import http from 'node:http';
-import crypto from 'node:crypto';
 import { getProfile, putProfile, getWorlds, resolveWorld, getDefaultWorld, isDevGranted, isDevAllGranted } from './store.js';
 import { issueTicket, getPublicKeyRawB64 } from './ticket.js';
+import { deriveUserId } from './identity.js';
 
 const PORT = Number(process.env.CONTROL_PORT) || 8090;
 
@@ -14,10 +14,6 @@ const PORT = Number(process.env.CONTROL_PORT) || 8090;
 function sanitizeName(raw) {
   const cleaned = String(raw || '').replace(/[\x00-\x1f\x7f]/g, '').trim().slice(0, 18);
   return cleaned.length >= 2 ? cleaned : null;
-}
-
-function genUserId() {
-  return 'u_' + crypto.randomBytes(12).toString('hex');
 }
 
 function readJsonBody(req) {
@@ -56,7 +52,10 @@ function handleJoin(req, res) {
     const sanitized = sanitizeName(body.name);
     let profile = getProfile(tok);
     if (!profile) {
-      profile = { userId: genUserId(), tok, name: sanitized || 'Keeper', dev: false, createdAt: now, lastSeen: now };
+      // userId is DERIVED from tok, never minted — see control/identity.js. It is
+      // the key the game server files this player's save under, so a returning
+      // player must get the same one after a control-plane restart.
+      profile = { userId: deriveUserId(tok), tok, name: sanitized || 'Keeper', dev: false, createdAt: now, lastSeen: now };
     } else {
       profile.lastSeen = now;
       // A real (non-fallback) name is an explicit rename; a fallback never clobbers a saved name.
