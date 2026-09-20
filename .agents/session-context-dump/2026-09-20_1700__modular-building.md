@@ -115,3 +115,44 @@ wildlife. Raised to 30 swings; the failure message now reports how many landed o
   beyond the two wall edges, interior (`z=2`) modules, and the smaller farming leftovers from
   `docs/PLAYER_BUILDING_CUSTOMIZATION_GUIDE.md` (crop weather coupling, `frostroot`, the crop
   picker, per-stage crop art).
+
+---
+
+## Follow-up pass, same day — the rework the video forced
+
+The owner recorded a session (`Recording 2026-09-20 174622.mp4`, read here by extracting frames
+with a scratchpad-local ffmpeg) and reported three things: rotation was broken, the player got
+stuck between pieces, and the materials "don't build anything meaningful".
+
+**All three had one root cause plus one gap.** The art in `assets/sprites/building_materials/`
+draws walls as **tile-filling blocks** — a diamond top, two side faces, a ground shadow — not as
+edge panels. The edge model (`wallNE`/`wallNW`) therefore rendered a block at an edge midpoint,
+which reads as a post floating between tiles, and gave `R` nothing meaningful to flip. The same
+model let a player fence in all four edges of their own tile and be trapped.
+
+Fixed by making a wall own its tile, exactly like the legacy palisade: one `wall` slot, tile
+collision in the pos validator / creature steering / client `blockedAt`, `R` dropped for
+modules, a blocking wall refused on a tile a player occupies (`occupied`), and old saves folded
+through `legacySlot()`. A room is now a ring of wall tiles around floor tiles — which is what
+the sprites look like.
+
+**The gap was purpose.** Modules were structurally correct and gameplay-inert. A roof over a
+player's tile is now shelter: the survival tick skips the sandstorm, blizzard, desert-heat and
+glacial-cold branches for a roofed player — the z=2 interior's protection without leaving the
+surface. Hunger and thirst are deliberately excluded (a roof is not a larder; the first cut of
+this accidentally short-circuited starvation and was caught before commit). Support was
+re-shaped to match: a roof leans on a pillar on its own tile or a wall on a neighbour, so its own
+tile stays walkable and a sheltered tile is always part of a real hut. Lantern hooks light at
+night.
+
+Covered by `TestRoofShelters`, `TestRoofFallsWithItsWall`, `TestNoWallUnderAPlayer`,
+`TestWallBlocksItsTile`, `TestAtkDemolishesAModule`, and a rebuilt MOD stage in `test-go.mjs`
+that builds a hut, walks into the wall, verifies no desert-heat damage under the roof, and
+demolishes it.
+
+### Two more suite flakes found and fixed
+Both the same shape as the first: an assertion that assumes calm weather while the weather tick
+is free to roll a storm. The "exposed sand with no weather" window now forces `wx clear` first,
+and the demolition loop no longer counts swings that landed on wildlife — standing still on open
+sand for ten seconds gathers every lizard in the dunes, and a swing takes the nearest animal
+before any building piece.

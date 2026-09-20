@@ -155,9 +155,13 @@ carry a floor, two wall edges, a roof, a fixture and a decor piece at once. 19 m
 (every `mod_*` asset) paid for out of a new **materials tier** — 10 crafted intermediates
 (`wood_planks`, `stone_blocks`, `glass_pane`, …) that are ordinary recipes; modules themselves
 are never inventory items. `buildmod` in, `mod`/`modhp`/`modd`/`modfail` out, modules streamed
-with their chunk. Walls block **the tile edge, not the tile**, in both the pos validator and
-creature steering; doors do not. Support is one rule (roof→wall/fixture, fixture→floor,
-decor→either) and removal cascades with half refunds. Bridge segments are the one piece allowed
+with their chunk. **Walls fill their tile** (the art is a block, not an edge panel) in the pos
+validator, creature steering and the client's `blockedAt`; doors do not, and a blocking wall
+cannot be placed on a tile a player stands on. Support is one rule (roof→pillar here or wall
+next door, fixture→floor, decor→either) and removal cascades with half refunds.
+**A roof is shelter** — the survival tick skips sandstorm, blizzard, desert heat and glacial
+cold for a roofed player (hunger and thirst deliberately still apply), which is what makes the
+materials tier worth spending. Lantern hooks light at night. Bridge segments are the one piece allowed
 over water and must stay moored to land; cutting a span drops the rest and stops counting as
 swimming. Wire spec §12; `gameserver/room/modules.go`, `modules_test.go`, MOD stage of
 `test-go.mjs`.
@@ -224,8 +228,9 @@ you must reconnect after enabling it.**
 ## 7. Next feature work
 
 1. ~~**Modular building system**~~ **SHIPPED** (§4). What the guide still lists as open and
-   this pass did not do: no module rotation beyond the two wall edges, modules are surface-only
-   (`z=0`), and demolition is still ownerless — anyone may knock anything down (see §5.9).
+   this pass did not do: no rotation at all (the block art has no meaningful facing; railings and
+   banners would need edge-drawn art), modules are surface-only (`z=0`), and demolition is still
+   ownerless — anyone may knock anything down (see §5.9).
    Smaller leftovers from `docs/PLAYER_BUILDING_CUSTOMIZATION_GUIDE.md`: crop weather coupling,
    the `frostroot` crop and per-crop tile gating, a crop picker (the client hard-codes
    "wheat if fiber≥2 else glowcap"), and per-stage crop art.
