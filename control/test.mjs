@@ -2,7 +2,9 @@
 // (plain asserts, console.log per stage, fail() + exit 1). Runs standalone: it
 // spawns control/index.js itself on a non-default port and tears it down after.
 import { spawn } from 'node:child_process';
+import os from 'node:os';
 import { verifyTicket } from './ticket.js';
+import { isLoopbackAddress } from './store.js';
 
 const PORT = 8099;
 const BASE = `http://localhost:${PORT}`;
@@ -10,6 +12,19 @@ const BASE = `http://localhost:${PORT}`;
 const PORT2 = 8098;
 const BASE2 = `http://localhost:${PORT2}`;
 const DEV_TOK = 'dev-allowlisted-tok';
+// Third instance: HEARTH_DEV_ALL=1 with an EMPTY allowlist, so anything it
+// grants came from the loopback bypass and nothing else.
+const PORT3 = 8097;
+const BASE3 = `http://localhost:${PORT3}`;
+// The machine's own LAN address, if it has one: connecting to it hits the same
+// 0.0.0.0 listener but arrives with a non-loopback remoteAddress, which is a
+// genuine remote-client test rather than a simulated one.
+const lanIp = (() => {
+  for (const list of Object.values(os.networkInterfaces())) {
+    for (const ni of list || []) if (ni.family === 'IPv4' && !ni.internal) return ni.address;
+  }
+  return null;
+})();
 const WORLDS_CFG = [
   { worldId: 'default', seed: 'hearth-1', instanceId: 'local', ws: 'ws://localhost:8082', name: 'The Hearth' },
   { worldId: 'frontier', seed: 'seed-frontier', instanceId: 'inst-2', ws: 'ws://localhost:8083' },
@@ -72,11 +87,13 @@ spawnControl(PORT2, {
   HEARTH_WORLDS: JSON.stringify(WORLDS_CFG),
   HEARTH_DEV_TOKS: `${DEV_TOK},someone-else`,
 });
+spawnControl(PORT3, { HEARTH_WORLDS: '', HEARTH_DEV_TOKS: '', HEARTH_DEV_USERS: '', HEARTH_DEV_ALL: '1' });
 
 try {
   await waitForHealth();
   await waitForHealth(BASE2);
-  console.log('servers up on', PORT, 'and', PORT2);
+  await waitForHealth(BASE3);
+  console.log('servers up on', PORT, PORT2, 'and', PORT3);
 
   // --- health ---
   const health = await (await fetch(`${BASE}/api/health`)).json();
@@ -191,6 +208,64 @@ try {
   const jDevFalse = await join('Tester', DEV_TOK, { dev: false }, BASE2);
   if (payloadOf(jDevFalse.body.ticket).dev !== true) fail('dev: client body overrode the stored permission');
   console.log('dev OK: body.dev is ignored in both directions');
+
+  // --- HEARTH_DEV_ALL: a loopback join gets a signed dev:true, allowlist empty ---
+  const pk3 = await (await fetch(`${BASE3}/api/pubkey`)).json();
+  const jAll = await join('LocalDev', 'test-' + Math.random().toString(36).slice(2), {}, BASE3);
+  const pAll = payloadOf(jAll.body.ticket);
+  if (pAll.dev !== true) fail('devall: loopback join did not get dev:true, got ' + JSON.stringify(pAll));
+  const vAll = verifyTicket(jAll.body.ticket, pk3.publicKey);
+  if (!vAll.ok || vAll.payload.dev !== true) fail('devall: ticket failed verification: ' + JSON.stringify(vAll));
+  console.log('devall OK: loopback join gets a signed dev:true');
+
+  // --- flag unset: the same loopback join gets no dev key at all ---
+  const jOff = await join('LocalDev', 'test-' + Math.random().toString(36).slice(2), {}, BASE);
+  if ('dev' in payloadOf(jOff.body.ticket)) fail('devall: dev key present with the flag unset');
+  console.log('devall OK: no dev key from loopback with the flag unset');
+
+  // --- body.dev is still ignored in BOTH modes (the case that matters most) ---
+  const jLiarOff = await join('Liar', 'test-' + Math.random().toString(36).slice(2), { dev: true }, BASE);
+  if ('dev' in payloadOf(jLiarOff.body.ticket)) fail('devall: client-supplied dev:true honored with the flag unset!');
+  const liarTok = 'test-' + Math.random().toString(36).slice(2);
+  const jLiarOn = await join('Liar', liarTok, { dev: true }, BASE3);
+  // With the flag on, loopback grants dev anyway — so prove the body played no
+  // part by asking the flagged server for the same thing WITHOUT the body field
+  // and, above all, by checking the body cannot grant dev where address does not.
+  if (payloadOf(jLiarOn.body.ticket).dev !== true) fail('devall: loopback grant broke when a dev field was present');
+  console.log('devall OK: body.dev ignored in both modes');
+
+  // --- the allowlist keeps working with the flag unset, from the other instance ---
+  const jAllow = await join('Tester', DEV_TOK, {}, BASE2);
+  if (payloadOf(jAllow.body.ticket).dev !== true) fail('devall: allowlist stopped granting dev with the flag unset');
+  console.log('devall OK: HEARTH_DEV_TOKS allowlist unaffected by the flag');
+
+  // --- non-loopback: the predicate, exhaustively ---
+  for (const good of ['127.0.0.1', '::1', '::ffff:127.0.0.1', '::FFFF:127.0.0.1'])
+    if (!isLoopbackAddress(good)) fail('loopback: rejected a real loopback form: ' + good);
+  for (const bad of ['192.168.1.50', '10.0.0.5', '::ffff:10.0.0.5', '127.0.0.1.evil.com', '127.0.0.1x',
+    ' 127.0.0.1', '0.0.0.0', '', undefined, null, 127])
+    if (isLoopbackAddress(bad)) fail('loopback: accepted a non-loopback address: ' + String(bad));
+  console.log('devall OK: address predicate accepts only the three loopback forms');
+
+  // --- non-loopback: a real request over the LAN address, where one exists ---
+  if (lanIp) {
+    // dev:true in the body as well: under HEARTH_DEV_ALL the address is the only
+    // thing that decides, and this client's address is not loopback.
+    const rLan = await post(`http://${lanIp}:${PORT3}`, '/api/join', { name: 'LanPlayer', dev: true, tok: 'test-lan-' + Math.random().toString(36).slice(2) });
+    if (rLan.status !== 200) fail('devall: LAN join failed with ' + rLan.status);
+    if ('dev' in payloadOf(rLan.body.ticket)) fail('devall: a non-loopback client got the dev claim (body.dev honored under HEARTH_DEV_ALL)!');
+    // ...and a spoofed forwarding header must not change that: headers are client-written.
+    const rSpoof = await fetch(`http://${lanIp}:${PORT3}/api/join`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-forwarded-for': '127.0.0.1', 'x-real-ip': '::1' },
+      body: JSON.stringify({ name: 'Spoofer', tok: 'test-spoof-' + Math.random().toString(36).slice(2) }),
+    });
+    const bSpoof = await rSpoof.json();
+    if ('dev' in payloadOf(bSpoof.ticket)) fail('devall: a spoofed X-Forwarded-For granted dev!');
+    console.log(`devall OK: non-loopback client at ${lanIp} gets no dev claim, spoofed X-Forwarded-For ignored`);
+  } else {
+    console.log('devall SKIP: no non-loopback interface on this host; predicate covered by the unit case above');
+  }
 
   // --- multi-world: /api/worlds shape ---
   const wl = await (await fetch(`${BASE2}/api/worlds`)).json();

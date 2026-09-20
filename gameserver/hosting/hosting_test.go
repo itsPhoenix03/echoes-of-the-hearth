@@ -504,3 +504,101 @@ func keys(m map[string]json.RawMessage) []string {
 	}
 	return out
 }
+
+// --- the per-world player cap ---------------------------------------------
+
+// The cap is per-world registry config with a default of 4 (room.DefaultMaxPlayers,
+// the PLAN.md co-op target). Unspecified, zero and nonsense all mean the default.
+func TestMaxPlayersDefaultsToFour(t *testing.T) {
+	isolateEnv(t)
+	cfg, err := LoadConfig(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Worlds[0].MaxPlayers; got != room.DefaultMaxPlayers {
+		t.Fatalf("default maxPlayers = %d, want %d", got, room.DefaultMaxPlayers)
+	}
+}
+
+// A registry entry may raise or lower it per world; the entry travels in the
+// same worlds.json / HEARTH_WORLDS shape control/store.js reads, so one file
+// still configures both processes (control simply ignores the field).
+func TestMaxPlayersFromTheWorldRegistry(t *testing.T) {
+	isolateEnv(t)
+	t.Setenv("HEARTH_WORLDS", `[
+		{"worldId":"small","seed":"s","instanceId":"local","maxPlayers":2},
+		{"worldId":"big","seed":"s","instanceId":"local","maxPlayers":16},
+		{"worldId":"plain","seed":"s","instanceId":"local"},
+		{"worldId":"bogus","seed":"s","instanceId":"local","maxPlayers":-3}
+	]`)
+	cfg, err := LoadConfig(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]int{"small": 2, "big": 16, "plain": room.DefaultMaxPlayers, "bogus": room.DefaultMaxPlayers}
+	for id, n := range want {
+		w, ok := cfg.World(id)
+		if !ok {
+			t.Fatalf("world %q missing from the config", id)
+		}
+		if w.MaxPlayers != n {
+			t.Fatalf("world %q maxPlayers = %d, want %d", id, w.MaxPlayers, n)
+		}
+	}
+}
+
+// The single-world fallback has an env knob of its own, since it has no
+// registry file to carry the field.
+func TestMaxPlayersFromEnvInTheSingleWorldFallback(t *testing.T) {
+	isolateEnv(t)
+	t.Setenv("HEARTH_WORLD_MAX_PLAYERS", "6")
+	cfg, err := LoadConfig(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Worlds[0].MaxPlayers; got != 6 {
+		t.Fatalf("maxPlayers = %d, want 6", got)
+	}
+	// Garbage is a typo worth logging, not a reason to refuse to boot.
+	t.Setenv("HEARTH_WORLD_MAX_PLAYERS", "lots")
+	cfg, err = LoadConfig(func(string, ...any) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Worlds[0].MaxPlayers; got != room.DefaultMaxPlayers {
+		t.Fatalf("maxPlayers = %d for a malformed value, want the default %d", got, room.DefaultMaxPlayers)
+	}
+}
+
+// The configured cap must actually reach the room the manager builds, and every
+// room must share ONE identity registry — that is what makes the duplicate-tab
+// takeover work across the worlds a process hosts.
+func TestManagerWiresTheCapAndSharesOneIdentityRegistry(t *testing.T) {
+	cfg := twoWorlds()
+	for i := range cfg.Worlds {
+		cfg.Worlds[i].MaxPlayers = 3
+	}
+	m := NewManager(Options{Config: cfg, Logger: quietLogger(t), SaveEvery: time.Hour})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer func() { cancel(); m.Wait() }()
+	if err := m.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	seen := map[*room.Room]bool{}
+	for _, w := range cfg.Worlds {
+		r, err := m.Resolve(ctx, cfg.InstanceID, w.WorldID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.MaxPlayers() != 3 {
+			t.Fatalf("world %q room cap = %d, want the configured 3", w.WorldID, r.MaxPlayers())
+		}
+		seen[r] = true
+	}
+	if len(seen) != len(cfg.Worlds) {
+		t.Fatalf("expected one room per world, got %d", len(seen))
+	}
+	if m.Identities() == nil {
+		t.Fatal("the manager has no identity registry to share")
+	}
+}

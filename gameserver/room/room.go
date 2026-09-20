@@ -77,11 +77,46 @@ type Config struct {
 	// routes on and the key its save file is named for; empty means the
 	// single-world default.
 	WorldID string
+	// MaxPlayers caps concurrent players in this room. Zero means
+	// DefaultMaxPlayers. The cap is enforced by the room and nowhere else —
+	// only the room knows who is actually connected — and a refused client is
+	// told `authfail: room-full` before any world data is sent.
+	MaxPlayers int
+	// Registry is the process-wide "one live session per identity" bookkeeping
+	// (registry.go). Nil means this room gets a private one, so takeover still
+	// works for a single-room process and in tests; hosting.Manager hands every
+	// room it builds the same registry, which is what makes takeover work
+	// across the worlds one process hosts.
+	Registry *Registry
 	// World, when non-nil, is used instead of generating one. Generation takes
 	// a couple of seconds, so tests (and any future multi-room process sharing
 	// one seed) can hand in a pre-generated, read-only world.
 	World *world.World
 }
+
+// DefaultMaxPlayers is the co-op design target from PLAN.md: four players to a
+// world unless a world's registry entry says otherwise.
+const DefaultMaxPlayers = 4
+
+// authfail reasons this package produces, alongside the routing refusals in
+// hosting (`wrong-instance`, `unknown-world`, `world-unavailable`). See
+// docs/10_GO_WIRE_PROTOCOL.md §11.
+const (
+	// ReasonRoomFull is sent when the room is at MaxPlayers. A player taking
+	// over their own live session never sees it — that is a seat being
+	// replaced, not a new one.
+	ReasonRoomFull = "room-full"
+	// ReasonReplaced is the `kick` reason an evicted session is given when the
+	// same identity joins again from somewhere else.
+	ReasonReplaced = "replaced"
+)
+
+// JoinRefused is the room declining a session. Its reason is an authfail reason
+// the net layer may relay to the client verbatim.
+type JoinRefused struct{ Reason string }
+
+func (e *JoinRefused) Error() string          { return "room: join refused: " + e.Reason }
+func (e *JoinRefused) AuthFailReason() string { return e.Reason }
 
 // Room is one world instance. Construct with New, then call Run in its own
 // goroutine.
@@ -158,9 +193,21 @@ type Room struct {
 	won   bool
 	tickN int64
 
+	// maxPlayers is the concurrent-player cap; registry is the process-wide
+	// identity bookkeeping. Both are read only on the room goroutine (the
+	// registry has its own lock and guards no game state).
+	maxPlayers int
+	registry   *Registry
+
 	inbox chan Inbound
 	join  chan *Session
 	leave chan *Session
+	// kicks are eviction requests from ANOTHER room's goroutine: the same
+	// identity has just joined a different world in this process, so this room
+	// must drop its copy. It is deliberately a buffered channel serviced by Run
+	// — the evicting room never touches this room's state, and never blocks on
+	// it, so two simultaneous cross-world takeovers cannot deadlock.
+	kicks chan kickReq
 
 	// nowFn is swappable so the movement tests can drive the clock.
 	nowFn func() int64
@@ -179,6 +226,12 @@ func New(cfg Config) (*Room, error) {
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = log.Default()
+	}
+	if cfg.MaxPlayers <= 0 {
+		cfg.MaxPlayers = DefaultMaxPlayers
+	}
+	if cfg.Registry == nil {
+		cfg.Registry = NewRegistry()
 	}
 	w := cfg.World
 	if w == nil {
@@ -230,9 +283,12 @@ func New(cfg Config) (*Room, error) {
 		profiles:      map[string]*persist.Profile{},
 		time:          0.3,
 		day:           1,
+		maxPlayers:    cfg.MaxPlayers,
+		registry:      cfg.Registry,
 		inbox:         make(chan Inbound, 1024),
 		join:          make(chan *Session),
 		leave:         make(chan *Session, 64),
+		kicks:         make(chan kickReq, 64),
 		nowFn:         func() int64 { return time.Now().UnixMilli() },
 	}
 	if err := r.loadSave(); err != nil {
@@ -247,18 +303,36 @@ func (r *Room) now() int64 { return r.nowFn() }
 // single-world default and in tests that do not set it.
 func (r *Room) WorldID() string { return r.cfg.WorldID }
 
+// MaxPlayers is this room's concurrent-player cap, as configured.
+func (r *Room) MaxPlayers() int { return r.maxPlayers }
+
 // Spawn is the authoritative spawn tile.
 func (r *Room) Spawn() [2]int { return r.spawn }
 
 // Inbox is where connection readers push decoded frames.
 func (r *Room) Inbox() chan<- Inbound { return r.inbox }
 
-// Join hands an authenticated session to the room. It blocks only until the
-// room goroutine picks it up, or until ctx is done.
+// Join hands an authenticated session to the room and waits for its verdict.
+//
+// Admission is a room decision, not a socket-layer one: only the room knows who
+// is actually connected, so the player cap and the one-session-per-identity
+// takeover are both resolved on the room goroutine (see onJoin). A refusal
+// comes back as *JoinRefused, whose reason the caller relays as `authfail`
+// before closing — no init frame and no chunk is sent to a refused client.
 func (r *Room) Join(ctx context.Context, s *Session) error {
 	select {
 	case r.join <- s:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	select {
+	case reason := <-s.admit:
+		if reason != "" {
+			return &JoinRefused{Reason: reason}
+		}
 		return nil
+	case <-s.Closed():
+		return context.Canceled
 	case <-ctx.Done():
 		return ctx.Err()
 	}
@@ -287,6 +361,7 @@ func (r *Room) Run(ctx context.Context) {
 		case <-ctx.Done():
 			for _, p := range r.players {
 				r.snapshotInto(p)
+				r.registry.Release(p.S.UserID, p.S)
 				p.S.Close()
 			}
 			if err := r.saveGame(); err != nil {
@@ -299,6 +374,13 @@ func (r *Room) Run(ctx context.Context) {
 
 		case s := <-r.leave:
 			r.onLeave(s)
+
+		case kr := <-r.kicks:
+			if p, ok := r.players[kr.s.ID]; ok {
+				r.kickPlayer(p, kr.reason)
+			} else {
+				kr.s.Close()
+			}
 
 		case in := <-r.inbox:
 			r.onMessage(in)
@@ -351,7 +433,113 @@ func (r *Room) dropSlow(p *Player) {
 
 // --- lifecycle ------------------------------------------------------------
 
+// kickReq is one cross-room eviction request; see Room.kicks.
+type kickReq struct {
+	s      *Session
+	reason string
+}
+
+// requestKick asks this room to evict a session. It is the ONLY method another
+// room's goroutine may call, and it touches no game state: it hands the room a
+// message and returns immediately.
+func (r *Room) requestKick(s *Session, reason string) {
+	select {
+	case r.kicks <- kickReq{s: s, reason: reason}:
+	default:
+		// The queue is deep; if it is somehow full the socket is closed
+		// directly and the room reaps the player when its reader exits. The
+		// client loses the honest reason, never its seat.
+		s.Close()
+	}
+}
+
+// kickPlayer evicts a live player, telling it why first. It is the same
+// teardown dropSlow uses — profile snapshotted, removed from players AND
+// playerOrder, `pl` broadcast — because a half-evicted session lingering in an
+// ordered mirror is exactly what those mirrors exist to prevent.
+func (r *Room) kickPlayer(p *Player, reason string) {
+	if _, ok := r.players[p.S.ID]; !ok {
+		return
+	}
+	// trySend, not send: send() routes a full queue into dropSlow, which would
+	// tear the same player down a second time.
+	p.S.trySend(marshal(map[string]any{"t": "kick", "reason": reason}))
+	r.cfg.Logger.Printf("[hearth] %s (%s) kicked: %s", p.S.ID, p.Name, reason)
+	p.S.Close()
+	r.removePlayer(p)
+}
+
+// refuse answers a join that will not happen. The session is never added to any
+// room structure and is told nothing about the world; the net layer turns the
+// reason into `authfail` and closes the socket.
+func (r *Room) refuse(s *Session, reason string) {
+	r.cfg.Logger.Printf("[hearth] refused %s (%s): %s", s.ID, s.Name, reason)
+	select {
+	case s.admit <- reason:
+	default:
+	}
+}
+
+// admit resolves the two join-path rules, in this order and no other:
+//
+//  1. TAKEOVER. One identity may have one live session. A ticket for a userId
+//     that already has one evicts the old session rather than being rejected —
+//     see the Registry doc comment for why takeover beats rejection.
+//  2. THE CAP. Only then is MaxPlayers consulted.
+//
+// The order is load-bearing. If a full room checked the cap first, a player who
+// crashed and reconnected would be refused from the room their own stale
+// session is still occupying — they are replacing a seat, not claiming a fifth.
+// Both steps are decided together under the registry lock so that a
+// simultaneous join elsewhere in the process cannot slip between them.
+func (r *Room) admit(s *Session) bool {
+	seatFree := func() bool { return len(r.players) < r.maxPlayers }
+	if s.UserID == "" {
+		// No identity to take over with (tests, and only tests): cap only.
+		if !seatFree() {
+			r.refuse(s, ReasonRoomFull)
+			return false
+		}
+		return true
+	}
+	prev, had, ok := r.registry.Claim(s.UserID, r, s, func(p Presence, h bool) bool {
+		if h && p.Room == r {
+			if _, live := r.players[p.S.ID]; live {
+				return true // replacing our own seat: the cap does not apply
+			}
+		}
+		return seatFree()
+	})
+	if !ok {
+		r.refuse(s, ReasonRoomFull)
+		return false
+	}
+	if had {
+		if prev.Room == r {
+			if p, live := r.players[prev.S.ID]; live {
+				r.kickPlayer(p, ReasonReplaced)
+			} else {
+				prev.S.Close()
+			}
+		} else {
+			// Another world in this process. Asynchronous on purpose: that
+			// room owns its own state and evicts on its own goroutine.
+			prev.Room.requestKick(prev.S, ReasonReplaced)
+		}
+	}
+	return true
+}
+
 func (r *Room) onJoin(s *Session) {
+	if !r.admit(s) {
+		return
+	}
+	// Admitted. Telling the connection now lets its writer goroutine start
+	// draining while the join burst is still being queued.
+	select {
+	case s.admit <- "":
+	default:
+	}
 	now := r.now()
 	p := newPlayer(s, r.spawn, now, r.defs)
 	if prof := r.profiles[s.UserID]; prof != nil {
@@ -390,6 +578,13 @@ func (r *Room) onJoin(s *Session) {
 		// into its own medicBlockTiles() helper — the hut tiles it must block
 		// are derivable from hutX/hutY and need no second representation.
 		"medics": r.medicsWire(),
+		// Whether this session may use `dev` / `devcmd` (dev.go). The client
+		// used to open its F10 tester panel unconditionally and discover the
+		// answer only from the refusal toast a button produced; with this it
+		// can show an honest state up front. It is a report of devAllowed for
+		// this session, never an input to it — the gate is still the signed
+		// ticket claim and nothing else.
+		"dev": r.devAllowed(p),
 	})
 	r.pushChunks(p)
 	r.broadcast(map[string]any{"t": "pj", "id": s.ID, "x": p.X, "y": p.Y, "name": p.Name})
@@ -406,6 +601,9 @@ func (r *Room) onLeave(s *Session) {
 
 func (r *Room) removePlayer(p *Player) {
 	r.snapshotInto(p)
+	// Give the identity back — but only if it is still ours. Release is a no-op
+	// when a takeover has already pointed the identity at the new session.
+	r.registry.Release(p.S.UserID, p.S)
 	delete(r.players, p.S.ID)
 	r.forgetMedic(p.S.ID)
 	for i, q := range r.playerOrder {

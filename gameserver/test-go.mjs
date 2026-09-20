@@ -11,15 +11,27 @@
 // every stage now runs for real: there are no `skip` lines left in this file,
 // and none may be added — a stage that cannot fail asserts nothing.
 //
-//   Terminal 1:  node control/index.js
+//   Terminal 1:  HEARTH_TICKET_PRIVKEY=<below> HEARTH_TICKET_PUBKEY=<below> node control/index.js
 //   Terminal 2:  cd gameserver && HEARTH_ALLOW_WARP=1 go run ./cmd/hearthd
 //   Terminal 3:  node gameserver/test-go.mjs
+//
+// The pinned keypair is required by the DEV stages: the dev tools are gated on a
+// per-account `dev` claim the control plane signs into the ticket, and the suite
+// has to exercise BOTH sides of that gate in one run. There is no way to ask a
+// live control plane for one ticket with the claim and one without in the same
+// configuration (HEARTH_DEV_ALL grants it to every loopback caller; the
+// HEARTH_DEV_TOKS allowlist grants it to none unless configured), so the suite
+// mints both tickets itself with the throwaway keypair below and depends on
+// control's dev policy not at all. See control/PROTOCOL.md §1 for the env vars
+// and §2 for the payload. The game server needs no extra configuration: it
+// fetches whatever key /api/pubkey publishes.
 //
 // Env: HEARTH_CONTROL_URL (default http://localhost:8090), HEARTH_WS (default
 // whatever /api/join returns), HEARTH_SEED (default hearth-1).
 
 import WebSocket from 'ws';
-import { genWorld, findMedicSpawns, medicBlockTiles, SIZE, MONOLITHS, CORE } from '../shared/world.js';
+import { createPrivateKey, sign as edSign } from 'node:crypto';
+import { genWorld, findMedicSpawns, medicBlockTiles, SIZE, T, MONOLITHS, CORE } from '../shared/world.js';
 import { NODE, MAX_HP, MEDICINE_HEAL } from '../shared/defs.js';
 
 const CONTROL = process.env.HEARTH_CONTROL_URL || 'http://localhost:8090';
@@ -40,13 +52,20 @@ async function client(name) {
   });
   if (!res.ok) fail(`control plane /api/join returned ${res.status} — is 'node control/index.js' running on ${CONTROL}?`);
   const { ticket, ws: wsURL } = await res.json();
+  return connect(process.env.HEARTH_WS || wsURL, ticket);
+}
 
-  const ws = new WebSocket(process.env.HEARTH_WS || wsURL);
-  const c = { ws, msgs: [], state: {}, chunks: 0 };
+// opts.allowAuthFail is for the ADMIT stage only: a refusal is the assertion
+// there, so it is recorded like any other frame instead of killing the run.
+// Everywhere else an authfail is still an immediate failure.
+async function connect(wsURL, ticket, opts = {}) {
+  const ws = new WebSocket(wsURL);
+  const c = { ws, msgs: [], state: {}, chunks: 0, closed: false };
+  ws.on('close', () => { c.closed = true; });
   ws.on('message', (d) => {
     const m = JSON.parse(d);
     if (m.t === 'chunk') { c.chunks++; return; }
-    if (m.t === 'authfail') fail('authfail: ' + m.reason);
+    if (m.t === 'authfail' && !opts.allowAuthFail) fail('authfail: ' + m.reason);
     c.msgs.push(m);
     if (m.t === 'init') c.state = m;
     if (m.t === 'inv') c.state.inv = m.inv;
@@ -66,6 +85,71 @@ async function client(name) {
   };
   return c;
 }
+
+// --- locally minted tickets (the DEV stages) --------------------------------
+//
+// A throwaway Ed25519 keypair, checked in on purpose: it signs nothing outside
+// this suite, and the control plane only trusts it while it is explicitly pinned
+// with HEARTH_TICKET_PRIVKEY / HEARTH_TICKET_PUBKEY (see the header). Minting
+// here is what lets one run cover both sides of the dev gate — a ticket WITH the
+// `dev` claim and one WITHOUT — regardless of how the control plane's own dev
+// policy (HEARTH_DEV_ALL / HEARTH_DEV_TOKS) happens to be configured.
+const TEST_PUBKEY = 'pXp61YDNvCKAWFbaUizKTGmXbQHJsqNxzi1ELp1YBwg=';
+const TEST_PRIVKEY = 'gqTfYZYjNTLRF/mMqIV8G1ncAvE0QKrccz1gF7j1Saw=';
+
+// Node's crypto wants PKCS8 DER; the raw 32 bytes are the Ed25519 seed. Same
+// wrapping as control/ticket.js rawPrivateKeyToKeyObject().
+const TEST_KEY = createPrivateKey({
+  key: Buffer.concat([Buffer.from('302e020100300506032b657004220420', 'hex'), Buffer.from(TEST_PRIVKEY, 'base64')]),
+  format: 'der', type: 'pkcs8',
+});
+const b64url = (buf) => Buffer.from(buf).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+let jtiN = 0;
+// PROTOCOL.md §2: the signature covers the ASCII bytes of the base64url payload
+// segment, and `dev` is emitted only ever as true — omitted entirely otherwise.
+function mintTicket({ userId, worldId, instanceId, name, dev }) {
+  const iat = Date.now();
+  const payload = { userId, worldId, instanceId, name, iat, exp: iat + 30_000, jti: `gotest-${++jtiN}` };
+  if (dev === true) payload.dev = true;
+  const seg = b64url(Buffer.from(JSON.stringify(payload), 'utf8'));
+  return `${seg}.${b64url(edSign(null, Buffer.from(seg, 'ascii'), TEST_KEY))}`;
+}
+
+let pinnedWorld = null;
+async function resolvePinnedWorld() {
+  if (pinnedWorld) return pinnedWorld;
+  const pk = await (await fetch(`${CONTROL}/api/pubkey`)).json();
+  if (pk.publicKey !== TEST_PUBKEY) {
+    fail(
+      "the control plane is not pinned to this suite's test keypair, so the DEV stages cannot mint a " +
+      'dev-claimed ticket. Restart it with: ' +
+      `HEARTH_TICKET_PRIVKEY=${TEST_PRIVKEY} HEARTH_TICKET_PUBKEY=${TEST_PUBKEY} node control/index.js` +
+      ' (and restart the game server afterwards so it re-fetches /api/pubkey)',
+    );
+  }
+  // instanceId is deliberately absent from /api/worlds (PROTOCOL.md §1), so the
+  // ops endpoint is the only place to read the pair the ticket has to bind.
+  const worlds = await (await fetch(`${CONTROL}/api/worlds`)).json();
+  const health = await (await fetch(`${CONTROL}/api/health`)).json();
+  pinnedWorld = health.worlds.find((w) => w.worldId === worlds.defaultWorldId) || health.worlds[0];
+  if (!pinnedWorld) fail('/api/health listed no worlds');
+  return pinnedWorld;
+}
+
+// A client whose ticket this suite signed, with or without the dev claim.
+// userId defaults to a fresh identity; the ADMIT stage pins it on purpose,
+// because two tickets for ONE userId are exactly the duplicate-tab bug.
+async function mintedClient(name, dev, opts = {}) {
+  const w = await resolvePinnedWorld();
+  const ticket = mintTicket({
+    userId: opts.userId || 'u_gotest' + Math.random().toString(36).slice(2, 10),
+    worldId: w.worldId, instanceId: w.instanceId, name, dev,
+  });
+  return connect(process.env.HEARTH_WS || w.ws, ticket, opts);
+}
+
+const lastOf = (c, t) => [...c.msgs].reverse().find((m) => m.t === t);
 
 // The suite predates server-side movement validation and teleports the player
 // freely. 'warp' is the server's test-only unvalidated placement, gated behind
@@ -699,24 +783,79 @@ if (A.msgs.some((m) => m.t === 'build')) fail('MONO: the World Engine was built 
 if (A.msgs.some((m) => m.t === 'wave')) fail('MONO: a refused Engine build still armed the final assault');
 console.log('MONO engine build correctly refused with the monoliths unlit');
 
-// --- Stage DEV: the dev/devcmd gate ---
-// The gate is the ticket's signed `dev` claim and nothing else (docs/10 §10.6); these tickets
-// carry no claim, so both must be refused with the legacy off-message and must mutate
-// nothing. If this ever starts passing the gate, the tester panel is reachable in production.
-A.msgs = A.msgs.filter((m) => m.t !== 'msg');
-const devInvBefore = A.state.inv?.starmetal || 0;
-A.send({ t: 'dev' }); await sleep(400);
-if (!A.msgs.some((m) => m.t === 'msg' && /Dev mode/.test(m.s)))
-  fail('DEV: `dev` was neither granted nor refused — no Dev mode message');
-await sleep(200);
-if ((A.state.inv?.starmetal || 0) !== devInvBefore)
+// --- Stage DEV: the dev/devcmd gate, refused ---
+// The gate is the ticket's signed `dev` claim and nothing else (docs/10 SS10.6). ND's ticket is
+// minted here WITHOUT the claim, so this stage is independent of how the live control plane
+// happens to be configured: it is refused even under HEARTH_DEV_ALL=1. If this ever starts
+// passing the gate, the tester panel is reachable in production.
+const ND = await mintedClient('NoDev', false);
+const initND = await ND.wait('init', 8000);
+if (initND.dev !== false)
+  fail(`DEV: init.dev = ${JSON.stringify(initND.dev)} for a ticket with no claim, want false`);
+console.log('DEV init.dev = false for an unprivileged session OK');
+
+// The F9 kit.
+ND.msgs = ND.msgs.filter((m) => m.t !== 'msg' && m.t !== 'inv' && m.t !== 'stat');
+ND.send({ t: 'dev' }); await sleep(500);
+const ndKitMsg = ND.msgs.find((m) => m.t === 'msg');
+if (!ndKitMsg) fail('DEV: `dev` was neither granted nor refused \u2014 no message at all');
+// `inv` only: the survival tick sends every player a periodic `stat`, so its presence says
+// nothing. The kit is the only thing that would send this session an `inv`.
+if (ND.msgs.some((m) => m.t === 'inv'))
   fail('DEV: the dev kit was granted to a ticket with no dev claim!');
-A.msgs = A.msgs.filter((m) => m.t !== 'msg' && m.t !== 'mono');
-A.send({ t: 'devcmd', cmd: 'mono', i: 0 }); await sleep(400);
-if (A.msgs.some((m) => m.t === 'mono')) fail('DEV: devcmd mono ran with no dev claim!');
-if (!A.msgs.some((m) => m.t === 'msg' && /Dev mode/.test(m.s)))
-  fail('DEV: devcmd was not refused with a message');
-console.log('DEV gate OK: dev and devcmd both refused, nothing mutated');
+// The legacy refusal text pointed at `npm run server:dev`, which starts the LEGACY Node server
+// on :8081 and sets an env var this server deliberately never reads. Following it changes
+// nothing, which is exactly how a working dev path came to look unported.
+if (/server:dev/.test(ndKitMsg.s))
+  fail('DEV: the refusal still points at the legacy server: ' + ndKitMsg.s);
+if (!/start:dev/.test(ndKitMsg.s))
+  fail('DEV: the refusal names no way to actually obtain dev: ' + ndKitMsg.s);
+console.log('DEV kit refused OK, with accurate advice:', ndKitMsg.s);
+
+// Every devcmd, each with the frames and the toast it must NOT have produced. `hp` is
+// deliberately not in any forbidden list: the survival tick and the creature AI send hp frames
+// to every player on their own schedule, so its presence proves nothing either way. The
+// success toast each command emits is the reliable tell, and the Go unit test
+// room.TestDevRefusedWithoutClaimMutatesNothing asserts the room state field by field.
+const DEV_SUCCESS_TOASTS = /God mode|Spawned |Cleared \d+ monsters|Killed|Time set to|DEV KIT/;
+const REFUSE_CASES = [
+  ['tp', { cmd: 'tp', x: MONOLITHS[1][0], y: MONOLITHS[1][1] }, ['pos']],
+  ['mono', { cmd: 'mono', i: 0 }, ['mono']],
+  ['god', { cmd: 'god' }, []],
+  ['wx', { cmd: 'wx', kind: 'sandstorm' }, ['wx']],
+  ['time', { cmd: 'time', v: 0.8 }, []],
+  ['spawn', { cmd: 'spawn', type: 'brute' }, []],
+  ['clearcre', { cmd: 'clearcre' }, []],
+  ['kill', { cmd: 'kill' }, ['pos']],
+];
+for (const [name, frame, forbidden] of REFUSE_CASES) {
+  const chunksBefore = ND.chunks;
+  const clockBefore = lastOf(ND, 'cre')?.time;
+  ND.msgs = ND.msgs.filter((m) => !['msg', 'mono', 'wx', 'pos', 'inv'].includes(m.t));
+  ND.send({ t: 'devcmd', ...frame }); await sleep(450);
+  const refusal = ND.msgs.find((m) => m.t === 'msg' && /Dev tools off/.test(m.s));
+  if (!refusal) fail(`DEV: devcmd ${name} was not refused: ${JSON.stringify(ND.msgs.filter((m) => m.t === 'msg'))}`);
+  if (/server:dev/.test(refusal.s)) fail(`DEV: devcmd ${name} refusal points at the legacy server`);
+  const leaked = ND.msgs.find((m) => m.t === 'msg' && DEV_SUCCESS_TOASTS.test(m.s));
+  if (leaked) fail(`DEV: devcmd ${name} ran with no dev claim — it reported "${leaked.s}"`);
+  for (const t of forbidden) {
+    if (ND.msgs.some((m) => m.t === t && (m.id === undefined || m.id === initND.id)))
+      fail(`DEV: devcmd ${name} ran with no dev claim — it emitted a '${t}' frame!`);
+  }
+  if (ND.chunks !== chunksBefore) fail(`DEV: devcmd ${name} pushed chunks to an unprivileged session`);
+  if (name === 'time') {
+    // `time` is only observable through the clock the per-tick `cre` frame carries. 0.8 is far
+    // from wherever the world currently is, so a jump would be unmistakable.
+    const clockAfter = lastOf(ND, 'cre')?.time;
+    if (clockBefore !== undefined && clockAfter !== undefined && Math.abs(clockAfter - clockBefore) > 0.05)
+      fail(`DEV: devcmd time moved the world clock ${clockBefore} -> ${clockAfter} with no dev claim`);
+  }
+}
+console.log(`DEV gate OK: dev and all ${REFUSE_CASES.length} devcmds refused, nothing mutated`);
+// ND has nothing left to prove, and a world admits 4 players (§11.4): its seat has
+// to go back before DEVOK opens D's and, briefly, the mono witness's.
+ND.ws.close();
+await sleep(200);
 
 // --- Stage G: Preferred Validated Action Protocol (seq/act) ---
 warp(A, px, py, 0); await sleep(80);
@@ -936,6 +1075,346 @@ A.send({ t: 'chest_open', i: chestI });
 await sleep(400);
 if (A.msgs.some((m) => m.t === 'chest')) fail('CH: a mine chest was opened from the surface');
 console.log('CH cross-layer chest access correctly refused');
+
+// --- Stage DEVOK: the tester path, GRANTED ---
+// Last on purpose. mono, wx, time, spawn and clearcre are global room state, so running this
+// anywhere earlier would perturb every stage after it.
+//
+// Slice 4 shipped the dev tooling with only the refusal above under test, which is exactly the
+// shape of coverage that lets the granted path rot silently: every command could have been a
+// no-op and the suite would still have been green. Each command below is asserted on what it
+// actually did to the world, not on the absence of an error. Room-internal detail that has no
+// wire representation (strength gating, respawn-point selection, clamping) is covered
+// deterministically by gameserver/room/dev_test.go.
+const D = await mintedClient('DevTester', true);
+const initD = await D.wait('init', 8000);
+if (initD.dev !== true)
+  fail(`DEVOK: init.dev = ${JSON.stringify(initD.dev)} for a dev-claimed ticket, want true`);
+console.log('DEVOK init.dev = true for a dev session OK');
+
+// An exposed sand tile on the far island: far enough that the teleport has to stream a fresh
+// chunk neighbourhood, open enough that the sandstorm branch of the survival tick has nothing
+// to shelter behind.
+const devSand = (() => {
+  for (let i = 0; i < world.tiles.length; i++) {
+    const x = i % SIZE, y = (i / SIZE) | 0;
+    if (world.tiles[i] !== T.SAND) continue;
+    if (x < 4 || y < 4 || x >= SIZE - 4 || y >= SIZE - 4) continue;
+    if (Math.hypot(x - initD.x, y - initD.y) < 400) continue;
+    if (MONOLITHS.some(([mx, my]) => Math.hypot(mx - x, my - y) < 15)) continue;
+    if (Math.hypot(CORE[0] - x, CORE[1] - y) < 25) continue;
+    let ok = true;
+    for (let dy = -2; dy <= 2 && ok; dy++)
+      for (let dx = -2; dx <= 2; dx++) if (world.tiles[(y + dy) * SIZE + (x + dx)] !== T.SAND) { ok = false; break; }
+    if (ok) return [x + 0.5, y + 0.5];
+  }
+  return null;
+})();
+if (!devSand) fail('DEVOK: no open sand plain found for the teleport/weather probe');
+
+// devcmd `time`: the clock the per-tick `cre` frame carries must follow it.
+const clockFollows = async (v) => {
+  D.msgs = D.msgs.filter((m) => m.t !== 'cre');
+  D.send({ t: 'devcmd', cmd: 'time', v });
+  await sleep(700);
+  const got = lastOf(D, 'cre')?.time;
+  if (got === undefined) fail('DEVOK: no cre frame carrying the clock');
+  // the sim advances ~0.00015/tick, so anything beyond a few thousandths is a command that
+  // did not take
+  if (Math.abs(got - v) > 0.01) fail(`DEVOK: devcmd time ${v} left the clock at ${got}`);
+  return got;
+};
+await clockFollows(0.82);   // night
+await clockFollows(0.30);   // day
+await clockFollows(0.80);   // night again, so the desert-heat branch stays out of the way below
+console.log('DEVOK time OK: the world clock follows devcmd time, day <-> night');
+
+// devcmd `tp`: the player moves AND the terrain around the destination is streamed. Without the
+// chunk push (the one deliberate deviation from the legacy server, which shipped the whole map
+// in `init`) the tester lands in an empty world.
+{
+  const chunksBefore = D.chunks;
+  D.msgs = D.msgs.filter((m) => m.t !== 'pos' && m.t !== 'hp');
+  D.send({ t: 'devcmd', cmd: 'tp', x: devSand[0], y: devSand[1] });
+  await sleep(700);
+  const tpPos = D.msgs.find((m) => m.t === 'pos' && m.id === initD.id);
+  if (!tpPos) fail('DEVOK: devcmd tp broadcast no pos');
+  if (Math.hypot(tpPos.x - devSand[0], tpPos.y - devSand[1]) > 0.01)
+    fail(`DEVOK: tp put the player at ${tpPos.x},${tpPos.y}, want ${devSand}`);
+  // Exactly the Chebyshev-radius-2 neighbourhood of the destination chunk, clipped to the
+  // 20x20 grid. D has never been anywhere near here, so none of it was already sent.
+  const CHUNK = initD.chunk, GRID = SIZE / CHUNK;
+  const dcx = Math.floor(devSand[0] / CHUNK), dcy = Math.floor(devSand[1] / CHUNK);
+  let wantChunks = 0;
+  for (let cy = dcy - 2; cy <= dcy + 2; cy++)
+    for (let cx = dcx - 2; cx <= dcx + 2; cx++)
+      if (cx >= 0 && cy >= 0 && cx < GRID && cy < GRID) wantChunks++;
+  const pushed = D.chunks - chunksBefore;
+  if (pushed !== wantChunks)
+    fail(`DEVOK: tp streamed ${pushed} chunks, want ${wantChunks} — the tester lands in void`);
+  const tpHp = D.msgs.find((m) => m.t === 'hp');
+  if (!tpHp || Math.hypot(tpHp.x - devSand[0], tpHp.y - devSand[1]) > 0.01)
+    fail('DEVOK: tp sent no hp frame carrying the new position');
+  console.log(`DEVOK tp OK: moved ${Math.round(Math.hypot(devSand[0] - initD.x, devSand[1] - initD.y))} tiles and streamed ${pushed} chunks`);
+}
+
+// A survival-tick window: returns every hp value the server reported during it. The survival
+// block runs every 25 ticks = 5 s, so 13 s covers at least two of them.
+const hpWindow = async (ms = 13000) => {
+  D.msgs = D.msgs.filter((m) => m.t !== 'hp' && m.t !== 'msg');
+  await sleep(ms);
+  return D.msgs.filter((m) => m.t === 'hp').map((m) => m.hp);
+};
+
+// devcmd `wx`: set it, and the survival tick must take the matching branch. The clock is at
+// night, so the day-only desert-heat case cannot be what is doing the damage.
+{
+  let hps = await hpWindow(11000);
+  if (hps.some((h) => h < MAX_HP)) fail(`DEVOK: exposed sand damaged the player with no weather: ${hps}`);
+  D.send({ t: 'devcmd', cmd: 'wx', kind: 'sandstorm' });
+  const wxOn = await D.wait('wx', 3000);
+  if (wxOn.kind !== 'sandstorm') fail('DEVOK: devcmd wx sandstorm broadcast ' + JSON.stringify(wxOn));
+  hps = await hpWindow();
+  if (!hps.length || Math.min(...hps) >= MAX_HP)
+    fail(`DEVOK: a forced sandstorm did nothing to a player standing exposed on sand: ${hps}`);
+  if (!D.msgs.some((m) => m.t === 'msg' && /sandstorm/i.test(m.s)))
+    fail('DEVOK: the sandstorm survival branch sent no sandstorm message');
+  const hurt = Math.min(...hps);
+  D.msgs = D.msgs.filter((m) => m.t !== 'wx');
+  D.send({ t: 'devcmd', cmd: 'wx', kind: 'clear' });   // anything unrecognised clears
+  const wxOff = await D.wait('wx', 3000);
+  if (wxOff.kind !== null) fail('DEVOK: clearing the weather broadcast ' + JSON.stringify(wxOff));
+  hps = await hpWindow();
+  if (hps.some((h) => h < hurt)) fail(`DEVOK: clearing the weather did not stop the damage: ${hps}`);
+  console.log(`DEVOK wx OK: sandstorm cost ${MAX_HP - hurt} hp on exposed sand, clearing it stopped the damage`);
+}
+
+// `dev` (F9 kit): every slot, and the vitals the storm just spent.
+{
+  D.msgs = D.msgs.filter((m) => !['inv', 'stat', 'msg', 'hp'].includes(m.t));
+  D.send({ t: 'dev' });
+  await sleep(600);
+  const kit = lastOf(D, 'inv');
+  if (!kit) fail('DEVOK: the dev kit sent no inv frame — the client would show an empty belt');
+  const WANT_INV = { wood: 500, stone: 500, fiber: 200, crystal: 100, iron: 100, diamond: 50,
+    starmetal: 50, essence: 100, cookedmeat: 10, torch: 30, core: 4, engine: 1, boat: 2 };
+  for (const [k, v] of Object.entries(WANT_INV))
+    if (kit.inv[k] !== v) fail(`DEVOK: dev kit inv.${k} = ${kit.inv[k]}, want ${v}`);
+  for (const t of ['axe', 'pick', 'spick', 'sword', 'isword'])
+    if (!kit.tools.includes(t)) fail('DEVOK: dev kit granted no ' + t);
+  for (const g of ['heatcloak', 'furcloak'])
+    if (!kit.gear.includes(g)) fail('DEVOK: dev kit granted no ' + g);
+  const kitStat = lastOf(D, 'stat');
+  if (!kitStat || kitStat.hunger !== 10 || kitStat.thirst !== 10)
+    fail('DEVOK: dev kit did not restore hunger/thirst: ' + JSON.stringify(kitStat));
+  // hp has no frame of its own in the kit handler; tp reports the current value.
+  D.msgs = D.msgs.filter((m) => m.t !== 'hp');
+  D.send({ t: 'devcmd', cmd: 'tp', x: devSand[0], y: devSand[1] });
+  const kitHp = await D.wait('hp', 3000);
+  if (kitHp.hp !== MAX_HP) fail(`DEVOK: dev kit left hp at ${kitHp.hp}, want ${MAX_HP}`);
+  console.log('DEVOK dev kit OK: full inventory, all 5 tools, both cloaks, vitals restored');
+}
+
+// devcmd `god`: the tester genuinely survives. Driven with the environmental tick rather than
+// creature AI so it is deterministic — the same protection covers both (godTick heals a
+// protected player to full at the top of every tick, before anything can act).
+{
+  D.msgs = D.msgs.filter((m) => m.t !== 'msg');
+  D.send({ t: 'devcmd', cmd: 'god' }); await sleep(300);
+  if (!D.msgs.some((m) => m.t === 'msg' && /God mode ON/.test(m.s)))
+    fail('DEVOK: devcmd god sent no "God mode ON" toast');
+  D.send({ t: 'devcmd', cmd: 'wx', kind: 'sandstorm' }); await sleep(300);
+  let hps = await hpWindow(16000);
+  // The storm still lands its chip, but godTick puts it back on the next tick, so hp can never
+  // walk down. Anything at or below MAX_HP - 2 means two hits accumulated.
+  if (hps.some((h) => h <= MAX_HP - 2))
+    fail(`DEVOK: god mode did not protect the player — hp walked down: ${hps}`);
+  if (hps.length && hps[hps.length - 1] !== MAX_HP)
+    fail(`DEVOK: god mode left hp at ${hps[hps.length - 1]}, want ${MAX_HP}`);
+  D.msgs = D.msgs.filter((m) => m.t !== 'msg');
+  D.send({ t: 'devcmd', cmd: 'god' }); await sleep(300);
+  if (!D.msgs.some((m) => m.t === 'msg' && /God mode OFF/.test(m.s)))
+    fail('DEVOK: toggling god off sent no "God mode OFF" toast');
+  hps = await hpWindow(16000);
+  if (!hps.length || Math.min(...hps) > MAX_HP - 2)
+    fail(`DEVOK: with god off the same storm did not resume damaging the player: ${hps}`);
+  D.send({ t: 'devcmd', cmd: 'wx', kind: 'clear' });
+  D.send({ t: 'dev' });   // back to full for the rest of the stage
+  await sleep(500);
+  console.log('DEVOK god OK: invulnerable while on, damage resumed when switched off');
+}
+
+// devcmd `spawn`: every CRE_TYPES key, each one reaching the client in a `cre` frame. The Go
+// unit test iterates the server's own creTypes map, so a type added there and forgotten here
+// still fails the build.
+const CRE_TYPE_KEYS = ['crawler', 'stalker', 'brute', 'wisp', 'husk_wolf', 'bog_shambler',
+  'frost_wraith', 'drowned', 'blight_lancer'];
+for (const type of CRE_TYPE_KEYS) {
+  D.send({ t: 'devcmd', cmd: 'clearcre' }); await sleep(400);
+  D.msgs = D.msgs.filter((m) => m.t !== 'cre' && m.t !== 'msg');
+  D.send({ t: 'devcmd', cmd: 'spawn', type });
+  let seen = null;
+  const t0 = Date.now();
+  while (!seen && Date.now() - t0 < 4000) {
+    for (const fr of D.msgs.filter((m) => m.t === 'cre')) {
+      const hit = (fr.c || []).find((row) => row[3] === type);
+      if (hit) { seen = hit; break; }
+    }
+    if (!seen) await sleep(100);
+  }
+  if (!seen) fail(`DEVOK: devcmd spawn ${type} never appeared in a cre broadcast`);
+  if (!D.msgs.some((m) => m.t === 'msg' && m.s.includes(type)))
+    fail(`DEVOK: devcmd spawn ${type} sent no confirmation naming the type`);
+}
+console.log(`DEVOK spawn OK: all ${CRE_TYPE_KEYS.length} creature types spawned and broadcast`);
+
+// devcmd `clearcre`: every creature currently alive is gone. Asserted on identity rather than
+// on an empty frame: the natural spawn roll runs inside the very same tick that processes the
+// command, so at night the world is rarely observably empty even though the clear did happen.
+{
+  for (const type of ['crawler', 'brute', 'stalker']) {
+    D.send({ t: 'devcmd', cmd: 'spawn', type }); await sleep(120);
+  }
+  await sleep(500);
+  const doomed = new Set(((lastOf(D, 'cre') || {}).c || []).map((row) => row[0]));
+  if (doomed.size === 0) fail('DEVOK: nothing to clear — the spawns did not land');
+  D.msgs = D.msgs.filter((m) => m.t !== 'cre' && m.t !== 'msg');
+  D.send({ t: 'devcmd', cmd: 'clearcre' });
+  let cleared = false, survivors = null;
+  const c0 = Date.now();
+  while (!cleared && Date.now() - c0 < 4000) {
+    for (const fr of D.msgs.filter((m) => m.t === 'cre')) {
+      survivors = (fr.c || []).filter((row) => doomed.has(row[0]));
+      if (survivors.length === 0) { cleared = true; break; }
+    }
+    if (!cleared) await sleep(100);
+  }
+  if (!cleared)
+    fail(`DEVOK: clearcre left ${survivors.length} of the ${doomed.size} creatures alive`);
+  if (!D.msgs.some((m) => m.t === 'msg' && /Cleared \d+ monsters/.test(m.s)))
+    fail('DEVOK: clearcre reported no count');
+  console.log(`DEVOK clearcre OK: all ${doomed.size} live creatures removed`);
+}
+
+// devcmd `mono`: lights the monolith and the `mono` list a fresh client is handed follows.
+// (That the raised strength opens the brute / blight-lancer spawn gates is asserted
+// deterministically in room.TestDevMonoLightsAndRaisesStrength — 8000 spawn rolls is not
+// something to do over a socket.)
+{
+  for (let i = 0; i < 4; i++) {
+    if (initD.mono[i]) continue;                    // already lit earlier in the run
+    D.msgs = D.msgs.filter((m) => m.t !== 'mono');
+    D.send({ t: 'devcmd', cmd: 'mono', i });
+    const m = await D.wait('mono', 3000);
+    if (m.i !== i) fail(`DEVOK: devcmd mono ${i} broadcast i=${m.i}`);
+  }
+  await sleep(300);
+  const fresh = await mintedClient('MonoWitness', false);
+  const initFresh = await fresh.wait('init', 8000);
+  if (!Array.isArray(initFresh.mono) || initFresh.mono.some((v) => v !== true))
+    fail('DEVOK: after lighting all four, a fresh init still reports mono = ' + JSON.stringify(initFresh.mono));
+  fresh.ws.close();
+  console.log('DEVOK mono OK: all four lit and carried in init.mono');
+}
+
+// devcmd `kill`: respawn with full vitals, and the movement grace window that keeps the
+// client's in-flight `pos` from being snapped back.
+{
+  D.send({ t: 'devcmd', cmd: 'tp', x: devSand[0], y: devSand[1] }); await sleep(600);
+  D.msgs = D.msgs.filter((m) => m.t !== 'hp' && m.t !== 'msg' && m.t !== 'fix' && m.t !== 'pos');
+  D.send({ t: 'devcmd', cmd: 'kill' });
+  const killHp = await D.wait('hp', 3000);
+  if (killHp.hp !== MAX_HP) fail(`DEVOK: kill respawned with hp ${killHp.hp}, want ${MAX_HP}`);
+  if (Math.hypot(killHp.x - devSand[0], killHp.y - devSand[1]) < 1)
+    fail('DEVOK: kill did not move the player off the death spot');
+  if (!D.msgs.some((m) => m.t === 'msg' && /respawned/i.test(m.s)))
+    fail('DEVOK: kill sent no respawn toast');
+  // A 6-tile step is far beyond the speed budget available this instant (warped() stamps
+  // LastPosAt, so dt is ~0 and the allowance is the 1-tile flat slack). Only the grace window
+  // can let it through, and without it the client's in-flight pos is snapped back to the
+  // respawn point mid-stride.
+  const probe = { x: killHp.x + 6, y: killHp.y, z: 0 };
+  D.msgs = D.msgs.filter((m) => m.t !== 'fix' && m.t !== 'pos');
+  D.send({ t: 'pos', ...probe });
+  await sleep(500);
+  if (D.msgs.some((m) => m.t === 'fix'))
+    fail('DEVOK: kill opened no movement grace window — the in-flight pos was snapped back');
+  if (!D.msgs.some((m) => m.t === 'pos' && m.id === initD.id))
+    fail('DEVOK: the post-kill pos was neither accepted nor rejected');
+  console.log('DEVOK kill OK: respawned at full vitals with the movement grace window open');
+}
+
+D.send({ t: 'devcmd', cmd: 'clearcre' });
+await sleep(300);
+D.ws.close();
+A.ws.close();
+B.ws.close();
+console.log('DEVOK stage complete: every devcmd exercised on the granted path');
+
+// --- Stage ADMIT: one live session per identity, and the player cap ---
+// Last, because it deliberately fills the room. Every earlier stage has closed its
+// sockets by now; give the server a moment to reap them so the cap arithmetic below
+// starts from an empty world.
+await sleep(600);
+{
+  const CAP = 4;                       // the default in §11.4; the stack runs unconfigured
+
+  // Two tickets, one userId — what a duplicated browser tab produces.
+  const DUP = 'u_gotest_dup' + Math.random().toString(36).slice(2, 8);
+  const P1 = await mintedClient('DupTab', false, { userId: DUP });
+  const init1 = await P1.wait('init', 8000);
+  const P2 = await mintedClient('DupTab', false, { userId: DUP });
+  const init2 = await P2.wait('init', 8000);
+
+  // The first session is told why before it is closed — not left to guess.
+  const kick = await P1.wait('kick', 3000);
+  if (kick.reason !== 'replaced') fail(`ADMIT: kick.reason = ${kick.reason}, want 'replaced'`);
+  for (let i = 0; i < 40 && !P1.closed; i++) await sleep(50);
+  if (!P1.closed) fail('ADMIT: the replaced session was kicked but its socket stayed open');
+  if (init2.id === init1.id) fail('ADMIT: the replacement reused the evicted session id');
+
+  // ...and the room holds ONE copy of that player, not two. A fresh observer sees
+  // the authoritative roster.
+  const OBS = await mintedClient('Observer', false);
+  const initObs = await OBS.wait('init', 8000);
+  const roster = initObs.players.map((q) => q.id);
+  if (roster.length !== 1 || roster[0] !== init2.id)
+    fail(`ADMIT: the room reports players ${JSON.stringify(roster)}, want exactly [${init2.id}] — the duplicate was not evicted`);
+  console.log('ADMIT takeover OK: the duplicate tab replaced the session instead of cloning the player');
+
+  // The cap. Two seats are taken (P2 + OBS); fill the rest, then the next one is refused.
+  const live = [P2, OBS];
+  while (live.length < CAP) {
+    const c = await mintedClient('Filler' + live.length, false);
+    await c.wait('init', 8000);
+    live.push(c);
+  }
+  const fifth = await mintedClient('Fifth', false, { allowAuthFail: true });
+  const af = await fifth.wait('authfail', 5000);
+  if (af.reason !== 'room-full') fail(`ADMIT: the ${CAP + 1}th player got authfail '${af.reason}', want 'room-full'`);
+  if (fifth.msgs.some((m) => m.t === 'init')) fail('ADMIT: a refused client was sent init');
+  if (fifth.chunks !== 0) fail(`ADMIT: a refused client was sent ${fifth.chunks} chunks`);
+  fifth.ws.close();
+  console.log(`ADMIT cap OK: player ${CAP + 1} refused with authfail room-full, before any world data`);
+
+  // A player already holding one of the ${CAP} seats can still reconnect: takeover is
+  // resolved BEFORE the cap, or a crash would lock them out of their own world.
+  const seated = live[0];              // P2, the session that took the duplicate's place
+  const RE = await mintedClient('DupTab', false, { userId: DUP, allowAuthFail: true });
+  const initRe = await RE.wait('init', 8000);
+  if (RE.msgs.some((m) => m.t === 'authfail'))
+    fail('ADMIT: reconnecting into a full room was refused — takeover must be resolved before the cap');
+  const kick2 = await seated.wait('kick', 3000);
+  if (kick2.reason !== 'replaced') fail(`ADMIT: kick.reason = ${kick2.reason}, want 'replaced'`);
+  if (initRe.players.length !== CAP - 1)
+    fail(`ADMIT: after the takeover the room reports ${initRe.players.length} others, want ${CAP - 1} — the seat was not replaced`);
+  console.log('ADMIT takeover-into-a-full-room OK: the seat was replaced, not counted twice');
+
+  for (const c of live) c.ws.close();
+  P1.ws.close();
+  RE.ws.close();
+  await sleep(300);
+}
 
 console.log(`chunks streamed to A: ${A.chunks}`);
 console.log('ALL TESTS PASSED');

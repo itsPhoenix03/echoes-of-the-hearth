@@ -120,6 +120,41 @@ export function isDevGranted({ tok, userId }) {
   return devToks.has(tok) || devUserIds.has(userId);
 }
 
+// --- local-developer bypass (HEARTH_DEV_ALL) ------------------------------
+// The allowlist above is the production mechanism and is unchanged. But a
+// developer on their own machine should not have to dig their tok out of
+// devtools to get the F9/F10 kit, the way `npm run server:dev` never did.
+// HEARTH_DEV_ALL=1 grants dev to any client whose TCP peer is loopback.
+//
+// Scoped per request, not per bind: the control plane listens on 0.0.0.0 so
+// `vite --host` LAN play works, so a bind-address check would either break LAN
+// or hand the dev kit to every player on the network. The peer address is the
+// only thing here the client cannot choose.
+export const devAllEnabled = process.env.HEARTH_DEV_ALL === '1';
+
+// Exact match, never a prefix/startsWith test: '127.0.0.1.evil.com' and
+// '127.0.0.1x' must not pass, and only these three forms can actually reach us
+// (IPv4, IPv6, and the IPv4-mapped IPv6 form Node reports on a dual-stack
+// socket). X-Forwarded-For and friends are deliberately NOT consulted anywhere:
+// they are client-supplied strings and trusting one would make the bypass
+// remotely reachable with a single header.
+const LOOPBACK = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
+
+export function isLoopbackAddress(addr) {
+  return typeof addr === 'string' && LOOPBACK.has(addr.toLowerCase());
+}
+
+// Independent of and ORed with the allowlist: a named account still gets dev
+// from any address, and loopback still gets it with an empty allowlist.
+export function isDevAllGranted(remoteAddress) {
+  return devAllEnabled && isLoopbackAddress(remoteAddress);
+}
+
+if (devAllEnabled) {
+  // Loud and exactly once, at boot: a silent bypass is what ends up in prod.
+  console.warn('[control] HEARTH_DEV_ALL=1 — ANY client connecting from loopback (127.0.0.1/::1) will be issued dev privileges (F9 dev kit, F10 tester panel). Local development only; do not set this in production.');
+}
+
 export function getProfile(tok) {
   return profilesByTok.get(tok) || null;
 }

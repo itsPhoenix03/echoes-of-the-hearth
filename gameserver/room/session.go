@@ -33,6 +33,12 @@ type Session struct {
 
 	Out chan []byte
 
+	// admit carries the room's verdict on this session back to the goroutine
+	// that called Join: "" for admitted, otherwise the authfail reason. It is
+	// buffered so the room goroutine never blocks on a caller that gave up, and
+	// so the room unit tests may call onJoin directly without draining it.
+	admit chan string
+
 	closeOnce sync.Once
 	closed    chan struct{}
 }
@@ -42,6 +48,7 @@ func NewSession(id, userID, name, addr string) *Session {
 	return &Session{
 		ID: id, UserID: userID, Name: name, Addr: addr,
 		Out:    make(chan []byte, OutboundBuffer),
+		admit:  make(chan string, 1),
 		closed: make(chan struct{}),
 	}
 }
@@ -67,6 +74,22 @@ func (s *Session) trySend(b []byte) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+// Drain removes and returns whatever is already queued on the outbound channel,
+// without ever blocking. The writer goroutine calls it after the session is
+// closed so a final frame — the `kick` an evicted session is owed, above all —
+// still reaches the socket instead of racing the close.
+func (s *Session) Drain() [][]byte {
+	out := make([][]byte, 0, len(s.Out))
+	for {
+		select {
+		case b := <-s.Out:
+			out = append(out, b)
+		default:
+			return out
+		}
 	}
 }
 

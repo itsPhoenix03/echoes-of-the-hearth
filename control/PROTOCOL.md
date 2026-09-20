@@ -203,6 +203,36 @@ stored on the profile record, so when a real users table lands only
 `dev` field from the request body — a client posting `{"dev":true}` gets an
 ordinary ticket with no `dev` key (asserted in `control/test.mjs`).
 
+#### `HEARTH_DEV_ALL` — the local-developer bypass
+`HEARTH_DEV_ALL=1` grants `dev: true` to **any request whose TCP peer address is
+loopback**, with no allowlist entry. It replaces the old `npm run server:dev`
+(`DEV=1`) ergonomics: a developer gets the F9 dev kit / F10 tester panel from one
+env var instead of copying `localStorage['hearth-tok']` out of devtools.
+
+- **Scoped per request, not per bind.** The control plane listens on `0.0.0.0`
+  because LAN play (`vite --host`) is supported, so the check is on
+  `req.socket.remoteAddress`, never on the bind address. The developer on the
+  same machine is covered; a LAN or remote player never is, even with the flag
+  set.
+- **Accepted addresses** — exact string match against `127.0.0.1`, `::1`, and the
+  IPv4-mapped `::ffff:127.0.0.1` (case-insensitive). No prefix matching, so
+  `127.0.0.1.evil.com` and friends do not pass. **`X-Forwarded-For`, `X-Real-IP`
+  and any other forwarding header are ignored entirely** — they are
+  client-written strings, and honoring one would make the bypass remotely
+  reachable. Behind a real reverse proxy every request therefore looks like
+  loopback to this server: do not put a proxy in front of it with the flag set.
+- **Precedence: independent, ORed, never subtractive.**
+  `dev = allowlisted(tok/userId) OR (HEARTH_DEV_ALL AND loopback)`. The allowlist
+  keeps granting a named account from *any* address with the flag unset; the flag
+  keeps granting loopback with an empty allowlist. Neither can revoke the other,
+  and nothing here ever emits `dev: false` — the key is still simply omitted when
+  neither source grants (§2).
+- **Boot log.** With the flag set, the process logs exactly once at startup:
+  `[control] HEARTH_DEV_ALL=1 — ANY client connecting from loopback (127.0.0.1/::1) will be issued dev privileges (F9 dev kit, F10 tester panel). Local development only; do not set this in production.`
+- This is a **local-development affordance, not a production mechanism.** The
+  per-account allowlist above is the production grant. Leave `HEARTH_DEV_ALL`
+  unset anywhere real players connect.
+
 ## 4. What Node deliberately does NOT own
 Node's profile store holds only `{ userId, tok, name, dev, createdAt, lastSeen }`
 — account state, where `dev` is a permission, not a game setting.

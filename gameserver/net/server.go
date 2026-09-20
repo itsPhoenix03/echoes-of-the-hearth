@@ -96,7 +96,18 @@ func (s *Server) serveWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The room, not this layer, decides admission: the player cap and the
+	// one-live-session-per-identity takeover both need to know who is actually
+	// connected, which only the room goroutine does. A refusal comes back with
+	// an authfail reason and is relayed verbatim — before any init or chunk
+	// data, because a refused session never joined at all.
 	if err := rm.Join(ctx, sess); err != nil {
+		var af AuthFailReason
+		if errors.As(err, &af) {
+			s.authFail(ctx, c, af.AuthFailReason())
+			_ = c.Close(ws.StatusPolicyViolation, "auth")
+			return
+		}
 		_ = c.Close(ws.StatusGoingAway, "shutting down")
 		return
 	}
@@ -193,6 +204,17 @@ func (s *Server) writeLoop(c *ws.Conn, sess *room.Session) {
 	for {
 		select {
 		case <-sess.Closed():
+			// Flush whatever the room queued immediately before closing — the
+			// `kick` an evicted session is owed above all — so the client can
+			// show an honest reason instead of an unexplained disconnect.
+			for _, b := range sess.Drain() {
+				wctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				err := c.Write(wctx, ws.MessageText, b)
+				cancel()
+				if err != nil {
+					break
+				}
+			}
 			// Give the peer a moment to see the close frame.
 			_ = c.Close(ws.StatusNormalClosure, "bye")
 			return

@@ -22,7 +22,9 @@ fetched at boot. It never calls Node on the connection path.
 - Ticket valid → the server **routes it** (§11) and then replies `init` (§3); the session begins.
 
 `authfail` reasons: `malformed`, `bad-signature`, `bad-json`, `expired` (ticket verification),
-plus the routing refusals `wrong-instance`, `unknown-world` and `world-unavailable` (§11).
+the routing refusals `wrong-instance`, `unknown-world` and `world-unavailable` (§11), and the
+admission refusal `room-full` (§11.4). Every one of them is sent **before** any `init` or chunk
+data, and the socket is closed immediately afterwards.
 
 The client's identity (`userId`, `name`) comes from the **ticket**, never from a client-sent
 field. A client that sends its own `name` in `auth` is ignored.
@@ -57,6 +59,7 @@ deliberately NOT used in Slice 1 — debuggability over the last few percent of 
   "time": 0.31, "day": 1,
   "mono": [false,false,false,false],
   "won": false, "maxHp": 10, "wornGear": null,
+  "dev": false,                // §10.6 — may this session use `dev` / `devcmd`?
   "weather": null,             // §9.4 — current front kind, or null
   "infected": [],              // §9.5 — corrupted tile indices
   "medics": [                  // §10.2 — exactly two, see below
@@ -73,6 +76,14 @@ The simulation carries them as fractions — the survival tick drains 0.055/0.08
 block — but the wire value is `ceil()`, matching `Math.ceil(p.hunger)` in `server/index.js`.
 Ceil, not floor: a bar reads 1 until the value has genuinely reached 0. Clients must not
 round defensively; a fractional value here is a server bug.
+
+**`dev`** is a plain boolean reporting whether this session holds the dev claim (§10.6) —
+exactly the value `devAllowed` will use when a `dev` or `devcmd` frame arrives. It exists so the
+client can render an honest tester panel instead of opening one whose buttons silently produce a
+refusal toast. It is a *report*, never an input: the gate remains the signed ticket claim, and a
+client that ignores this field and sends `devcmd` anyway is refused exactly as before. `false` is
+sent explicitly rather than the key being omitted, so a client can distinguish "not a dev" from
+"talking to a server too old to say".
 
 **`medics`** is the whole medic roster. There are exactly two per world and both are pure
 functions of the seed, so they ride in `init` rather than being streamed with the chunks that
@@ -599,9 +610,32 @@ spurious `true`. Covered by `auth.TestVerifyDevClaim` / `TestVerifyDevClaimWrong
 `room.TestDevGateIsTicketClaimOnly`, and end to end by the DEV stage of
 `gameserver/test-go.mjs`, which asserts both commands are refused and mutate nothing.
 
-A refused command answers with the legacy string, verbatim: `dev` sends
-`Dev mode is off — start the server with: npm run server:dev` and `devcmd` sends
-`Dev mode off — start with: npm run server:dev`.
+**Both sides of the gate are under test.** `gameserver/room/dev_test.go` drives every command
+on a fixture with the claim granted and asserts the resulting room state field by field (the kit
+contents, the teleport's chunk push, god mode surviving creature contact and the environmental
+tick, one spawn per `creTypes` key, the respawn and its movement grace window, the strength gate
+the monoliths move, the survival-tick branch each weather kind selects, the clamped clock) and
+the same table with the claim absent, asserting nothing at all changed. The `DEVOK` stage of
+`gameserver/test-go.mjs` repeats it over a real socket. That stage needs one dev-claimed and one
+unclaimed ticket in the same run, which no single control-plane configuration can produce, so
+the suite signs both itself against a pinned throwaway keypair — see its header for the env vars
+the control plane must be started with.
+
+A refused command answers with a `msg` toast. **These are no longer the legacy strings.** The
+legacy text (`Dev mode is off — start the server with: npm run server:dev`) is wrong on this
+path: `npm run server:dev` starts the *legacy* Node server on :8081 and sets the `DEV` env var
+the Go server deliberately does not read, so a developer who followed it would see nothing change
+and reasonably conclude the feature was never ported. The current strings point at the mechanism
+that actually grants the claim:
+
+- `dev` → `Dev tools off — your ticket carries no dev claim. Locally: npm run start:dev, then reconnect.`
+- `devcmd` → `Dev tools off — no dev claim. Locally: npm run start:dev, then reconnect.`
+
+`npm run start:dev` sets `HEARTH_DEV_ALL=1` on the control plane, which grants the claim to
+loopback callers only (`control/PROTOCOL.md` §3.3); named accounts go through the
+`HEARTH_DEV_TOKS` / `HEARTH_DEV_USERS` allowlist. Either way the claim is baked into the ticket
+at join time, so a reconnect is required — hence "then reconnect". A client that reads
+`init.dev` (§3) never has to see these strings at all.
 
 ### 10.7 `devcmd` commands
 
@@ -695,3 +729,65 @@ each room's own goroutine (see the contract at the top of `gameserver/room/room.
 Covered by `gameserver/hosting/*_test.go` (run them with `-race`) and end to end by
 `node gameserver/test-multiworld.mjs`, which starts a control plane and a two-world game server
 on private ports and proves routing, isolation and the `wrong-instance` refusal over the wire.
+
+### 11.4 Admission — the player cap and one live session per identity
+
+Routing (§11.1) decides *which* room; admission decides *whether*. Both rules below are resolved
+on the room goroutine, in the `join` case of `Room.Run` — not in the socket layer and not in the
+control plane, because only the room knows who is actually connected. Allocation is not
+admission.
+
+**The player cap.** A world admits at most `maxPlayers` concurrent players; the default is **4**,
+the co-op target in `PLAN.md`. A refused client gets `{ t:'authfail', reason:'room-full' }` and
+is closed — before `init`, before any chunk. It is a per-world setting carried in the same world
+registry §11.2 describes, so one file still configures both processes (the control plane ignores
+the field):
+
+```jsonc
+[{ "worldId": "frontier", "seed": "s2", "instanceId": "inst-2", "maxPlayers": 8 }]
+```
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `maxPlayers` (per entry in `HEARTH_WORLDS` / `control/worlds.json`) | `4` | concurrent players in that world |
+| `HEARTH_WORLD_MAX_PLAYERS` / `HEARTH_MAX_PLAYERS` | `4` | the same cap for the single-world fallback |
+
+Absent, zero, negative or non-numeric all mean the default. A cap is never a promise about
+*which* four: see takeover below.
+
+**One live session per identity.** A duplicated browser tab shares `localStorage`, presents the
+same `hearth-tok`, and is issued a ticket for the same `userId` — which used to put a second
+copy of one player in the room. A second live session for an identity now **takes over**: the
+old session is evicted and the new one is admitted.
+
+```jsonc
+{ "t": "kick", "reason": "replaced" }   // server -> the session being evicted
+```
+
+`kick` is sent to the evicted session and the socket is closed immediately after, so a client
+must handle it wherever it handles a disconnect: show the reason ("you opened this world in
+another tab"), and do **not** auto-reconnect on `replaced` — an auto-reconnect loop between two
+tabs would evict each other forever. `reason` is an open string; unknown reasons should be
+treated as a plain disconnect.
+
+Takeover, not rejection, on purpose: rejecting the newcomer would lock a player out of their own
+character after a browser crash or a dropped connection until the stale socket timed out, which
+is a worse failure than the duplication it prevents.
+
+Eviction runs the **same teardown a disconnect does** — profile snapshotted, player removed from
+`players` *and* `playerOrder`, `pl` broadcast to everyone else — so nothing is lost and no ghost
+is left in an ordered mirror (§9.6, §10.5).
+
+**Ordering: takeover is resolved BEFORE the cap.** If a full room already holds one of your
+sessions, your new connection is replacing a seat, not claiming another one, so it is admitted.
+Checking the cap first would mean a player who crashed could never get back into the world their
+own stale session is still sitting in.
+
+**Scope.** The rule spans every room a process hosts: joining world B while still live in world A
+evicts the world-A session (the identity registry is process-wide, beside the registry of rooms —
+`gameserver/room/registry.go`). Across *instances* it is not enforced: that needs shared state
+the control plane does not have yet, so two processes can still each hold one session for the
+same identity.
+
+Covered by `gameserver/room/admission_test.go`, `gameserver/hosting/hosting_test.go` and, over
+the wire, by the ADMIT stage of `gameserver/test-go.mjs`.

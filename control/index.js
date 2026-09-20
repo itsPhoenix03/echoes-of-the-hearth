@@ -4,7 +4,7 @@
 
 import http from 'node:http';
 import crypto from 'node:crypto';
-import { getProfile, putProfile, getWorlds, resolveWorld, getDefaultWorld, isDevGranted } from './store.js';
+import { getProfile, putProfile, getWorlds, resolveWorld, getDefaultWorld, isDevGranted, isDevAllGranted } from './store.js';
 import { issueTicket, getPublicKeyRawB64 } from './ticket.js';
 
 const PORT = Number(process.env.CONTROL_PORT) || 8090;
@@ -64,7 +64,9 @@ function handleJoin(req, res) {
     }
     // The dev permission is account state, resolved from the operator allowlist —
     // body.dev is read nowhere, so a client cannot grant itself the tester panel.
-    profile.dev = isDevGranted(profile);
+    // HEARTH_DEV_ALL adds a second, independent source for loopback callers only;
+    // req.socket.remoteAddress is the real TCP peer, so no header can fake it.
+    profile.dev = isDevGranted(profile) || isDevAllGranted(req.socket.remoteAddress);
     putProfile(profile);
 
     // Allocation: the client may ASK for a world; we bind the one we resolved.

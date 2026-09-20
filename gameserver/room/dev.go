@@ -40,11 +40,26 @@ func (r *Room) devAllowed(p *Player) bool {
 	return p.S.DevClaim != nil && *p.S.DevClaim
 }
 
-// The legacy refusal strings, verbatim: the client renders them as-is, and the
-// two differ from each other in the reference server.
+// The refusal strings. The client renders them as a toast, so they are short,
+// and the two differ from each other exactly as they do in the reference
+// server.
+//
+// They are deliberately NOT the legacy text any more. The legacy strings said
+// "start the server with: npm run server:dev", which on this path is wrong and
+// actively misleading: `npm run server:dev` starts the *legacy* Node server on
+// :8081 with its process-wide DEV flag, and the Go server never reads it. A
+// developer who followed that advice would see nothing change and conclude the
+// tester panel was never ported.
+//
+// The accurate advice is the control plane's: dev is a per-account claim signed
+// into the ticket (control/PROTOCOL.md §3.3). `npm run start:dev` sets
+// HEARTH_DEV_ALL=1, which grants the claim to any loopback client — the local
+// developer — while named accounts are granted through the
+// HEARTH_DEV_TOKS / HEARTH_DEV_USERS allowlist. Reconnect after either, since
+// the claim is baked into the ticket at join time.
 const (
-	devOffMsg    = "Dev mode is off — start the server with: npm run server:dev"
-	devCmdOffMsg = "Dev mode off — start with: npm run server:dev"
+	devOffMsg    = "Dev tools off — your ticket carries no dev claim. Locally: npm run start:dev, then reconnect."
+	devCmdOffMsg = "Dev tools off — no dev claim. Locally: npm run start:dev, then reconnect."
 )
 
 // devKitInv is the `dev` grant, verbatim from server/index.js. Every key is a

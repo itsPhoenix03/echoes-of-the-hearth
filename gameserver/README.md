@@ -22,7 +22,11 @@ the ticket and on nothing else: present and true means on, absent/false means
 off (docs/10 §10.6). The control plane mints the claim from a per-account
 allowlist (`HEARTH_DEV_TOKS` / `HEARTH_DEV_USERS`, `control/PROTOCOL.md` §3.3).
 There is no `HEARTH_DEV` env var any more — a server-wide flag would have handed
-world-mutating commands to every connected player.
+world-mutating commands to every connected player. For local development,
+`npm run start:dev` sets `HEARTH_DEV_ALL=1` on the control plane, which grants
+the claim to loopback callers; the refusal toast says so, and `init.dev`
+(docs/10 §3) tells the client up front whether this session holds it, so the
+tester panel can show an honest state instead of buttons that silently refuse.
 
 **Many worlds per process.** One process is one *instance* and hosts one or more
 worlds; the ticket's `worldId` picks the room and its `instanceId` must be this
@@ -72,12 +76,13 @@ $env:HEARTH_ALLOW_WARP = "1"; go run ./cmd/hearthd
 |---|---|---|
 | `HEARTH_GAME_PORT` | `8082` | listen port |
 | `HEARTH_INSTANCE_ID` | `local` | which instance this process is; a ticket for another instance is refused with `authfail: wrong-instance` |
-| `HEARTH_WORLDS` | — | JSON array of `{worldId, seed, instanceId, ws, name}`, the same shape `control/store.js` reads; entries for other instances are skipped |
+| `HEARTH_WORLDS` | — | JSON array of `{worldId, seed, instanceId, ws, name, maxPlayers}`, the same shape `control/store.js` reads; entries for other instances are skipped |
 | `HEARTH_WORLDS_FILE` | `control/worlds.json` (found by walking up) | the same JSON in a file — one registry configures both processes |
 | `HEARTH_WORLD_ID` | `default` | single-world fallback id |
 | `HEARTH_WORLD_SEED` | `$HEARTH_SEED` | single-world fallback seed |
 | `HEARTH_SEED` | `hearth-1` | world seed (single-world fallback) |
 | `HEARTH_EAGER_WORLDS` | unset | build every hosted world at boot instead of on first join |
+| `HEARTH_WORLD_MAX_PLAYERS` / `HEARTH_MAX_PLAYERS` | `4` | concurrent-player cap for the single-world fallback; per world, set `maxPlayers` on its registry entry |
 | `HEARTH_PUBKEY_URL` | `http://localhost:8090/api/pubkey` | where the ticket public key is fetched once at boot |
 | `HEARTH_TICKET_PUBKEY` | — | base64 raw 32-byte Ed25519 key; when set, skips the fetch entirely |
 | `HEARTH_ALLOW_WARP` | unset | enables `{t:'warp'}`, the unvalidated test-only teleport |
@@ -105,6 +110,13 @@ Give the control plane the same registry (it reads `HEARTH_WORLDS` /
 binds a ticket to that world. Rooms are built lazily on first join — worldgen is
 seconds and hundreds of MB, so a process does not pay for a world nobody is in;
 `HEARTH_EAGER_WORLDS=1` builds them all at boot instead.
+
+Each world admits at most `maxPlayers` players at once — 4 unless its registry entry says
+otherwise. The cap is enforced by the room (only it knows who is connected); a refused client
+gets `authfail: room-full` before any world data. One `userId` also gets one live session
+process-wide: a second ticket for the same identity — a duplicated browser tab, or a reconnect
+after a crash — evicts the first with `{t:'kick', reason:'replaced'}` rather than being
+refused. See `docs/10_GO_WIRE_PROTOCOL.md` §11.4.
 
 ## Tests
 

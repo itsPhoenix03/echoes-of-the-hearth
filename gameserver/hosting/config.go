@@ -29,7 +29,10 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
+
+	"hearth/gameserver/room"
 )
 
 // WorldSpec is one hosted world: the same record `control/store.js` keeps, minus
@@ -39,6 +42,13 @@ type WorldSpec struct {
 	Seed       string `json:"seed"`
 	InstanceID string `json:"instanceId"`
 	Name       string `json:"name"`
+	// MaxPlayers caps concurrent players in this world. Absent, zero or
+	// negative means room.DefaultMaxPlayers (4, the PLAN.md co-op target). The
+	// control plane ignores the field, which is deliberate: allocation is not
+	// admission, and only the room that hosts the world knows who is actually
+	// connected — so the cap is enforced there (room.Room.admit) and the
+	// registry only configures it.
+	MaxPlayers int `json:"maxPlayers"`
 }
 
 // Config is the hosting configuration of one game-server process.
@@ -79,6 +89,10 @@ var defaultWorldsFile = filepath.Join("control", "worlds.json")
 //  3. the single-world env vars HEARTH_WORLD_ID / HEARTH_WORLD_SEED (or the
 //     historical HEARTH_SEED) / HEARTH_INSTANCE_ID, defaulting to
 //     default / hearth-1 / local — i.e. the zero-config setup still works.
+//
+// Per-world player caps ride in the registry as `maxPlayers`; the single-world
+// fallback reads HEARTH_WORLD_MAX_PLAYERS (or HEARTH_MAX_PLAYERS). Unset
+// anywhere means 4.
 //
 // Entries belonging to another instanceId are skipped: a registry lists every
 // world in the deployment, and each process hosts its own slice of it. A
@@ -152,6 +166,7 @@ func loadRegistry(instanceID string, logf func(string, ...any)) ([]WorldSpec, st
 		Seed:       envOr("HEARTH_WORLD_SEED", envOr("HEARTH_SEED", "hearth-1")),
 		InstanceID: instanceID,
 		Name:       os.Getenv("HEARTH_WORLD_NAME"),
+		MaxPlayers: envInt(envOr("HEARTH_WORLD_MAX_PLAYERS", os.Getenv("HEARTH_MAX_PLAYERS")), logf),
 	})
 	if err != nil {
 		return nil, "", err
@@ -238,7 +253,28 @@ func normalizeWorld(w WorldSpec) (WorldSpec, error) {
 	if w.Name = strings.TrimSpace(w.Name); w.Name == "" {
 		w.Name = w.WorldID
 	}
+	if w.MaxPlayers <= 0 {
+		w.MaxPlayers = room.DefaultMaxPlayers
+	}
 	return w, nil
+}
+
+// envInt parses an optional integer setting. A value that is not a number is a
+// typo worth mentioning rather than a reason to refuse to boot; it falls back
+// to the default (0, which normalizeWorld turns into DefaultMaxPlayers).
+func envInt(raw string, logf func(string, ...any)) int {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		if logf != nil {
+			logf("[hearth] ignoring maxPlayers %q: want a positive integer", raw)
+		}
+		return 0
+	}
+	return n
 }
 
 func safeID(s string) bool {
@@ -281,7 +317,7 @@ func (c Config) SavePath(worldID string) string {
 func (c Config) Summary() string {
 	parts := make([]string, 0, len(c.Worlds))
 	for _, w := range c.Worlds {
-		parts = append(parts, fmt.Sprintf("%s(seed=%s)", w.WorldID, w.Seed))
+		parts = append(parts, fmt.Sprintf("%s(seed=%s max=%d)", w.WorldID, w.Seed, w.MaxPlayers))
 	}
 	mode := "lazy"
 	if c.Eager {

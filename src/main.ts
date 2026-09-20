@@ -37,6 +37,11 @@ const MONO_NAMES = [
   "Frozen Spire",
   "Blighted Marsh",
 ];
+// One shared line of copy for F9 and any other "dev is off" path; the F10 panel says
+// the same thing in its own markup.
+const DEV_OFF_MSG =
+  "Dev tools are not enabled for this session. Run `npm run start:dev` to grant them on " +
+  "this machine, or allowlist a named account with HEARTH_DEV_TOKS.";
 const STORY_OFF: Record<string, number> = { wall: 25, shelter: 52 };
 const MAX_LVL: Record<string, number> = { wall: 2, shelter: 3 };
 const colorFor = (id: string) => {
@@ -90,6 +95,30 @@ const MEDIC_REASON_MSG: Record<string, string> = {
   "insufficient-resource": "You don't have enough to pay.",
   "unknown-medic": "There's no medic there.",
   "rate-limited": "The medic needs a moment before a new offer.",
+};
+
+// Why the world server refused the join, in player-facing words. Same house style as
+// MEDIC_REASON_MSG above: machine reason in, one calm sentence out. Keys are the
+// `reason` values `authfail` can carry (gameserver/auth/ticket.go, hosting/manager.go
+// and the room-capacity check in net/server.go).
+const AUTHFAIL_REASON_MSG: Record<string, string> = {
+  "room-full": "This world is full — only 4 Keepers can be in it at once. Try again in a few minutes.",
+  "wrong-instance": "That invitation belongs to a different world server. Pick the world again from the menu.",
+  "unknown-world": "That world is no longer hosted here. Pick another world from the menu.",
+  "world-unavailable": "That world could not be opened right now. Give it a moment and try again.",
+  expired: "Your entry pass timed out before you arrived. Join again to get a fresh one.",
+  "bad-signature": "Your entry pass could not be verified. Join again to get a fresh one.",
+  "bad-json": "Your entry pass could not be read. Join again to get a fresh one.",
+  malformed: "The world server could not understand the join request. Join again.",
+};
+
+// Why the world server ended a session that was already running. `replaced` is the
+// single-session rule: the *evicted* tab lands here, so the copy has to read as an
+// intentional handover rather than as something the player did wrong.
+const KICK_REASON_MSG: Record<string, string> = {
+  replaced:
+    "Your Keeper is now being played in another window or tab. Only one session per player is allowed, " +
+    "so this window has handed over — nothing was lost, and you can take over again by joining from here.",
 };
 const CHW = 1024,
   CHH = 512;
@@ -289,6 +318,12 @@ class Hearth extends Phaser.Scene {
   lastGather = 0;
   flickerT = 0; // shared clock for campfire/lantern/torch flicker (per-frame, no tweens-per-object)
   ready = false;
+  // Whether this session may use the dev tester (F9/F10). On the Go path the control
+  // plane signs a `dev` claim into the ticket and the server mirrors it as `init.dev`;
+  // a missing field means "no claim". The legacy :8081 server sends no such field and
+  // gates dev with its own DEV env var, so under ?legacy=1 we stay optimistic and keep
+  // the pre-migration behaviour of always offering the panel.
+  devEnabled = LEGACY;
   meLabel: Phaser.GameObjects.Text | null = null;
   myName = "Keeper";
   // menu Settings → "Show player names"; read once per scene, so a toggle lands on the next join
@@ -371,7 +406,10 @@ class Hearth extends Phaser.Scene {
       if (n >= 1 && n <= 5) this.setEquip(HOTBAR[n - 1]);
       if (e.key === "m" || e.key === "M")
         showMsg(this.audio.toggleMute() ? "🔇 Muted" : "🔊 Sound on", 1000);
-      if (e.key === "F9") this.send({ t: "dev" });
+      if (e.key === "F9") {
+        if (this.devEnabled) this.send({ t: "dev" });
+        else showMsg(DEV_OFF_MSG, 5000);
+      }
       if (e.key === "F10") {
         e.preventDefault();
         const d = document.getElementById("devPanel")!;
@@ -379,6 +417,7 @@ class Hearth extends Phaser.Scene {
       }
     });
     this.buildDevPanel();
+    this.applyDevAccess(); // honest from the start; `init` re-applies with the real claim
     // re-clamp the view whenever the canvas changes size (window resize OR browser zoom)
     this.scale.on("resize", () => this.applyViewClamp(0));
     this.input.on("pointerdown", () => this.audio.start());
@@ -462,6 +501,14 @@ class Hearth extends Phaser.Scene {
       "border:1px solid #b96;border-radius:8px;padding:10px 12px;color:#fff;font:12px monospace;max-width:220px;";
     d.innerHTML =
       `<b style="color:#ffb96a">🛠 DEV TESTER</b> <span style="color:#889">(F10)</span><br>` +
+      // Shown instead of the controls when this session has no dev claim, so the panel
+      // never presents live-looking buttons the server will silently refuse.
+      `<div id="devNote" style="display:none;color:#9ab;margin:6px 0 2px;line-height:1.5">` +
+      `<div style="color:#ffb96a;margin-bottom:5px">Not enabled for this session.</div>` +
+      `Run <b style="color:#cfe">npm run start:dev</b> to grant it on this machine, or ` +
+      `allowlist a named account with <b style="color:#cfe">HEARTH_DEV_TOKS</b>.` +
+      `</div>` +
+      `<div id="devBody">` +
       `<div style="color:#9ab;margin:4px 0">Fast travel</div>` +
       SPOTS.map(([n, x, y]) => `<button data-tp="${x},${y}">${n}</button>`).join("") +
       `<div style="color:#9ab;margin:6px 0 4px">Activate Monolith</div>` +
@@ -500,6 +547,7 @@ class Hearth extends Phaser.Scene {
       `<button data-cmd="god">🛡 God toggle</button>` +
       `<button data-cmd="kill">💀 Kill</button>` +
       `<button data-cmd="kit">🎁 Full kit</button></div>` +
+      `</div>` +
       `<style>#devPanel button{background:#2a3a4a;color:#fff;border:1px solid #57a;border-radius:4px;` +
       `margin:2px;padding:3px 7px;cursor:pointer;font:12px monospace}#devPanel button:hover{background:#3a5a4a}` +
       `#devSpawnSel{width:100%;background:#1a222c;color:#fff;border:1px solid #57a;border-radius:4px;` +
@@ -507,7 +555,7 @@ class Hearth extends Phaser.Scene {
     document.body.appendChild(d);
     d.addEventListener("click", (e) => {
       const b = (e.target as HTMLElement).closest("button") as HTMLButtonElement | null;
-      if (!b) return;
+      if (!b || !this.devEnabled) return;
       if (b.dataset.tp) {
         const [x, y] = b.dataset.tp.split(",").map(Number);
         this.send({ t: "devcmd", cmd: "tp", x, y });
@@ -523,6 +571,15 @@ class Hearth extends Phaser.Scene {
       }
       else if (b.dataset.cmd) this.send({ t: "devcmd", cmd: b.dataset.cmd });
     });
+  }
+
+  /** Swap the panel between its live controls and the "not enabled" note. */
+  applyDevAccess() {
+    const body = document.getElementById("devBody");
+    const note = document.getElementById("devNote");
+    if (!body || !note) return;
+    body.style.display = this.devEnabled ? "block" : "none";
+    note.style.display = this.devEnabled ? "none" : "block";
   }
 
   /**
@@ -1205,6 +1262,9 @@ class Hearth extends Phaser.Scene {
       this.won = m.won;
       this.inv = m.inv;
       this.weather = m.weather;
+      // `dev` is absent on the legacy server, where LEGACY already keeps us optimistic.
+      if (!LEGACY) this.devEnabled = m.dev === true;
+      this.applyDevAccess();
       // Task 4: wornGear from init
       this.wornGear = m.wornGear ?? null;
       // fix: init now carries hp/hunger/thirst — an injured reconnect must not show a full HUD
@@ -1255,9 +1315,24 @@ class Hearth extends Phaser.Scene {
       this.wtime = m.time;
       if (m.day) this.day = m.day;
     } else if (m.t === "authfail") {
+      // The socket closes right after this frame, so quitToMenu() (which nulls the
+      // handlers and sets `quitting`) must run here — otherwise onclose would stack a
+      // "Disconnected" toast on top of the menu banner.
       quitToMenu({
         confirm: false,
-        error: `The world server rejected your login (${m.reason || "invalid ticket"}). Try joining again.`,
+        error:
+          AUTHFAIL_REASON_MSG[m.reason] ||
+          `The world server rejected your login (${m.reason || "invalid ticket"}). Try joining again.`,
+      });
+    } else if (m.t === "kick") {
+      // One live session per identity: this socket is the OLD one and the server is about
+      // to close it. Same route as authfail — full teardown (Phaser destroy, socket close,
+      // resetUI) via quitToMenu, then the menu's error banner — so re-joining is clean.
+      quitToMenu({
+        confirm: false,
+        error:
+          KICK_REASON_MSG[m.reason] ||
+          "The world server ended this session. You can join again from here.",
       });
     } else if (m.t === "pj") {
       this.addOther(m.id, m.x, m.y, m.name);

@@ -57,6 +57,13 @@ type Manager struct {
 	opts Options
 	log  *log.Logger
 
+	// identities is the process-wide "one live session per identity" registry,
+	// shared by every room this manager builds. It is what makes the
+	// duplicate-tab takeover work ACROSS worlds: the same userId joining world
+	// B while still live in world A evicts the world-A session. It guards no
+	// game state — see room/registry.go.
+	identities *room.Registry
+
 	// build is the room constructor, swappable in tests so they do not pay for
 	// real worldgen.
 	build func(WorldSpec) (*room.Room, error)
@@ -83,7 +90,7 @@ func NewManager(o Options) *Manager {
 	if o.Logger == nil {
 		o.Logger = log.Default()
 	}
-	m := &Manager{opts: o, log: o.Logger, rooms: map[string]*entry{}}
+	m := &Manager{opts: o, log: o.Logger, rooms: map[string]*entry{}, identities: room.NewRegistry()}
 	m.build = m.buildRoom
 	return m
 }
@@ -200,18 +207,23 @@ func (m *Manager) buildRoom(spec WorldSpec) (*room.Room, error) {
 		store = persist.NewJSONStore(m.opts.Config.SavePath(spec.WorldID))
 	}
 	return room.New(room.Config{
-		WorldID:   spec.WorldID,
-		Seed:      spec.Seed,
-		AllowWarp: m.opts.AllowWarp,
-		Dev:       m.opts.Dev,
-		Defs:      m.opts.Defs,
-		Store:     store,
-		SaveEvery: m.opts.SaveEvery,
+		WorldID:    spec.WorldID,
+		Seed:       spec.Seed,
+		MaxPlayers: spec.MaxPlayers,
+		Registry:   m.identities,
+		AllowWarp:  m.opts.AllowWarp,
+		Dev:        m.opts.Dev,
+		Defs:       m.opts.Defs,
+		Store:      store,
+		SaveEvery:  m.opts.SaveEvery,
 		// Every room logs under its own world id, so a multi-world process's
 		// output stays readable.
 		Logger: log.New(m.log.Writer(), m.log.Prefix()+"["+spec.WorldID+"] ", m.log.Flags()),
 	})
 }
+
+// Identities is the process-wide session registry every room shares. For tests.
+func (m *Manager) Identities() *room.Registry { return m.identities }
 
 // Running returns the worldIds with a live room, in no particular order. For
 // logging and tests.

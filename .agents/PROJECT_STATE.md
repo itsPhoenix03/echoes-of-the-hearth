@@ -1,6 +1,6 @@
 # Project state — Echoes of the Hearth
 
-**Last updated:** 2026-09-13 — **Go migration COMPLETE** (Slices 1-4 + integration) (branch `go-migration`).
+**Last updated:** 2026-09-20 — **Go migration COMPLETE** (Slices 1-4 + integration + dev tooling + admission) (branch `go-migration`).
 Previous entry: 2026-08-30 — small-fixes pass (settings wiring, `ui.reset()`, scene-owned
 tint timers, medic-hut creature blocking, README accuracy) plus **server-authoritative
 movement validation**. Prior entry:
@@ -184,6 +184,100 @@ timers. Delete `gameserver/world.save.json` between runs.
 
 **Zero-config default still works** (`worldId: default`, seed `hearth-1`, `instanceId: local`)
 — `test-go.mjs` and the client depend on it.
+
+### Dev / tester tooling on the Go path (2026-09-14)
+
+**Nothing was ever broken.** All eight `devcmd` subcommands and the F9 kit worked on first
+contact. The reported "tester functionality is missing" was two presentation faults:
+
+1. The refusal toast still read *"start the server with: npm run server:dev"* — inherited
+   verbatim from the legacy server. On the Go path that starts the **legacy** :8081 server and
+   refers to a `HEARTH_DEV` env var that no longer exists, so following it changed nothing and
+   read as "never ported".
+2. The F10 panel opened unconditionally client-side, so buttons looked live but silently did
+   nothing, with no up-front signal.
+
+Fixes:
+- **`HEARTH_DEV_ALL=1`** on the control plane grants the ticket's `dev` claim, but **only to
+  requests whose remote address is loopback**. The check is per-request, not on the bind
+  address, because control binds `0.0.0.0` for LAN play — a bind-based check would either
+  break LAN or hand dev tools to every LAN player. Exact-match set of the three forms Node
+  reports (`127.0.0.1`, `::1`, `::ffff:127.0.0.1`), never a `127.0.0.0/8` prefix, and
+  `X-Forwarded-For`/`X-Real-IP` are never read (client-written). ORed with the
+  `HEARTH_DEV_TOKS`/`HEARTH_DEV_USERS` allowlist; neither revokes the other. Warns at boot.
+- **`npm run start:dev` sets it**, restoring one-command ergonomics. The claim is baked into
+  the ticket at join, so **you must reconnect** after enabling it.
+- **`init.dev`** (explicit boolean) lets the client distinguish "not a dev" from "server too
+  old to say". The F10 panel now shows an honest not-enabled note; F9 explains itself.
+  `devEnabled` defaults to `LEGACY` so the `?legacy=1` path keeps its old behaviour.
+- **Real coverage at last** — this is why the regression went unnoticed: Slice 4 only ever
+  manually probed dev. Every command now asserts observable state (god absorbing creature and
+  weather damage then resuming; `tp` pushing the exact clipped 5x5 chunk set; all 9 spawn
+  types in a `cre` frame; `mono` changing spawn gating; `kill` opening the movement grace
+  window), plus the refused-without-claim case for all eight.
+
+**`gameserver/test-go.mjs` now mints its own tickets** with a pinned keypair, because no single
+control-plane policy can produce both a claimed and an unclaimed ticket in one run. It therefore
+needs the control plane pinned to that pair — `node tools/dev/stack.mjs --no-client` reads the
+keys straight out of the test file and sets them, so `npm run test:go` needs no extra setup.
+
+Two behaviours confirmed as legacy design, not bugs: `godTick` heals *after* damage lands (hp
+dips a point inside a tick, restored at the top of the next), and `clearcre` is often not
+observably empty at night because the natural spawn roll runs in the same tick.
+
+Known pre-existing wart: `buildDevPanel()` builds once per page, so its click listener closes
+over the scene that built it — after quit-and-rejoin it reads the previous scene's state.
+Harmless today (the claim is per-account) and it predates this work.
+
+### Room admission: 4-player cap + one session per identity (2026-09-20)
+
+**Cap.** Each room holds **4 players** (the `PLAN.md` co-op target). Before this there was no
+cap anywhere — a room accepted unlimited players and then shed whoever's outbound buffer
+filled first, surfacing as a random disconnect rather than "the room is full". Enforced in
+`Room.admit` on the room goroutine, because only the room knows who is actually connected;
+the control plane's count is stale the moment a socket drops. A 5th connection gets
+`{t:'authfail',reason:'room-full'}` and is closed **before** any `init` or chunk. Configurable
+per world via `maxPlayers` in the same registry the world list uses, plus
+`HEARTH_WORLD_MAX_PLAYERS`; absent/invalid falls back to `room.DefaultMaxPlayers = 4`.
+
+**One live session per identity** — fixes a reproduced bug: duplicating a browser tab shares
+`localStorage`, so the copy presents the same `hearth-tok`, the control plane signs a ticket
+for the same `userId`, and the room had no reason to object. The result was two copies of one
+player in the world.
+
+Policy is **takeover, not rejection**: a second ticket for a live `userId` evicts the first,
+which receives `{t:'kick',reason:'replaced'}` before its socket closes. Rejecting the newcomer
+instead would lock a player out of their own character after a browser crash until the stale
+socket timed out — a worse failure than the duplication.
+
+Two things that must not be reordered or simplified:
+1. **Takeover resolves BEFORE the cap check.** If a full room contains your own stale session,
+   your reconnect replaces a seat rather than claiming a fifth. Reversed, a player who crashed
+   could never re-enter their own full room. Pinned by `TestTakeoverIntoAFullRoomSucceeds`.
+2. **Eviction goes through the `dropSlow` teardown** — profile snapshotted, removed from
+   `players` AND `playerOrder`, `pl` broadcast. A session left in `playerOrder` is a ghost the
+   creature AI still targets.
+
+`room.Registry` (identity -> {room, session}) is process-wide and mutex-guarded. That does
+**not** breach the no-locks contract: it stores only presence, never anything reachable from a
+`*Player` or `*Room`, and cross-room evictions are posted to the target room's `kicks` channel
+so every mutation of a room's players still happens on that room's own goroutine.
+
+Client: `kick` and `authfail` both route through `quitToMenu({error})` and the menu banner, so
+the evicted tab reads as an intentional handover rather than a crash. **The client must never
+auto-reconnect on `replaced`** — two tabs would evict each other forever.
+
+**Cold-start fix found during verification:** worlds build lazily (right for multi-world), so
+the FIRST join paid ~6s of worldgen and the wire suites timed out waiting for `init`.
+`tools/dev/stack.mjs` now sets `HEARTH_EAGER_WORLDS=1` — a dev stack hosts one world that is
+certain to be joined. A cold *production* multi-world instance still makes its first joiner
+wait; the client shows no progress during that window, which is worth addressing before anyone
+hosts one.
+
+Multi-instance is still open: two `hearthd` processes can each hold a live session for one
+`userId`. Closing it needs presence state the control plane does not have (a shared
+`userId -> {instanceId, sessionId}` store plus an evict RPC or pub/sub, with leases so a
+crashed instance expires). The room-side logic would not change — only who tells it to evict.
 
 ### Verification at this update
 

@@ -13,6 +13,7 @@
 //   node tools/dev/stack.mjs --legacy   the pre-migration Node server on :8081
 
 import { spawn } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 
@@ -21,6 +22,23 @@ const args = new Set(process.argv.slice(2));
 const dev = args.has('--dev');
 const legacy = args.has('--legacy');
 const withClient = !args.has('--no-client');
+
+// gameserver/test-go.mjs mints its own tickets (it needs both a dev-claimed and
+// an unclaimed one, which no single control-plane policy can produce), so it
+// only works against a control plane pinned to its keypair. Read the pair out of
+// the test itself rather than copying it: one source of truth, and rotating the
+// key there cannot silently desync this launcher.
+function testTicketKeys() {
+  const src = readFileSync(resolve(ROOT, 'gameserver/test-go.mjs'), 'utf8');
+  const grab = (name) => src.match(new RegExp(`const ${name} = '([^']+)'`))?.[1];
+  const HEARTH_TICKET_PUBKEY = grab('TEST_PUBKEY');
+  const HEARTH_TICKET_PRIVKEY = grab('TEST_PRIVKEY');
+  if (!HEARTH_TICKET_PUBKEY || !HEARTH_TICKET_PRIVKEY) {
+    console.error('stack: could not read TEST_PUBKEY/TEST_PRIVKEY from gameserver/test-go.mjs');
+    process.exit(1);
+  }
+  return { HEARTH_TICKET_PUBKEY, HEARTH_TICKET_PRIVKEY };
+}
 
 // ANSI colours keep three interleaved streams readable; harmless if unsupported.
 const COLOURS = { control: '\x1b[36m', game: '\x1b[32m', client: '\x1b[35m', legacy: '\x1b[33m' };
@@ -76,30 +94,37 @@ if (legacy) {
   // The pre-migration single-server path. The client needs ?legacy=1 to match.
   run('legacy', 'node', ['server/index.js'], { env: dev ? { DEV: '1', HEARTH_ALLOW_WARP: '1' } : {} });
 } else {
+  // HEARTH_DEV_ALL grants the ticket's dev claim to LOOPBACK clients only, so
+  // --dev restores the old `npm run server:dev` ergonomics (F9 kit, F10 panel)
+  // without handing world-mutating commands to LAN or remote players.
   run('control', 'node', ['control/index.js'], {
-    env: dev ? { HEARTH_DEV_TOKS: process.env.HEARTH_DEV_TOKS || '' } : {},
+    env: {
+      ...(dev ? { HEARTH_DEV_ALL: '1', HEARTH_DEV_TOKS: process.env.HEARTH_DEV_TOKS || '' } : {}),
+      // --no-client is the mode the wire suites run against; pin the keypair
+      // they sign with so `npm run test:go` needs no extra setup.
+      ...(withClient ? {} : testTicketKeys()),
+    },
   });
   // No HEARTH_DEV here: the dev panels are gated solely on the `dev` claim the
   // control plane signs into the ticket, per-account. A server-wide env flag
   // would hand world-mutating commands to every connected player.
+  // Worlds build lazily by default, which is right for a multi-world process but
+  // makes the FIRST join pay ~6s of worldgen. Build eagerly here: a dev stack
+  // hosts one world that is certain to be joined, and the wire suites time out
+  // waiting for `init` behind a cold build.
   run('game', 'go', ['run', './cmd/hearthd'], {
     cwd: resolve(ROOT, 'gameserver'),
-    env: dev ? { HEARTH_ALLOW_WARP: '1' } : {},
+    env: { HEARTH_EAGER_WORLDS: '1', ...(dev ? { HEARTH_ALLOW_WARP: '1' } : {}) },
   });
 }
 
 if (withClient) run('client', 'npx', ['vite', '--host']);
 
-// --dev alone does NOT grant the F9/F10 panels on the Go path: they need a `dev`
-// claim in the ticket, which the control plane only mints for an allowlisted tok.
-const devHint =
-  dev && !legacy && !process.env.HEARTH_DEV_TOKS
-    ? '  note: dev panels need HEARTH_DEV_TOKS=<your localStorage hearth-tok>\n'
-    : '';
-
 process.stdout.write(
   `\n  stack: ${legacy ? 'legacy :8081' : 'control :8090 + game :8082'}` +
-  `${withClient ? ' + client :5173' : ''}${dev ? '  (warp on)' : ''}\n` +
-  devHint +
+  `${withClient ? ' + client :5173' : ''}\n` +
+  (dev
+    ? `  dev: F9 kit + F10 tester panel + warp, granted to this machine only\n`
+    : '') +
   `  Ctrl-C stops everything.\n\n`,
 );
