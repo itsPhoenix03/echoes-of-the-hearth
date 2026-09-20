@@ -1,7 +1,5 @@
 import Phaser from "phaser";
 import {
-  genWorld,
-  nearestLand,
   findMedicSpawns,
   medicBlockTiles,
   SIZE,
@@ -28,6 +26,8 @@ import { initUI, showMsg, reset as resetUI, UIState } from "./ui.ts";
 import { GameAudio } from "./audio.ts";
 import { getSetting } from "./settings.ts";
 import { ASSET_MANIFEST, NODE_SPR, STRUCT_SPR } from "./assets.ts";
+import { TileStore, UNLOADED, CHUNK, type ChunkMsg } from "./tiles.ts";
+import { LEGACY, LEGACY_WS_PORT, requestJoin, identityToken } from "./net.ts";
 
 const TW = 64,
   TH = 32;
@@ -37,12 +37,29 @@ const MONO_NAMES = [
   "Frozen Spire",
   "Blighted Marsh",
 ];
+// One shared line of copy for F9 and any other "dev is off" path; the F10 panel says
+// the same thing in its own markup.
+const DEV_OFF_MSG =
+  "Dev tools are not enabled for this session. Run `npm run start:dev` to grant them on " +
+  "this machine, or allowlist a named account with HEARTH_DEV_TOKS.";
 const STORY_OFF: Record<string, number> = { wall: 25, shelter: 52 };
 const MAX_LVL: Record<string, number> = { wall: 2, shelter: 3 };
 const colorFor = (id: string) => {
   let h = 0;
   for (const c of id) h = (h * 31 + c.charCodeAt(0)) & 0xffffff;
   return Phaser.Display.Color.HSLToColor((h % 360) / 360, 0.6, 0.55).color;
+};
+
+/** A medic and its hut, exactly as the Go server sends them in `init` (§3). */
+type Medic = {
+  id: string;
+  islandId: string;
+  sprite: string;
+  x: number;
+  y: number;
+  hutSprite: string;
+  hutX: number;
+  hutY: number;
 };
 
 const CRE_TEX: Record<string, string> = {
@@ -78,6 +95,30 @@ const MEDIC_REASON_MSG: Record<string, string> = {
   "insufficient-resource": "You don't have enough to pay.",
   "unknown-medic": "There's no medic there.",
   "rate-limited": "The medic needs a moment before a new offer.",
+};
+
+// Why the world server refused the join, in player-facing words. Same house style as
+// MEDIC_REASON_MSG above: machine reason in, one calm sentence out. Keys are the
+// `reason` values `authfail` can carry (gameserver/auth/ticket.go, hosting/manager.go
+// and the room-capacity check in net/server.go).
+const AUTHFAIL_REASON_MSG: Record<string, string> = {
+  "room-full": "This world is full — only 4 Keepers can be in it at once. Try again in a few minutes.",
+  "wrong-instance": "That invitation belongs to a different world server. Pick the world again from the menu.",
+  "unknown-world": "That world is no longer hosted here. Pick another world from the menu.",
+  "world-unavailable": "That world could not be opened right now. Give it a moment and try again.",
+  expired: "Your entry pass timed out before you arrived. Join again to get a fresh one.",
+  "bad-signature": "Your entry pass could not be verified. Join again to get a fresh one.",
+  "bad-json": "Your entry pass could not be read. Join again to get a fresh one.",
+  malformed: "The world server could not understand the join request. Join again.",
+};
+
+// Why the world server ended a session that was already running. `replaced` is the
+// single-session rule: the *evicted* tab lands here, so the copy has to read as an
+// intentional handover rather than as something the player did wrong.
+const KICK_REASON_MSG: Record<string, string> = {
+  replaced:
+    "Your Keeper is now being played in another window or tab. Only one session per player is allowed, " +
+    "so this window has handed over — nothing was lost, and you can take over again by joining from here.",
 };
 const CHW = 1024,
   CHH = 512;
@@ -144,16 +185,25 @@ class Hearth extends Phaser.Scene {
   // disconnect was intentional and must NOT raise the 60s "server down" toast
   quitting = false;
   id = "";
-  world!: {
-    tiles: Uint8Array;
-    elev: Uint8Array;
-    veins: Uint8Array;
-    nodes: Map<number, number>;
-    bergs: Set<number>;
-    waterTemp: Uint8Array;
-    tileVis: Uint8Array;
-    decor: Map<number, string>;
-  };
+  /**
+   * Terrain. Streamed from the Go server one 64x64 chunk at a time (§4); the client no
+   * longer generates it. Field names match the old genWorld() result so every read site
+   * below is unchanged.
+   */
+  world: TileStore = new TileStore();
+  chunkSize = CHUNK;
+  /** A chunk arrived since the last frame — the cached terrain textures must be repainted. */
+  terrainDirty = false;
+  /** Legacy (?legacy=1) only: genWorld, loaded dynamically so the Go path never pulls it in. */
+  legacyGen: ((seed: string) => any) | null = null;
+  /** Notes whose anchor tile has not streamed in yet; placed as chunks arrive. */
+  pendingNotes: [number, number, string][] = [];
+  brokenBergs = new Set<number>();
+  lastLoadMsg = 0;
+  /** Nodes the server has already harvested — never spawn a sprite for these. */
+  removedNodes = new Set<number>();
+  /** Landmark sprites whose screen Y depends on terrain elevation that may stream in later. */
+  liftSpr: Phaser.GameObjects.Image[] = [];
   chunks = new Map<string, Phaser.GameObjects.RenderTexture>();
   mutTiles = new Map<number, string>(); // tile overrides: mud, blight infection
   weather: string | null = null;
@@ -223,8 +273,9 @@ class Hearth extends Phaser.Scene {
   faceX = 1;
   faceY = 0;
   zToggleAt = 0;
-  medics: { id: string; islandId: string; sprite: string; x: number; y: number;
-            hutSprite: string; hutX: number; hutY: number }[] = [];
+  medics: Medic[] = [];
+  /** Medics whose anchor terrain has not streamed in yet; placed as their chunk arrives. */
+  pendingMedics: Medic[] = [];
   medicSpr = new Map<string, Phaser.GameObjects.Sprite>();
   medicHutSpr = new Map<string, Phaser.GameObjects.Image>();
   medicBlock = new Set<number>();
@@ -267,6 +318,12 @@ class Hearth extends Phaser.Scene {
   lastGather = 0;
   flickerT = 0; // shared clock for campfire/lantern/torch flicker (per-frame, no tweens-per-object)
   ready = false;
+  // Whether this session may use the dev tester (F9/F10). On the Go path the control
+  // plane signs a `dev` claim into the ticket and the server mirrors it as `init.dev`;
+  // a missing field means "no claim". The legacy :8081 server sends no such field and
+  // gates dev with its own DEV env var, so under ?legacy=1 we stay optimistic and keep
+  // the pre-migration behaviour of always offering the panel.
+  devEnabled = LEGACY;
   meLabel: Phaser.GameObjects.Text | null = null;
   myName = "Keeper";
   // menu Settings → "Show player names"; read once per scene, so a toggle lands on the next join
@@ -312,32 +369,16 @@ class Hearth extends Phaser.Scene {
     this.makeWeatherFx();
     this.makeGlowTextures();
     this.registerBirdAnims();
-    const proto = location.protocol === "https:" ? "wss" : "ws";
-    this.ws = new WebSocket(`${proto}://${location.hostname}:8081`);
-    this.ws.onopen = () => {
-      let tok = localStorage.getItem("hearth-tok");
-      if (!tok) {
-        tok = Math.random().toString(36).slice(2) + Date.now().toString(36);
-        localStorage.setItem("hearth-tok", tok);
-      }
-      // Task 5: player display name
-      const urlName = new URLSearchParams(location.search).get("name");
-      if (urlName) {
-        this.myName = urlName;
-        localStorage.setItem("hearth-name", urlName);
-      } else {
-        this.myName = localStorage.getItem("hearth-name") || "Keeper";
-      }
-      this.send({ t: "hello", tok, name: this.myName });
-    };
-    this.ws.onmessage = (e) => {
-      if (this.quitting) return;
-      this.onMsg(JSON.parse(e.data));
-    };
-    this.ws.onclose = () => {
-      if (this.quitting) return; // intentional quit — stay silent
-      showMsg("Disconnected. Is the server running? (npm run server)", 60000);
-    };
+    // Task 5: player display name
+    const urlName = new URLSearchParams(location.search).get("name");
+    if (urlName) {
+      this.myName = urlName;
+      localStorage.setItem("hearth-name", urlName);
+    } else {
+      this.myName = localStorage.getItem("hearth-name") || "Keeper";
+    }
+    if (LEGACY) this.connectLegacy();
+    else this.connectViaControlPlane();
 
     this.keys = this.input.keyboard!.addKeys(
       "W,A,S,D,UP,LEFT,DOWN,RIGHT,E,SPACE",
@@ -365,7 +406,10 @@ class Hearth extends Phaser.Scene {
       if (n >= 1 && n <= 5) this.setEquip(HOTBAR[n - 1]);
       if (e.key === "m" || e.key === "M")
         showMsg(this.audio.toggleMute() ? "🔇 Muted" : "🔊 Sound on", 1000);
-      if (e.key === "F9") this.send({ t: "dev" });
+      if (e.key === "F9") {
+        if (this.devEnabled) this.send({ t: "dev" });
+        else showMsg(DEV_OFF_MSG, 5000);
+      }
       if (e.key === "F10") {
         e.preventDefault();
         const d = document.getElementById("devPanel")!;
@@ -373,6 +417,7 @@ class Hearth extends Phaser.Scene {
       }
     });
     this.buildDevPanel();
+    this.applyDevAccess(); // honest from the start; `init` re-applies with the real claim
     // re-clamp the view whenever the canvas changes size (window resize OR browser zoom)
     this.scale.on("resize", () => this.applyViewClamp(0));
     this.input.on("pointerdown", () => this.audio.start());
@@ -456,6 +501,14 @@ class Hearth extends Phaser.Scene {
       "border:1px solid #b96;border-radius:8px;padding:10px 12px;color:#fff;font:12px monospace;max-width:220px;";
     d.innerHTML =
       `<b style="color:#ffb96a">🛠 DEV TESTER</b> <span style="color:#889">(F10)</span><br>` +
+      // Shown instead of the controls when this session has no dev claim, so the panel
+      // never presents live-looking buttons the server will silently refuse.
+      `<div id="devNote" style="display:none;color:#9ab;margin:6px 0 2px;line-height:1.5">` +
+      `<div style="color:#ffb96a;margin-bottom:5px">Not enabled for this session.</div>` +
+      `Run <b style="color:#cfe">npm run start:dev</b> to grant it on this machine, or ` +
+      `allowlist a named account with <b style="color:#cfe">HEARTH_DEV_TOKS</b>.` +
+      `</div>` +
+      `<div id="devBody">` +
       `<div style="color:#9ab;margin:4px 0">Fast travel</div>` +
       SPOTS.map(([n, x, y]) => `<button data-tp="${x},${y}">${n}</button>`).join("") +
       `<div style="color:#9ab;margin:6px 0 4px">Activate Monolith</div>` +
@@ -494,6 +547,7 @@ class Hearth extends Phaser.Scene {
       `<button data-cmd="god">🛡 God toggle</button>` +
       `<button data-cmd="kill">💀 Kill</button>` +
       `<button data-cmd="kit">🎁 Full kit</button></div>` +
+      `</div>` +
       `<style>#devPanel button{background:#2a3a4a;color:#fff;border:1px solid #57a;border-radius:4px;` +
       `margin:2px;padding:3px 7px;cursor:pointer;font:12px monospace}#devPanel button:hover{background:#3a5a4a}` +
       `#devSpawnSel{width:100%;background:#1a222c;color:#fff;border:1px solid #57a;border-radius:4px;` +
@@ -501,7 +555,7 @@ class Hearth extends Phaser.Scene {
     document.body.appendChild(d);
     d.addEventListener("click", (e) => {
       const b = (e.target as HTMLElement).closest("button") as HTMLButtonElement | null;
-      if (!b) return;
+      if (!b || !this.devEnabled) return;
       if (b.dataset.tp) {
         const [x, y] = b.dataset.tp.split(",").map(Number);
         this.send({ t: "devcmd", cmd: "tp", x, y });
@@ -519,8 +573,73 @@ class Hearth extends Phaser.Scene {
     });
   }
 
+  /** Swap the panel between its live controls and the "not enabled" note. */
+  applyDevAccess() {
+    const body = document.getElementById("devBody");
+    const note = document.getElementById("devNote");
+    if (!body || !note) return;
+    body.style.display = this.devEnabled ? "block" : "none";
+    note.style.display = this.devEnabled ? "none" : "block";
+  }
+
+  /**
+   * Slice 1 join path: ask the Node control plane for a signed ticket, then open the
+   * WebSocket to the Go game server it names and present the ticket as the first frame
+   * (docs/10_GO_WIRE_PROTOCOL.md §1). Identity comes from the ticket, never from us.
+   */
+  private connectViaControlPlane() {
+    requestJoin(this.myName)
+      .then((j) => {
+        if (this.quitting || !this.scene.isActive()) return;
+        if (j.name) this.myName = j.name;
+        this.openSocket(j.ws, () => this.send({ t: "auth", ticket: j.ticket }));
+      })
+      .catch((err: Error) => {
+        if (this.quitting) return;
+        quitToMenu({ confirm: false, error: err.message });
+      });
+  }
+
+  /**
+   * Legacy fallback (`?legacy=1`): the pre-migration all-in-one Node server on :8081. It
+   * sends no chunks, so the client generates the world itself — the ONLY place genWorld is
+   * still reachable from the client, and it is behind this flag.
+   */
+  private connectLegacy() {
+    import("../shared/world.js")
+      .then((w) => {
+        if (this.quitting || !this.scene.isActive()) return;
+        this.legacyGen = w.genWorld;
+        const proto = location.protocol === "https:" ? "wss" : "ws";
+        this.openSocket(
+          `${proto}://${location.hostname}:${LEGACY_WS_PORT}`,
+          () =>
+            this.send({ t: "hello", tok: identityToken(), name: this.myName }),
+        );
+      })
+      .catch(() => quitToMenu({ confirm: false, error: "Failed to load the local world generator." }));
+  }
+
+  private openSocket(url: string, onOpen: () => void) {
+    this.ws = new WebSocket(url);
+    this.ws.onopen = onOpen;
+    this.ws.onmessage = (e) => {
+      if (this.quitting) return;
+      this.onMsg(JSON.parse(e.data));
+    };
+    this.ws.onclose = () => {
+      if (this.quitting) return; // intentional quit — stay silent
+      showMsg(
+        LEGACY
+          ? "Disconnected. Is the server running? (npm run server)"
+          : "Disconnected from the world server. (cd gameserver && go run ./cmd/hearthd)",
+        60000,
+      );
+    };
+  }
+
   send(m: any) {
-    if (this.ws.readyState === 1) this.ws.send(JSON.stringify(m));
+    if (this.ws?.readyState === 1) this.ws.send(JSON.stringify(m));
   }
 
   // Preferred Validated Action Protocol: monotonic id so server outcomes (act/node/dig/chit/actReject)
@@ -698,6 +817,14 @@ class Hearth extends Phaser.Scene {
 
   // --- chunk-streamed terrain (whole map is too large for one texture) ---
   ensureChunks() {
+    // A chunk landed since the last frame: the cached terrain textures were painted with
+    // holes in them, so throw them away and let the loop below repaint what is on screen.
+    if (this.terrainDirty) {
+      this.terrainDirty = false;
+      for (const rt of this.chunks.values()) rt.destroy();
+      this.chunks.clear();
+      this.reliftLandmarks();
+    }
     const cam = this.cameras.main.worldView;
     const x0 = Math.floor((cam.x - 64) / CHW),
       x1 = Math.floor((cam.right + 64) / CHW);
@@ -720,9 +847,12 @@ class Hearth extends Phaser.Scene {
       }
   }
 
-  private tileKey(i: number) {
+  private tileKey(i: number): string | null {
     if (this.mutTiles.has(i)) return this.mutTiles.get(i)!;
     const t = this.world.tiles[i];
+    // Not streamed yet — draw nothing. Painting it as water would be a lie: water is
+    // walkable, and the void is not.
+    if (t === UNLOADED) return null;
     if (t === T.WATER) {
       const wt = this.world.waterTemp?.[i] ?? 0;
       if (wt === 1) return "water_freezing";
@@ -781,6 +911,7 @@ class Hearth extends Phaser.Scene {
         }
         const i = y * SIZE + x;
         const key = this.tileKey(i);
+        if (!key) continue; // chunk not streamed in yet: leave the void empty
         const e = Math.max(1, this.world.elev[i]);
         for (let l = 0; l < e; l++)
           rt.batchDraw(key, p.x - TW / 2 - rx, p.y - l * 10 - ry); // stacked skirts form cliffs
@@ -812,6 +943,7 @@ class Hearth extends Phaser.Scene {
           continue;
         const ii = ty2 * SIZE + tx2;
         const kk = this.tileKey(ii);
+        if (!kk) continue;
         const e = Math.max(1, this.world.elev[ii]);
         for (let l = 0; l < e; l++) rt.batchDraw(kk, lx, ly - l * 10);
       }
@@ -1130,14 +1262,24 @@ class Hearth extends Phaser.Scene {
       this.won = m.won;
       this.inv = m.inv;
       this.weather = m.weather;
+      // `dev` is absent on the legacy server, where LEGACY already keeps us optimistic.
+      if (!LEGACY) this.devEnabled = m.dev === true;
+      this.applyDevAccess();
       // Task 4: wornGear from init
       this.wornGear = m.wornGear ?? null;
       // fix: init now carries hp/hunger/thirst — an injured reconnect must not show a full HUD
       if (m.hp !== undefined) this.hp = m.hp;
       if (m.hunger !== undefined) this.hunger = m.hunger;
       if (m.thirst !== undefined) this.thirst = m.thirst;
+      // init carries no terrain (§3) — the chunk stream fills it in.
+      if (m.chunk) this.chunkSize = m.chunk;
+      if (m.tools) this.tools = new Set(m.tools);
+      if (m.gear) this.gear = new Set(m.gear);
+      // §3: the Go server sends the medic roster in `init`; buildWorld() keeps what we
+      // set here (the legacy path derives the same spawns locally instead).
+      this.medics = Array.isArray(m.medics) ? m.medics : [];
       this.buildWorld(m.seed, m.removed, m.mud, m.infected, m.brokenBergs);
-      for (const [i, kind, hp, dir, lvl] of m.structures)
+      for (const [i, kind, hp, dir, lvl] of m.structures || [])
         for (let l = 1; l <= (lvl || 1); l++)
           this.addStruct(i, kind, hp, dir, l);
       for (const i of m.digs || []) this.addDug(i);
@@ -1145,7 +1287,12 @@ class Hearth extends Phaser.Scene {
       for (const [i, kind, fz] of m.furn || []) this.addFurn(i, kind, fz ?? 2);
       for (const [i, crop, stage] of m.farms || [])
         this.addCropOverlay(i, crop, stage);
-      for (const [pid, x, y, eq, pz, pname, pb] of m.players) {
+      // §3: `players` is now an array of {id,x,y,z,name,b,eq} objects. The legacy
+      // array-of-arrays form is still accepted so ?legacy=1 keeps working.
+      for (const e of m.players || []) {
+        const [pid, x, y, eq, pz, pname, pb] = Array.isArray(e)
+          ? e
+          : [e.id, e.x, e.y, e.eq, e.z, e.name, e.b];
         this.addOther(pid, x, y, pname);
         const o = this.others.get(pid);
         if (o) {
@@ -1161,6 +1308,32 @@ class Hearth extends Phaser.Scene {
         "You are a Keeper. Follow the objective tracker (top right). Press C to craft.",
         6000,
       );
+    } else if (m.t === "chunk") {
+      this.applyChunkMsg(m as ChunkMsg);
+    } else if (m.t === "time") {
+      // §4.5: Slice 1 sends no 'cre', so the clock is its own per-tick broadcast.
+      this.wtime = m.time;
+      if (m.day) this.day = m.day;
+    } else if (m.t === "authfail") {
+      // The socket closes right after this frame, so quitToMenu() (which nulls the
+      // handlers and sets `quitting`) must run here — otherwise onclose would stack a
+      // "Disconnected" toast on top of the menu banner.
+      quitToMenu({
+        confirm: false,
+        error:
+          AUTHFAIL_REASON_MSG[m.reason] ||
+          `The world server rejected your login (${m.reason || "invalid ticket"}). Try joining again.`,
+      });
+    } else if (m.t === "kick") {
+      // One live session per identity: this socket is the OLD one and the server is about
+      // to close it. Same route as authfail — full teardown (Phaser destroy, socket close,
+      // resetUI) via quitToMenu, then the menu's error banner — so re-joining is clean.
+      quitToMenu({
+        confirm: false,
+        error:
+          KICK_REASON_MSG[m.reason] ||
+          "The world server ended this session. You can join again from here.",
+      });
     } else if (m.t === "pj") {
       this.addOther(m.id, m.x, m.y, m.name);
       showMsg("A fellow Keeper has joined.");
@@ -1246,6 +1419,8 @@ class Hearth extends Phaser.Scene {
       if (m.by === this.id && m.seq === this.pendingActSeq && m.hp !== -1)
         this.audio.chop();
       const s = this.nodeSpr.get(m.i);
+      if (m.hp === -1) this.removedNodes.delete(m.i);
+      else if (m.hp === 0) this.removedNodes.add(m.i);
       if (m.hp === 0 && s) {
         // depleted: fall + fade
         this.nodeSpr.delete(m.i);
@@ -1647,7 +1822,143 @@ class Hearth extends Phaser.Scene {
     }
   }
 
+  // --- streamed chunk application (§4) ---------------------------------------------
+
+  /** Track a landmark sprite so it can be re-lifted when its tile's elevation arrives. */
+  private trackLift(spr: Phaser.GameObjects.Image, x: number, y: number) {
+    spr.setData("lx", x).setData("ly", y).setData("oy", spr.y - this.isoE(x, y).y);
+    this.liftSpr.push(spr);
+    return spr;
+  }
+
+  private reliftLandmarks() {
+    for (const s of this.liftSpr)
+      s.y = this.isoE(s.getData("lx"), s.getData("ly")).y + s.getData("oy");
+  }
+
+  addBerg(i: number) {
+    if (this.bergSpr.has(i) || this.brokenBergs.has(i)) return;
+    const p = this.iso(i % SIZE, (i / SIZE) | 0);
+    this.bergSpr.set(
+      i,
+      this.add
+        .image(p.x, p.y + 16, "iceberg")
+        .setOrigin(0.5, 0.85)
+        .setDepth(p.y + 16),
+    );
+  }
+
+  addDecor(i: number, key: string) {
+    if (this.decorSpr.has(i)) return;
+    const dx2 = i % SIZE,
+      dy2 = (i / SIZE) | 0;
+    const dp = this.isoE(dx2, dy2);
+    const ds = this.add
+      .image(dp.x, dp.y, key)
+      .setOrigin(0.5, 0.92)
+      .setDepth(this.iso(dx2, dy2).y + 18);
+    this.decorSpr.set(i, ds);
+  }
+
+  /**
+   * Nearest non-water tile to (x, y) that has actually streamed in. Unloaded tiles are
+   * skipped rather than guessed at — the note is simply deferred until its chunk lands.
+   */
+  private nearestLoadedLand(x: number, y: number): [number, number] | null {
+    for (let r = 0; r < 40; r++)
+      for (let dy = -r; dy <= r; dy++)
+        for (let dx = -r; dx <= r; dx++) {
+          if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+          const nx = Math.round(x + dx),
+            ny = Math.round(y + dy);
+          if (nx < 0 || ny < 0 || nx >= SIZE || ny >= SIZE) continue;
+          const t = this.world.tiles[ny * SIZE + nx];
+          if (t !== UNLOADED && t !== T.WATER) return [nx, ny];
+        }
+    return null;
+  }
+
+  /** Drop the clue notes whose anchor terrain has arrived; the rest wait for their chunk. */
+  private placePendingNotes() {
+    if (!this.pendingNotes.length) return;
+    const still: [number, number, string][] = [];
+    for (const def of this.pendingNotes) {
+      const [nx, ny, text] = def;
+      if (!this.world.loadedAt(nx, ny)) {
+        still.push(def);
+        continue;
+      }
+      const land = this.nearestLoadedLand(nx, ny);
+      if (!land) {
+        still.push(def);
+        continue;
+      }
+      const [lx, ly] = land;
+      const p = this.iso(lx, ly);
+      this.add
+        .image(p.x, p.y + 14, "note")
+        .setOrigin(0.5, 0.9)
+        .setDepth(p.y + 14);
+      this.notes.push({ x: lx, y: ly, text });
+    }
+    this.pendingNotes = still;
+  }
+
+  /** Place the medics whose hut + stand tiles have streamed in; the rest wait for theirs. */
+  private placePendingMedics() {
+    if (!this.pendingMedics.length) return;
+    const still: Medic[] = [];
+    for (const md of this.pendingMedics) {
+      if (!this.world.loadedAt(md.x, md.y) || !this.world.loadedAt(md.hutX, md.hutY)) {
+        still.push(md);
+        continue;
+      }
+      if (this.medicSpr.has(md.id)) continue;
+      // decorative hut first — the medic stands in front of it, so it must sort behind
+      const hp = this.isoE(md.hutX, md.hutY);
+      this.medicHutSpr.set(
+        md.id,
+        this.add
+          .image(hp.x, hp.y + 16, md.hutSprite)
+          .setOrigin(0.5, 0.92)
+          .setDepth(this.iso(md.hutX, md.hutY).y + 18)
+          .setVisible(this.z === 0),
+      );
+      const mdp = this.isoE(md.x, md.y);
+      const s = this.add
+        .sprite(mdp.x, mdp.y + 16, md.sprite)
+        .setOrigin(0.5, 0.92)
+        .setDepth(this.iso(md.x, md.y).y + 18)
+        .setVisible(this.z === 0);
+      this.medicSpr.set(md.id, s);
+    }
+    this.pendingMedics = still;
+  }
+
+  /**
+   * Apply one `chunk` frame: terrain layers into the store, then the sprites for
+   * everything the chunk introduced. A corrupt chunk is dropped whole by the store (§4.3),
+   * so nothing here can ever paint half a chunk.
+   */
+  applyChunkMsg(m: ChunkMsg) {
+    const d = this.world.applyChunk(m);
+    if (!d) return;
+    for (const i of d.nodes) this.spawnNode(i);
+    for (const [i, key] of d.decor) this.addDecor(i, key);
+    for (const i of d.bergs) this.addBerg(i);
+    for (const i of d.digs) this.addDug(i);
+    for (const st of d.structs)
+      for (let l = 1; l <= (st.lvl || 1); l++)
+        this.addStruct(st.i, st.kind, st.hp, st.dir, l);
+    // Repainting is coalesced to one pass per frame: a join delivers 25 chunks at once.
+    this.terrainDirty = true;
+    this.placePendingNotes();
+    this.placePendingMedics();
+  }
+
   spawnNode(i: number) {
+    if (this.removedNodes.has(i) || this.nodeSpr.has(i)) return;
+    if (!this.world.nodes.has(i)) return;
     const kind = NODE_KEYS[this.world.nodes.get(i)!];
     const p = this.isoE(i % SIZE, (i / SIZE) | 0);
     let tex: string;
@@ -1785,37 +2096,24 @@ class Hearth extends Phaser.Scene {
     infectedArr: number[],
     brokenBergArr: number[],
   ) {
-    this.world = genWorld(seed);
-    const broken = new Set(brokenBergArr || []);
-    for (const i of this.world.bergs) {
-      if (broken.has(i)) continue;
-      const p = this.iso(i % SIZE, (i / SIZE) | 0);
-      this.bergSpr.set(
-        i,
-        this.add
-          .image(p.x, p.y + 16, "iceberg")
-          .setOrigin(0.5, 0.85)
-          .setDepth(p.y + 16),
-      );
-    }
-    for (const [nx, ny, text] of NOTE_DEFS) {
-      const [lx, ly] = nearestLand(this.world, nx, ny);
-      const p = this.iso(lx, ly);
-      this.add
-        .image(p.x, p.y + 14, "note")
-        .setOrigin(0.5, 0.9)
-        .setDepth(p.y + 14);
-      this.notes.push({ x: lx, y: ly, text });
-    }
-    const gone = new Set(removed);
-    this.mud = new Set(mudArr);
-    for (const i of mudArr) this.mutTiles.set(i, "mud");
+    this.brokenBergs = new Set(brokenBergArr || []);
+    this.removedNodes = new Set(removed || []);
+    this.mud = new Set(mudArr || []);
+    for (const i of mudArr || []) this.mutTiles.set(i, "mud");
     for (const i of infectedArr || []) this.mutTiles.set(i, "blight");
+    // Terrain streams in as chunks (§4). In legacy mode the old server sends none, so the
+    // world is generated locally once and handed to the store wholesale.
+    if (LEGACY && this.legacyGen) {
+      this.world.loadFull(this.legacyGen(seed));
+      for (const i of this.world.bergs) this.addBerg(i);
+      for (const i of this.world.nodes.keys()) this.spawnNode(i);
+      for (const [di, dkey] of this.world.decor) this.addDecor(di, dkey);
+    }
+    this.pendingNotes = NOTE_DEFS.slice();
+    this.placePendingNotes();
     const W = SIZE * TW,
       H = SIZE * TH + 80;
 
-    for (const i of this.world.nodes.keys())
-      if (!gone.has(i)) this.spawnNode(i);
     MONOLITHS.forEach(([mx, my], idx) => {
       const p = this.isoE(mx, my);
       const s = this.add
@@ -1823,6 +2121,7 @@ class Hearth extends Phaser.Scene {
         .setOrigin(0.5, 0.95)
         .setDepth(p.y + 16);
       if (this.mono[idx]) s.setTint(0x6dd6c8);
+      this.trackLift(s, mx, my);
       this.monoSpr.push(s);
     });
 
@@ -1834,6 +2133,7 @@ class Hearth extends Phaser.Scene {
           .image(mp2.x, mp2.y, m.key)
           .setOrigin(0.5, 0.9)
           .setDepth(this.iso(m.x, m.y).y + 40);
+        this.trackLift(ms, m.x, m.y);
         this.mountainSpr.push(ms);
       }
     }
@@ -1854,46 +2154,20 @@ class Hearth extends Phaser.Scene {
               .image(tp.x, tp.y + 16, tpc.key)
               .setOrigin(0.5, 0.9)
               .setDepth(this.iso(tx2, ty2).y + 20);
+        this.trackLift(ts, tx2, ty2);
         this.templeSpr.push(ts);
       }
     }
 
-    // TASK 2c: decor sprites
-    if (this.world.decor) {
-      for (const [di, dkey] of this.world.decor) {
-        const dx2 = di % SIZE,
-          dy2 = (di / SIZE) | 0;
-        const dp = this.isoE(dx2, dy2);
-        const ds = this.add
-          .image(dp.x, dp.y, dkey)
-          .setOrigin(0.5, 0.92)
-          .setDepth(this.iso(dx2, dy2).y + 18);
-        this.decorSpr.set(di, ds);
-      }
-    }
-
-    // Medics — deterministic from the seed (not sent over the network), surface-only
-    this.medics = findMedicSpawns(this.world);
+    // Medics are derived from the WHOLE generated world, which the streaming client no
+    // longer has: the Go server sends the roster in `init` (assigned before this call),
+    // while the legacy path generated the world itself and derives the spawns locally.
+    if (LEGACY && this.legacyGen) this.medics = findMedicSpawns(this.world);
     this.medicBlock = medicBlockTiles(this.medics);
-    for (const md of this.medics) {
-      // decorative hut first — the medic stands in front of it, so it must sort behind
-      const hp = this.isoE(md.hutX, md.hutY);
-      this.medicHutSpr.set(
-        md.id,
-        this.add
-          .image(hp.x, hp.y + 16, md.hutSprite)
-          .setOrigin(0.5, 0.92)
-          .setDepth(this.iso(md.hutX, md.hutY).y + 18)
-          .setVisible(this.z === 0),
-      );
-      const mdp = this.isoE(md.x, md.y);
-      const s = this.add
-        .sprite(mdp.x, mdp.y + 16, md.sprite)
-        .setOrigin(0.5, 0.92)
-        .setDepth(this.iso(md.x, md.y).y + 18)
-        .setVisible(this.z === 0);
-      this.medicSpr.set(md.id, s);
-    }
+    // Their sprites need terrain under them and `init` lands before any chunk does, so
+    // they are placed lazily as their anchor chunk arrives — same as pendingNotes above.
+    this.pendingMedics = this.medics.slice();
+    this.placePendingMedics();
 
     const mp = this.isoE(this.px, this.py);
     this.me = new Rig(this, mp.x, mp.y, colorFor(this.myName)); // same hash others use for us
@@ -1953,6 +2227,9 @@ class Hearth extends Phaser.Scene {
         this.shelterLvl + 2
       );
     }
+    // Terrain that has not streamed in is impassable — the player must never walk off the
+    // edge of the loaded world into a hole (§4, unloaded state).
+    if (!this.world.loadedAt(x, y)) return true;
     // TASK 4b: water is never blocked at z===0 — swimming is always possible
     if (this.tileAt(x, y) === T.WATER) return false;
     const climb = this.jumpT >= 0 ? 2 : 1; // jumping clears higher ledges
@@ -2373,6 +2650,16 @@ class Hearth extends Phaser.Scene {
     if (t < this.knockedUntil) {
       dx = 0;
       dy = 0;
+    }
+    // Terrain under our feet has not arrived yet — freeze rather than let the player walk
+    // through a hole in the world (§4, unloaded state).
+    if (!this.world.loadedAt(this.px, this.py)) {
+      dx = 0;
+      dy = 0;
+      if (t - this.lastLoadMsg > 2000) {
+        this.lastLoadMsg = t;
+        showMsg("Streaming the world in…", 2000);
+      }
     }
     // decrement slow counter each frame (client-side, not per-tick)
     if (this.slowUntil > 0) this.slowUntil--;
@@ -2864,7 +3151,7 @@ function getUiApi(): ReturnType<typeof initUI> {
  * Teardown order matters: quiesce the socket before the game dies (so no message can
  * reach a half-destroyed scene), then the game, then the DOM.
  */
-export function quitToMenu(opts: { confirm?: boolean } = {}) {
+export function quitToMenu(opts: { confirm?: boolean; error?: string } = {}) {
   if (!gameStarted) return;
   if (opts.confirm !== false && !confirm("Leave the world and return to the main menu?"))
     return;
@@ -2943,7 +3230,9 @@ export function quitToMenu(opts: { confirm?: boolean } = {}) {
 
   // 9. Allow startGame() to boot a fresh world, then let the menu take over.
   gameStarted = false;
-  window.dispatchEvent(new Event("hearth:quit"));
+  window.dispatchEvent(
+    new CustomEvent("hearth:quit", { detail: { error: opts.error } }),
+  );
 }
 
 // Delegated so it survives the menu re-rendering the #btns row, and so it can only ever
@@ -2963,7 +3252,8 @@ export function startGame() {
     type: Phaser.AUTO,
     width: window.innerWidth,
     height: window.innerHeight,
-    backgroundColor: "#3a7bd5",
+    // Void, not ocean: anything the terrain stream has not delivered reads as empty space.
+    backgroundColor: "#0a0e14",
     scene: Hearth,
     scale: { mode: Phaser.Scale.RESIZE },
   });

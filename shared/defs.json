@@ -1,10 +1,4 @@
-// GENERATED FILE — DO NOT EDIT.
-// Source of truth: shared/defs.json  (the Go game server unmarshals the same file).
-// Regenerate: node tools/defs/gen-defs.mjs      Verify: node tools/defs/gen-defs.mjs --check
-//
-// Shared game definitions — recipes, nodes, structures. Used by client UI and server validation.
-
-const D = {
+{
   "MAX_HP": 10,
   "MEDICINE_HEAL": 3,
   "NODE_KEYS": [
@@ -582,37 +576,4 @@ const D = {
       }
     ]
   }
-};
-
-export const MAX_HP = D.MAX_HP;
-export const MEDICINE_HEAL = D.MEDICINE_HEAL;
-
-export const NODE_KEYS = D.NODE_KEYS;
-export const NODE = D.NODE;
-// [hp, tool required (null=hand), yield resource, yield amount, respawn seconds]
-export const NODE_DEF = D.NODE_DEF;
-
-export const RECIPES = D.RECIPES;
-
-export const NAMES = D.NAMES;
-// placeable only inside shelters (torch also in mines)
-export const FURNITURE = new Set(D.FURNITURE);
-
-export const STRUCT_HP = D.STRUCT_HP;
-// erode in Blight Storms w/o campfire
-export const WOODEN = new Set(D.WOODEN);
-export const RESOURCES = D.RESOURCES;
-export const PLACEABLES = D.PLACEABLES;
-// decor kinds that do NOT block movement (fence is blocking, farmplot is walkable)
-export const DECOR_NONBLOCKING = new Set(D.DECOR_NONBLOCKING);
-export const CROPS = D.CROPS;
-
-export const emptyInv = () => Object.fromEntries(D.INV_KEYS.map((k) => [k, 0]));
-
-// island id -> weighted resource pool a medic on that island may request in a bargain.
-// Only 'woods' and 'spire' host a medic in this release; 'dunes'/'marsh' are kept for a later expansion.
-export const MEDIC_TRADE_POOLS = D.MEDIC_TRADE_POOLS;
-
-// Not expressible as JSON — these are algorithms, and they stay here by design.
-export const canAfford = (inv, cost) => Object.entries(cost).every(([k, v]) => inv[k] >= v);
-export const pay = (inv, cost) => Object.entries(cost).forEach(([k, v]) => inv[k] -= v);
+}
