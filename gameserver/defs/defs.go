@@ -49,6 +49,7 @@ type Recipe struct {
 	Zone       string         `json:"zone"` // "in", "out", "both" or ""
 	Rot        bool           `json:"rot"`
 	Flat       bool           `json:"flat"`
+	Material   bool           `json:"material"` // crafted intermediate: spent on modules, never placed
 	EngineOnly bool           `json:"engineOnly"`
 }
 
@@ -91,6 +92,7 @@ type Defs struct {
 	Placeables      []string               `json:"PLACEABLES"`
 	DecorNonBlockL  []string               `json:"DECOR_NONBLOCKING"`
 	Crops           map[string]Crop        `json:"CROPS"`
+	Materials       []string               `json:"MATERIALS"`
 	InvKeys         []string               `json:"INV_KEYS"`
 	MedicTradePools map[string][]TradeRule `json:"MEDIC_TRADE_POOLS"`
 
@@ -100,7 +102,8 @@ type Defs struct {
 	WoodenSet    map[string]bool `json:"-"`
 	DecorNonBlk  map[string]bool `json:"-"`
 	// InvKeySet answers "is this a real inventory slot" without a linear scan.
-	InvKeySet map[string]bool `json:"-"`
+	InvKeySet   map[string]bool `json:"-"`
+	MaterialSet map[string]bool `json:"-"`
 }
 
 func (d *Defs) finish() error {
@@ -118,6 +121,7 @@ func (d *Defs) finish() error {
 	d.WoodenSet = set(d.Wooden)
 	d.DecorNonBlk = set(d.DecorNonBlockL)
 	d.InvKeySet = set(d.InvKeys)
+	d.MaterialSet = set(d.Materials)
 	return nil
 }
 

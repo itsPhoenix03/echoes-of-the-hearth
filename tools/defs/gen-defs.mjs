@@ -50,6 +50,9 @@ export const PLACEABLES = D.PLACEABLES;
 // decor kinds that do NOT block movement (fence is blocking, farmplot is walkable)
 export const DECOR_NONBLOCKING = new Set(D.DECOR_NONBLOCKING);
 export const CROPS = D.CROPS;
+// crafted intermediates (planks, blocks, panes...) — spent on building modules,
+// never placed directly. Recipes carry material:true; this is the display order.
+export const MATERIALS = D.MATERIALS;
 
 export const emptyInv = () => Object.fromEntries(D.INV_KEYS.map((k) => [k, 0]));
 

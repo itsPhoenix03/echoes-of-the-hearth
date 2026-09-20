@@ -325,6 +325,80 @@ const D = {
         "water": 1
       },
       "station": "campfire"
+    },
+    "wood_planks": {
+      "cost": {
+        "wood": 4
+      },
+      "station": "workbench",
+      "material": true
+    },
+    "stone_blocks": {
+      "cost": {
+        "stone": 4
+      },
+      "station": "workbench",
+      "material": true
+    },
+    "reed_thatch": {
+      "cost": {
+        "fiber": 5
+      },
+      "station": null,
+      "material": true
+    },
+    "rope_coil": {
+      "cost": {
+        "fiber": 8
+      },
+      "station": "workbench",
+      "material": true
+    },
+    "cloth_roll": {
+      "cost": {
+        "fiber": 10
+      },
+      "station": "workbench",
+      "material": true
+    },
+    "clay_bricks": {
+      "cost": {
+        "stone": 3,
+        "water": 1
+      },
+      "station": "campfire",
+      "material": true
+    },
+    "glass_pane": {
+      "cost": {
+        "stone": 2,
+        "crystal": 1
+      },
+      "station": "forge",
+      "material": true
+    },
+    "iron_beam": {
+      "cost": {
+        "iron": 3
+      },
+      "station": "forge",
+      "material": true
+    },
+    "crystal_lattice": {
+      "cost": {
+        "crystal": 4,
+        "iron": 1
+      },
+      "station": "forge",
+      "material": true
+    },
+    "starmetal_plate": {
+      "cost": {
+        "starmetal": 2,
+        "iron": 2
+      },
+      "station": "forge",
+      "material": true
     }
   },
   "NAMES": {
@@ -370,7 +444,17 @@ const D = {
     "grain": "Grain",
     "glowcap": "Glowcap",
     "bread": "Bread",
-    "medicine": "Herbal Medicine"
+    "medicine": "Herbal Medicine",
+    "wood_planks": "Wood Planks",
+    "stone_blocks": "Stone Blocks",
+    "reed_thatch": "Reed Thatch",
+    "rope_coil": "Rope Coil",
+    "cloth_roll": "Cloth Roll",
+    "clay_bricks": "Clay Bricks",
+    "glass_pane": "Glass Pane",
+    "iron_beam": "Iron Beam",
+    "crystal_lattice": "Crystal Lattice",
+    "starmetal_plate": "Starmetal Plate"
   },
   "FURNITURE": [
     "chest",
@@ -486,7 +570,17 @@ const D = {
     "grain",
     "glowcap",
     "bread",
-    "medicine"
+    "medicine",
+    "wood_planks",
+    "stone_blocks",
+    "reed_thatch",
+    "rope_coil",
+    "cloth_roll",
+    "clay_bricks",
+    "glass_pane",
+    "iron_beam",
+    "crystal_lattice",
+    "starmetal_plate"
   ],
   "MEDIC_TRADE_POOLS": {
     "woods": [
@@ -581,7 +675,19 @@ const D = {
         "weight": 3
       }
     ]
-  }
+  },
+  "MATERIALS": [
+    "wood_planks",
+    "stone_blocks",
+    "reed_thatch",
+    "rope_coil",
+    "cloth_roll",
+    "clay_bricks",
+    "glass_pane",
+    "iron_beam",
+    "crystal_lattice",
+    "starmetal_plate"
+  ]
 };
 
 export const MAX_HP = D.MAX_HP;
@@ -606,6 +712,9 @@ export const PLACEABLES = D.PLACEABLES;
 // decor kinds that do NOT block movement (fence is blocking, farmplot is walkable)
 export const DECOR_NONBLOCKING = new Set(D.DECOR_NONBLOCKING);
 export const CROPS = D.CROPS;
+// crafted intermediates (planks, blocks, panes...) — spent on building modules,
+// never placed directly. Recipes carry material:true; this is the display order.
+export const MATERIALS = D.MATERIALS;
 
 export const emptyInv = () => Object.fromEntries(D.INV_KEYS.map((k) => [k, 0]));
 

@@ -1,4 +1,4 @@
-import { RECIPES, NAMES, RESOURCES, canAfford } from '../shared/defs.js';
+import { RECIPES, NAMES, RESOURCES, MATERIALS, canAfford } from '../shared/defs.js';
 // Decor kinds that are zone-restricted (for UI greying)
 const DECOR_ZONE_IN  = new Set(Object.entries(RECIPES as any).filter(([,r]: any) => r.decor && r.zone === 'in').map(([k]) => k));
 const DECOR_ZONE_OUT = new Set(Object.entries(RECIPES as any).filter(([,r]: any) => r.decor && r.zone === 'out').map(([k]) => k));
@@ -46,7 +46,10 @@ const icon = (k: string) =>
      iron: '🔩', diamond: '🔷', mineshaft: '🕳', shelter: '🏠', isword: '⚔',
      starmetal: '✨', boat: '🛶', sboat: '🚤', torch: '🕯', chest: '📦', bed: '🛏',
      banner: '🚩', stone_path: '🪨', lantern: '🏮', reed_vase: '🌾', rug: '🟫', trophy_antler: '🦌',
-     fence: '🪵', farmplot: '🌱', grain: '🌾', glowcap: '✨', bread: '🍞', medicine: '🧪' } as any)[k] || '▪';
+     fence: '🪵', farmplot: '🌱', grain: '🌾', glowcap: '✨', bread: '🍞', medicine: '🧪',
+     wood_planks: '🟫', stone_blocks: '⬜', reed_thatch: '🌾', rope_coil: '🪢', cloth_roll: '🧵',
+     clay_bricks: '🧱', glass_pane: '🪟', iron_beam: '🔩', crystal_lattice: '🔷',
+     starmetal_plate: '✨' } as any)[k] || '▪';
 
 const HOTBAR = ['axe', 'pick', 'spick', 'sword', 'isword'];
 const CLOAKS = ['heatcloak', 'furcloak'];
@@ -213,6 +216,10 @@ export function initUI(
           const useable = ['water', 'cookedmeat', 'glowcap', 'bread', 'medicine'].includes(k);
           html += `<span class="slot ${useable ? 'use' : ''}" ${useable ? `data-use="${k}"` : ''}>${icon(k)} ${NAMES[k] || k} ×${st.inv[k]}${useable ? ' (click)' : ''}</span>`;
         }
+      // building materials — crafted intermediates, shown as a plain count row
+      // (driven by MATERIALS so a new material never needs a UI edit)
+      for (const k of MATERIALS)
+        if (st.inv[k]) html += `<span class="slot">${icon(k)} ${NAMES[k] || k} ×${st.inv[k]}</span>`;
       for (const k of ['boat', 'sboat', 'torch']) {
         if (!st.inv[k]) continue;
         if (k === 'boat' || k === 'sboat') {
