@@ -844,7 +844,22 @@ is simply that no `mod` broadcast followed.
 
 Existing modules arrive with their chunk (§8.3 `mods`), never in `init`.
 
-### 12.3 Persistence
+### 12.3 Wall edges and collision
+
+A wall module does not fill its tile — it stands on one edge of it, so a player
+can stand inside a room they have walled in. Each edge in the world has exactly
+one owning tile:
+
+	wallNE on tile (x,y)  is the edge between (x,y) and (x+1,y)
+	wallNW on tile (x,y)  is the edge between (x,y) and (x,y+1)
+
+The server refuses a `pos` that crosses a blocking edge (and snaps the client
+back), and creature steering tests the same rule, so a walled enclosure keeps
+wolves out as well as players. `mod_door` is a wall that does not block;
+floors, roofs, fixtures and decor never block anything. The client renderer must
+use the same convention or the ghost preview and the collision will disagree.
+
+### 12.4 Persistence
 
 The snapshot carries `modules` as an object keyed `"tile:slot"` with
 `{kind, hp, dir, owner}`. A load skips any entry whose key is malformed, whose

@@ -195,3 +195,77 @@ func TestModulesSurviveSaveLoad(t *testing.T) {
 		t.Fatalf("roof did not survive the round trip: %+v", g.r.modules)
 	}
 }
+
+// --- wall edges ------------------------------------------------------------
+
+// A wall stops a crossing, not a tile: both endpoints stay walkable, which is
+// the only way a player can stand inside a room they have walled in.
+func TestWallEdgeBlocksOneCrossing(t *testing.T) {
+	f := newFixture(t)
+	i := modTile(t, f, 0)
+	x, y := float64(i%world.SIZE), float64(i/world.SIZE)
+	f.stand(x, y, 0)
+	stock(f)
+
+	// wallNE on (x,y) owns the edge between (x,y) and (x+1,y)
+	f.r.handleBuildMod(f.p, map[string]any{"t": "buildmod", "i": float64(i), "kind": "mod_wall_stone", "slot": "wallNE"})
+	if _, ok := f.r.moduleAt(i, "wallNE"); !ok {
+		t.Fatalf("setup: wall not placed: %v", f.lastOfType("modfail"))
+	}
+
+	if !f.r.crossingBlocked(x, y, x+1, y) {
+		t.Fatal("stepping through a stone wall was allowed")
+	}
+	if !f.r.crossingBlocked(x+1, y, x, y) {
+		t.Fatal("a wall must block both directions")
+	}
+	if f.r.crossingBlocked(x, y, x, y+1) {
+		t.Fatal("a wallNE blocked the wallNW edge too")
+	}
+	if f.r.crossingBlocked(x, y, x-1, y) {
+		t.Fatal("a wallNE blocked the far side of its own tile")
+	}
+	// a diagonal that would slip around the corner is still refused
+	if !f.r.crossingBlocked(x, y, x+1, y+1) {
+		t.Fatal("a diagonal step slipped through the wall")
+	}
+}
+
+func TestDoorDoesNotBlock(t *testing.T) {
+	f := newFixture(t)
+	i := modTile(t, f, 1)
+	x, y := float64(i%world.SIZE), float64(i/world.SIZE)
+	f.stand(x, y, 0)
+	stock(f)
+	f.r.handleBuildMod(f.p, map[string]any{"t": "buildmod", "i": float64(i), "kind": "mod_door", "slot": "wallNE"})
+	if _, ok := f.r.moduleAt(i, "wallNE"); !ok {
+		t.Fatalf("setup: door not placed: %v", f.lastOfType("modfail"))
+	}
+	if f.r.crossingBlocked(x, y, x+1, y) {
+		t.Fatal("a door is a wall you can walk through")
+	}
+}
+
+// The movement validator must refuse a pos that crosses a wall, and say so with
+// the usual fix snapback rather than silently accepting it.
+func TestHandlePosRefusesWallCrossing(t *testing.T) {
+	f := newFixture(t)
+	i := modTile(t, f, 2)
+	x, y := float64(i%world.SIZE), float64(i/world.SIZE)
+	f.stand(x, y, 0)
+	stock(f)
+	f.r.handleBuildMod(f.p, map[string]any{"t": "buildmod", "i": float64(i), "kind": "mod_wall_wood", "slot": "wallNE"})
+	if _, ok := f.r.moduleAt(i, "wallNE"); !ok {
+		t.Fatalf("setup: wall not placed: %v", f.lastOfType("modfail"))
+	}
+
+	f.reset()
+	f.now += 500
+	f.r.handlePos(f.p, map[string]any{"t": "pos", "x": x + 1, "y": y})
+	if f.p.X != x || f.p.Y != y {
+		t.Fatalf("player walked through a wall to %.2f,%.2f", f.p.X, f.p.Y)
+	}
+	if m := f.lastOfType("fix"); m == nil {
+		t.Fatal("a refused move must snap the client back")
+	}
+}

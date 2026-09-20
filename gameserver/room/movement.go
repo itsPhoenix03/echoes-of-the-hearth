@@ -206,6 +206,13 @@ func (r *Room) handlePos(p *Player, m map[string]any) {
 		snapback()
 		return
 	}
+	// modular wall edges block a crossing, not a tile — a step that passes
+	// through one is refused even though both endpoints are walkable. A layer
+	// change is a scripted teleport and never crosses anything.
+	if !zChange && nz == 0 && r.crossingBlocked(p.X, p.Y, nx, ny) {
+		snapback()
+		return
+	}
 
 	mx, my := nx, ny
 	p.LastPosAt = now

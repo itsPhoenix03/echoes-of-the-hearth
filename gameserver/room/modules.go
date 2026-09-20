@@ -164,6 +164,70 @@ func (r *Room) handleBuildMod(p *Player, m map[string]any) {
 	r.sendInv(p)
 }
 
+// Wall edges.
+//
+// A wall module does not fill its tile — it stands on one edge of it and stops
+// a crossing of that edge only, which is what lets a player stand inside a
+// walled room. The convention, shared with the client renderer:
+//
+//	wallNE on tile (x,y)  is the edge between (x,y) and (x+1,y)
+//	wallNW on tile (x,y)  is the edge between (x,y) and (x,y+1)
+//
+// so each edge in the world has exactly one owning tile and there is no way to
+// express the same barrier twice. Doors are walls that do not block; floors,
+// roofs, fixtures and decor never block anything.
+func (r *Room) edgeBlocks(i int, slot string) bool {
+	mod, ok := r.moduleAt(i, slot)
+	if !ok {
+		return false
+	}
+	def, known := r.defs.Modules[mod.Kind]
+	return known && def.Blocks
+}
+
+// crossingBlocked reports whether walking from one tile to another passes
+// through a blocking wall edge. Both axes are tested, so a diagonal step cannot
+// slip through the corner where two walls meet.
+func (r *Room) crossingBlocked(fromX, fromY, toX, toY float64) bool {
+	x0, y0 := int(fromX), int(fromY)
+	x1, y1 := int(toX), int(toY)
+	if x0 == x1 && y0 == y1 {
+		return false
+	}
+	// Walk one tile at a time along x then y. A pos message is speed-budgeted
+	// to roughly one tile, so this loop is short; it is bounded anyway because
+	// anything longer has already been rejected by the speed check.
+	for x := x0; x != x1; {
+		step := 1
+		if x1 < x {
+			step = -1
+		}
+		lo := x
+		if step < 0 {
+			lo = x - 1
+		}
+		if lo >= 0 && lo < world.SIZE-1 && r.edgeBlocks(y0*world.SIZE+lo, "wallNE") {
+			return true
+		}
+		x += step
+	}
+	for y := y0; y != y1; {
+		step := 1
+		if y1 < y {
+			step = -1
+		}
+		lo := y
+		if step < 0 {
+			lo = y - 1
+		}
+		if lo >= 0 && lo < world.SIZE-1 && r.edgeBlocks(lo*world.SIZE+x1, "wallNW") {
+			return true
+		}
+		y += step
+	}
+	return false
+}
+
 // destroyModule removes a module and broadcasts its disappearance.
 func (r *Room) destroyModule(i int, slot string) {
 	r.removeModule(i, slot)
