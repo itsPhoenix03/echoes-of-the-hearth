@@ -1171,6 +1171,9 @@ const hpWindow = async (ms = 13000) => {
 {
   let hps = await hpWindow(11000);
   if (hps.some((h) => h < MAX_HP)) fail(`DEVOK: exposed sand damaged the player with no weather: ${hps}`);
+  // drop any natural weather frame from the 11s window above: wait() scans the
+  // whole buffer, so a stale {kind:null} would satisfy the assertion below
+  D.msgs = D.msgs.filter((m) => m.t !== 'wx');
   D.send({ t: 'devcmd', cmd: 'wx', kind: 'sandstorm' });
   const wxOn = await D.wait('wx', 3000);
   if (wxOn.kind !== 'sandstorm') fail('DEVOK: devcmd wx sandstorm broadcast ' + JSON.stringify(wxOn));
@@ -1342,6 +1345,79 @@ console.log(`DEVOK spawn OK: all ${CRE_TYPE_KEYS.length} creature types spawned 
   if (!D.msgs.some((m) => m.t === 'pos' && m.id === initD.id))
     fail('DEVOK: the post-kill pos was neither accepted nor rejected');
   console.log('DEVOK kill OK: respawned at full vitals with the movement grace window open');
+}
+
+// --- Stage MOD: modular building over the wire (§12) ---
+// Inside the DEVOK block on purpose: the dev kit is what supplies the crafted
+// materials, and D is already parked on an open sand plain with no creatures.
+{
+  D.send({ t: 'devcmd', cmd: 'clearcre' });
+  D.send({ t: 'dev' });                                  // refill materials
+  await sleep(400);
+  const [mx, my] = devSand;
+  D.send({ t: 'devcmd', cmd: 'tp', x: mx, y: my });
+  await sleep(700);
+  const mi = (my | 0) * SIZE + (mx | 0);
+
+  const planksBefore = D.state.inv.wood_planks;
+  if (!planksBefore) fail('MOD: the dev kit granted no wood_planks');
+  D.msgs = D.msgs.filter((m) => m.t !== 'mod' && m.t !== 'modfail');
+  D.send({ t: 'buildmod', i: mi, kind: 'mod_floor_wood', slot: 'floor', seq: 1 });
+  const placed = await D.wait('mod', 3000);
+  if (placed.slot !== 'floor' || placed.kind !== 'mod_floor_wood')
+    fail('MOD: unexpected mod broadcast ' + JSON.stringify(placed));
+  if (!placed.hp) fail('MOD: the mod broadcast carried no hp');
+  await sleep(250);
+  if (D.state.inv.wood_planks !== planksBefore - 2)
+    fail(`MOD: cost not charged: ${planksBefore} -> ${D.state.inv.wood_planks}`);
+
+  // a second slot on the same tile is the whole point of the system. wait()
+  // scans the whole buffer, so the previous frame has to be dropped first.
+  D.msgs = D.msgs.filter((m) => m.t !== 'mod' && m.t !== 'modfail');
+  D.send({ t: 'buildmod', i: mi, kind: 'mod_wall_stone', slot: 'wallNE', seq: 2 });
+  const wall = await D.wait('mod', 3000);
+  if (wall.slot !== 'wallNE')
+    fail('MOD: a wall on an occupied tile was refused: ' + JSON.stringify(wall));
+
+  // ...and the same slot twice is not, with the seq echoed back
+  D.msgs = D.msgs.filter((m) => m.t !== 'modfail');
+  D.send({ t: 'buildmod', i: mi, kind: 'mod_wall_wood', slot: 'wallNE', seq: 3 });
+  const dup = await D.wait('modfail', 3000);
+  if (dup.why !== 'slot-occupied' || dup.seq !== 3)
+    fail('MOD: duplicate slot answered ' + JSON.stringify(dup));
+
+  // slot/kind mismatch and an out-of-reach tile are refused the same way
+  D.msgs = D.msgs.filter((m) => m.t !== 'modfail');
+  D.send({ t: 'buildmod', i: mi, kind: 'mod_floor_wood', slot: 'roof', seq: 4 });
+  const badSlot = await D.wait('modfail', 3000);
+  if (badSlot.why !== 'bad-slot') fail('MOD: a floor in the roof slot answered ' + JSON.stringify(badSlot));
+
+  // a blocking wall edge stops the player walking through it: warp is a scripted
+  // reposition, so step across with a normal pos instead.
+  warp(D, mx, my); await sleep(120);
+  D.msgs = D.msgs.filter((m) => m.t !== 'fix');
+  D.send({ t: 'pos', x: mx + 1, y: my, z: 0, b: 0 });
+  const fix = await D.wait('fix', 3000);
+  if (Math.abs(fix.x - mx) > 0.6) fail(`MOD: walking through a wall was allowed — snapped to ${fix.x}`);
+  console.log('MOD wall edge OK: the crossing was refused and the client snapped back');
+
+  // demolition: swing until a piece on this tile comes down and expect half its
+  // materials back. Which piece falls first is the server's ordering to decide,
+  // so the refund is asserted against whichever slot it reports.
+  const REFUND = { floor: 'wood_planks', wallNE: 'stone_blocks' };
+  const before = { wood_planks: D.state.inv.wood_planks, stone_blocks: D.state.inv.stone_blocks };
+  D.msgs = D.msgs.filter((m) => m.t !== 'modd');
+  for (let h = 0; h < 12 && !D.msgs.some((m) => m.t === 'modd'); h++) {
+    D.send({ t: 'atk' }); await sleep(450);
+  }
+  const gone = D.msgs.find((m) => m.t === 'modd');
+  if (!gone) fail('MOD: nothing was demolished in 12 swings');
+  const res = REFUND[gone.slot];
+  if (!res) fail('MOD: modd reported an unexpected slot ' + JSON.stringify(gone));
+  await sleep(250);
+  if (D.state.inv[res] !== before[res] + 1)
+    fail(`MOD: demolishing the ${gone.slot} refunded ${D.state.inv[res] - before[res]} ${res}, want 1`);
+  console.log(`MOD OK: placed, slot-checked, blocked a crossing, demolished the ${gone.slot} for 1 ${res}`);
 }
 
 D.send({ t: 'devcmd', cmd: 'clearcre' });
