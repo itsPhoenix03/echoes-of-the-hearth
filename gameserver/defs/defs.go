@@ -77,6 +77,7 @@ type Module struct {
 	Cost   map[string]int `json:"cost"`
 	HP     int            `json:"hp"`
 	Blocks bool           `json:"blocks"` // wall edges that stop a crossing (doors do not)
+	Water  bool           `json:"water"`  // may be built over open water (bridge segments)
 }
 
 // TradeRule is one weighted entry of a MEDIC_TRADE_POOLS island pool.

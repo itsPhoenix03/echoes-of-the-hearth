@@ -128,11 +128,17 @@ func (r *Room) handleBuildMod(p *Player, m map[string]any) {
 		r.modFail(p, seq, "too-far")
 		return
 	}
-	// terrain: water is reserved for bridge segments, which land in their own
-	// pass; landmarks and medic huts are never buildable.
+	// terrain: only a bridge segment may stand over open water, and only when it
+	// reaches back to land. Landmarks and medic huts are never buildable.
 	if r.world.Tiles[i] == world.TWater {
-		r.modFail(p, seq, "water")
-		return
+		if !def.Water {
+			r.modFail(p, seq, "water")
+			return
+		}
+		if !r.bridgeAnchored(i) {
+			r.modFail(p, seq, "no-anchor")
+			return
+		}
 	}
 	if r.medicTiles[i] || world.LandmarkBlock[i] {
 		r.modFail(p, seq, "blocked")
@@ -166,6 +172,83 @@ func (r *Room) handleBuildMod(p *Player, m map[string]any) {
 		"t": "mod", "i": i, "slot": slot, "kind": kind, "hp": mod.HP, "dir": dir,
 	})
 	r.sendInv(p)
+}
+
+// Bridges.
+//
+// A bridge segment is the one module that may stand over open water, and it must
+// reach back to dry land: it is anchored if a 4-neighbour is land or another
+// segment that is itself anchored. Removing a segment mid-span therefore drops
+// everything beyond it into the sea, which is the same cascade rule §12.4 applies
+// on land, expressed over a span instead of a stack.
+func (r *Room) isBridge(i int) bool {
+	mod, ok := r.moduleAt(i, "floor")
+	if !ok {
+		return false
+	}
+	def, known := r.defs.Modules[mod.Kind]
+	return known && def.Water
+}
+
+// neighbours4 returns the four orthogonal tiles that stay inside the world.
+func neighbours4(i int) []int {
+	x, y := i%world.SIZE, i/world.SIZE
+	out := make([]int, 0, 4)
+	if x > 0 {
+		out = append(out, i-1)
+	}
+	if x < world.SIZE-1 {
+		out = append(out, i+1)
+	}
+	if y > 0 {
+		out = append(out, i-world.SIZE)
+	}
+	if y < world.SIZE-1 {
+		out = append(out, i+world.SIZE)
+	}
+	return out
+}
+
+// bridgeAnchored reports whether a segment placed at i would reach land, walking
+// the span it would join. It is breadth-first over segments, so a hundred-tile
+// causeway costs one traversal of itself and nothing more.
+func (r *Room) bridgeAnchored(i int) bool {
+	seen := map[int]bool{i: true}
+	queue := []int{i}
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		for _, n := range neighbours4(cur) {
+			if r.world.Tiles[n] != world.TWater {
+				return true // dry land: the span is moored
+			}
+			if r.isBridge(n) && !seen[n] {
+				seen[n] = true
+				queue = append(queue, n)
+			}
+		}
+	}
+	return false
+}
+
+// recheckBridges runs after a segment is removed: every segment still connected
+// to the gap is re-tested, and whatever no longer reaches land falls in, refunded
+// to whoever cut the span. Iterating to a fixed point matters — the tile next to
+// the gap can be anchored through a segment that is itself about to fall.
+func (r *Room) recheckBridges(p *Player, removed int) {
+	for again := true; again; {
+		again = false
+		for _, n := range neighbours4(removed) {
+			if r.isBridge(n) && !r.bridgeAnchored(n) {
+				mod, _ := r.moduleAt(n, "floor")
+				r.refundModule(p, mod)
+				r.destroyModule(n, "floor")
+				r.cascadeUnsupported(p, n)
+				r.recheckBridges(p, n) // the rest of the span goes with it
+				again = true
+			}
+		}
+	}
 }
 
 // Support.
@@ -345,6 +428,9 @@ func (r *Room) hitModule(p *Player, mod *Module, dmg int) {
 	r.destroyModule(mod.I, mod.Slot)
 	// whatever this piece was holding up comes down with it
 	r.cascadeUnsupported(p, mod.I)
+	if mod.Slot == "floor" {
+		r.recheckBridges(p, mod.I) // a cut span drifts away from the gap outwards
+	}
 	r.sendInv(p)
 	msg := "Removed " + r.moduleName(mod.Kind)
 	if len(back) > 0 {

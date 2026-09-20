@@ -472,7 +472,8 @@ const D = {
     "mod_arch": "Stone Arch",
     "mod_stairs": "Stairs",
     "mod_lantern_hook": "Lantern Hook",
-    "mod_banner_blank": "Blank Banner"
+    "mod_banner_blank": "Blank Banner",
+    "mod_bridge_segment": "Bridge Segment"
   },
   "FURNITURE": [
     "chest",
@@ -843,6 +844,15 @@ const D = {
         "cloth_roll": 1
       },
       "hp": 5
+    },
+    "mod_bridge_segment": {
+      "slot": "floor",
+      "cost": {
+        "wood_planks": 2,
+        "rope_coil": 1
+      },
+      "hp": 20,
+      "water": true
     }
   },
   "MODULE_SLOTS": [

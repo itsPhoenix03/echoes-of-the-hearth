@@ -839,7 +839,7 @@ tiles and refunds half its materials, mirroring structure demolition.
 `modfail` echoes the request's `seq` so the client clears that exact preview
 instead of guessing. `why` is one of `unknown-module`, `bad-slot`, `bad-tile`,
 `outdoors-only`, `too-far`, `water`, `blocked`, `tile-occupied`,
-`slot-occupied`, `unsupported`, `cost`. It is advisory text for the UI — the authoritative fact
+`slot-occupied`, `unsupported`, `no-anchor`, `cost`. It is advisory text for the UI — the authoritative fact
 is simply that no `mod` broadcast followed.
 
 Existing modules arrive with their chunk (§8.3 `mods`), never in `init`.
@@ -877,7 +877,24 @@ until the tile is stable (pulling a floor strands the fixture, which strands the
 roof), and every piece that falls refunds half its materials to whoever knocked
 it down. The client mirrors the table to colour its ghost; the server decides.
 
-### 12.5 Persistence
+### 12.5 Bridges over water
+
+`mod_bridge_segment` (`water: true` in `MODULES`) is the only piece that may be
+built over open water, and only when the span reaches dry land: a segment is
+anchored if a 4-neighbour is land, or another segment that is itself anchored —
+checked breadth-first across the whole span, so a hundred-tile causeway is
+validated in one traversal. Anything else over water is refused with `water`; an
+unmoored segment with `no-anchor`.
+
+Standing on a deck is **not** being in the water: the survival tick skips thermal
+water damage for a player on a bridge tile, and the client neither starts
+swimming nor launches a boat there. Water stays walkable at z=0 either way
+(invariant §5), so no collision rule changes.
+
+Cutting a span cascades outward from the gap: every segment that can no longer
+reach land falls in and refunds half its materials to whoever cut it.
+
+### 12.6 Persistence
 
 The snapshot carries `modules` as an object keyed `"tile:slot"` with
 `{kind, hp, dir, owner}`. A load skips any entry whose key is malformed, whose

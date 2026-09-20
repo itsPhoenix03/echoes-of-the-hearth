@@ -96,6 +96,7 @@ const MODFAIL_MSG: Record<string, string> = {
   "tile-occupied": "A structure already stands on that tile.",
   "slot-occupied": "That slot is already filled.",
   unsupported: "Nothing there to hold it up — build a floor or a wall first.",
+  "no-anchor": "A bridge must reach back to land or to another segment.",
   cost: "You do not have the materials.",
 };
 // medicResult/medicOffer failure reasons -> short player-facing text (server protocol is machine-readable only)
@@ -2079,6 +2080,12 @@ class Hearth extends Phaser.Scene {
     }
   }
 
+  /** True when a bridge deck covers this tile — you walk on it, not in it. */
+  bridgeAt(i: number): boolean {
+    const spr = this.modSpr.get(`${i}:floor`);
+    return !!spr && (MODULES as any)[spr.getData("kind")]?.water === true;
+  }
+
   addModule(i: number, slot: string, kind: string, hp: number, dir: number) {
     const key = `${i}:${slot}`;
     if (this.modSpr.has(key)) return;
@@ -2900,7 +2907,9 @@ class Hearth extends Phaser.Scene {
 
     // TASK 4c: boarding / disembarking boats or swimming at the water's edge
     if (this.z === 0) {
-      const onWater = this.tileAt(this.px, this.py) === T.WATER;
+      const onWater =
+        this.tileAt(this.px, this.py) === T.WATER &&
+        !this.bridgeAt((this.py | 0) * SIZE + (this.px | 0));
       if (onWater && !this.sailing && !this.swimming) {
         if (this.selectedVehicle && this.inv[this.selectedVehicle] > 0) {
           // sail with selected vehicle
@@ -3062,12 +3071,24 @@ class Hearth extends Phaser.Scene {
       this.ghost.setPosition(pl.x, pl.y).setOrigin(pl.ox, pl.oy).setFlipX(pl.flip);
       const gi = g.y * SIZE + g.x;
       // mirror of the server's refusal list — advisory, the server still decides
+      const overWater = this.world.tiles[gi] === T.WATER;
+      const isBridge = (MODULES as any)[this.placingMod]?.water === true;
+      // a bridge segment is the one piece allowed over water, and only when a
+      // neighbour is land or another segment (the server walks the whole span)
+      const anchored =
+        !overWater ||
+        (isBridge &&
+          [gi - 1, gi + 1, gi - SIZE, gi + SIZE].some(
+            (n) =>
+              n >= 0 && n < SIZE * SIZE &&
+              (this.world.tiles[n] !== T.WATER || this.bridgeAt(n)),
+          ));
       const free =
         g.x >= 0 && g.y >= 0 && g.x < SIZE && g.y < SIZE &&
         !this.modSpr.has(`${gi}:${slot}`) &&
         this.modSupported(gi, slot) &&
         !this.structSpr.has(gi) &&
-        this.world.tiles[gi] !== T.WATER &&
+        anchored &&
         !LANDMARK_BLOCK.has(gi);
       const ok =
         this.z === 0 && free && Math.hypot(g.x - this.px, g.y - this.py) <= 6;

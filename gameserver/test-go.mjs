@@ -1187,9 +1187,18 @@ const hpWindow = async (ms = 13000) => {
   D.send({ t: 'devcmd', cmd: 'wx', kind: 'clear' });   // anything unrecognised clears
   const wxOff = await D.wait('wx', 3000);
   if (wxOff.kind !== null) fail('DEVOK: clearing the weather broadcast ' + JSON.stringify(wxOff));
+  D.msgs = D.msgs.filter((m) => m.t !== 'wx');
   hps = await hpWindow();
-  if (hps.some((h) => h < hurt)) fail(`DEVOK: clearing the weather did not stop the damage: ${hps}`);
-  console.log(`DEVOK wx OK: sandstorm cost ${MAX_HP - hurt} hp on exposed sand, clearing it stopped the damage`);
+  // clearing sets until=0, so the weather tick is free to roll a NEW storm
+  // during this window. That is the simulation working, not a regression — only
+  // damage with no storm running contradicts the clear.
+  const natural = D.msgs.find((m) => m.t === 'wx' && m.kind);
+  if (hps.some((h) => h < hurt) && !natural)
+    fail(`DEVOK: clearing the weather did not stop the damage: ${hps}`);
+  console.log(
+    `DEVOK wx OK: sandstorm cost ${MAX_HP - hurt} hp on exposed sand, clearing it stopped the damage` +
+      (natural ? ` (a natural ${natural.kind} rolled in afterwards)` : ''),
+  );
 }
 
 // `dev` (F9 kit): every slot, and the vitals the storm just spent.
@@ -1418,6 +1427,53 @@ console.log(`DEVOK spawn OK: all ${CRE_TYPE_KEYS.length} creature types spawned 
   if (D.state.inv[res] !== before[res] + 1)
     fail(`MOD: demolishing the ${gone.slot} refunded ${D.state.inv[res] - before[res]} ${res}, want 1`);
   console.log(`MOD OK: placed, slot-checked, blocked a crossing, demolished the ${gone.slot} for 1 ${res}`);
+
+  // bridges: the one piece allowed over water, and only moored to land (§12.5)
+  const coast = (() => {
+    for (let i = 0; i < world.tiles.length; i++) {
+      const x = i % SIZE;
+      if (x < 2 || x >= SIZE - 2) continue;
+      if (world.tiles[i] !== T.WATER) continue;
+      if (world.tiles[i - 1] === T.WATER || world.tiles[i + 1] !== T.WATER) continue;
+      return [i, i + 1];                       // land at i-1, open water at i+1
+    }
+    return null;
+  })();
+  if (!coast) fail('MOD: no coastline found for the bridge probe');
+  const [nearI, farI] = coast;
+  D.send({ t: 'devcmd', cmd: 'tp', x: (nearI % SIZE) - 1 + 0.5, y: ((nearI / SIZE) | 0) + 0.5 });
+  await sleep(700);
+
+  D.msgs = D.msgs.filter((m) => m.t !== 'mod' && m.t !== 'modfail');
+  D.send({ t: 'buildmod', i: farI, kind: 'mod_bridge_segment', slot: 'floor', seq: 10 });
+  const adrift = await D.wait('modfail', 3000);
+  if (adrift.why !== 'no-anchor') fail('MOD: an unmoored segment answered ' + JSON.stringify(adrift));
+
+  D.msgs = D.msgs.filter((m) => m.t !== 'mod' && m.t !== 'modfail');
+  D.send({ t: 'buildmod', i: nearI, kind: 'mod_bridge_segment', slot: 'floor', seq: 11 });
+  const moored = await D.wait('mod', 3000);
+  if (moored.kind !== 'mod_bridge_segment') fail('MOD: the shore segment was refused ' + JSON.stringify(moored));
+
+  D.msgs = D.msgs.filter((m) => m.t !== 'mod' && m.t !== 'modfail');
+  D.send({ t: 'buildmod', i: farI, kind: 'mod_bridge_segment', slot: 'floor', seq: 12 });
+  const spanned = await D.wait('mod', 3000);
+  if (spanned.i !== farI) fail('MOD: the second segment did not moor to the first');
+
+  // cut it at the shore: the far segment must go with it
+  warp(D, (nearI % SIZE) + 0.5, ((nearI / SIZE) | 0) + 0.5); await sleep(120);
+  // a swing takes the nearest creature or animal first, and the shore is exactly
+  // where fish and crabs live, so allow for a few swings being spent on them
+  D.msgs = D.msgs.filter((m) => m.t !== 'modd' && m.t !== 'act');
+  for (let h = 0; h < 30 && D.msgs.filter((m) => m.t === 'modd').length < 2; h++) {
+    D.send({ t: 'atk' }); await sleep(450);
+  }
+  const fell = D.msgs.filter((m) => m.t === 'modd').map((m) => m.i);
+  if (!fell.includes(nearI) || !fell.includes(farI)) {
+    const wildlife = D.msgs.filter((m) => m.t === 'act' && m.targetI).length;
+    fail(`MOD: cutting the span left part of it afloat — modd for ${JSON.stringify(fell)} ` +
+      `(${wildlife} of the swings landed on wildlife)`);
+  }
+  console.log('MOD bridge OK: unmoored refused, span built from the shore, cut span fell in whole');
 }
 
 D.send({ t: 'devcmd', cmd: 'clearcre' });

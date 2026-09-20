@@ -355,3 +355,85 @@ func TestCascadeTakesDownWhatItHeldUp(t *testing.T) {
 		}
 	}
 }
+
+// --- bridges ---------------------------------------------------------------
+
+// coastTile finds a water tile with land on one side, plus the water tile
+// directly beyond it, which is the shape every bridge test needs.
+func coastTile(t *testing.T, f *fixture) (int, int) {
+	t.Helper()
+	for i := 0; i < world.SIZE*world.SIZE; i++ {
+		if f.r.world.Tiles[i] != world.TWater {
+			continue
+		}
+		x := i % world.SIZE
+		if x < 2 || x >= world.SIZE-2 {
+			continue
+		}
+		if f.r.world.Tiles[i-1] == world.TWater || f.r.world.Tiles[i+1] != world.TWater {
+			continue // want land at i-1 and open water at i+1
+		}
+		return i, i + 1
+	}
+	t.Fatal("no coastline with two tiles of open water beyond it")
+	return 0, 0
+}
+
+func TestBridgeMustReachLand(t *testing.T) {
+	f := newFixture(t)
+	near, far := coastTile(t, f)
+	stock(f)
+
+	// the far tile is open sea with nothing to moor to
+	f.stand(float64(far%world.SIZE), float64(far/world.SIZE), 0)
+	f.r.handleBuildMod(f.p, map[string]any{"t": "buildmod", "i": float64(far), "kind": "mod_bridge_segment", "slot": "floor"})
+	if m := f.lastOfType("modfail"); m == nil || m["why"] != "no-anchor" {
+		t.Fatalf("a bridge segment was floated in open water: %v", m)
+	}
+
+	// an ordinary floor is refused over water whatever its anchor
+	f.reset()
+	f.stand(float64(near%world.SIZE), float64(near/world.SIZE), 0)
+	f.r.handleBuildMod(f.p, map[string]any{"t": "buildmod", "i": float64(near), "kind": "mod_floor_wood", "slot": "floor"})
+	if m := f.lastOfType("modfail"); m == nil || m["why"] != "water" {
+		t.Fatalf("a wooden floor was laid on water: %v", m)
+	}
+
+	// anchored to the shore it stands, and the next segment moors to it
+	f.reset()
+	f.r.handleBuildMod(f.p, map[string]any{"t": "buildmod", "i": float64(near), "kind": "mod_bridge_segment", "slot": "floor"})
+	if !f.r.isBridge(near) {
+		t.Fatalf("the shore segment was refused: %v", f.lastOfType("modfail"))
+	}
+	f.stand(float64(far%world.SIZE), float64(far/world.SIZE), 0)
+	f.r.handleBuildMod(f.p, map[string]any{"t": "buildmod", "i": float64(far), "kind": "mod_bridge_segment", "slot": "floor"})
+	if !f.r.isBridge(far) {
+		t.Fatalf("the second segment did not moor to the first: %v", f.lastOfType("modfail"))
+	}
+}
+
+// Cutting a span at the shore drops everything beyond it into the sea.
+func TestCuttingASpanDropsTheRest(t *testing.T) {
+	f := newFixture(t)
+	near, far := coastTile(t, f)
+	stock(f)
+	for _, i := range []int{near, far} {
+		f.stand(float64(i%world.SIZE), float64(i/world.SIZE), 0)
+		f.r.handleBuildMod(f.p, map[string]any{"t": "buildmod", "i": float64(i), "kind": "mod_bridge_segment", "slot": "floor"})
+	}
+	if !f.r.isBridge(near) || !f.r.isBridge(far) {
+		t.Fatalf("setup: span not built: %v", f.lastOfType("modfail"))
+	}
+
+	f.reset()
+	planks := f.p.Inv["wood_planks"]
+	shore, _ := f.r.moduleAt(near, "floor")
+	f.r.hitModule(f.p, shore, 100)
+
+	if f.r.isBridge(near) || f.r.isBridge(far) {
+		t.Fatal("the far segment stayed afloat after its only mooring was cut")
+	}
+	if got := f.p.Inv["wood_planks"] - planks; got != 2 {
+		t.Fatalf("the cut span refunded %d wood_planks, want 2 (one per segment)", got)
+	}
+}
