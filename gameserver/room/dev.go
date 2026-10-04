@@ -73,7 +73,7 @@ var devKitInv = map[string]int{
 }
 
 var devKitTools = []string{"axe", "pick", "spick", "sword", "isword"}
-var devKitGear = []string{"heatcloak", "furcloak"}
+var devKitGear = []string{"heatcloak", "furcloak", ArmorKey}
 
 // handleDev is the F9 kit: every tool, both cloaks, and enough of everything to
 // reach the endgame in one sitting.

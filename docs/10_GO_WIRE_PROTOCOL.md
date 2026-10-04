@@ -797,12 +797,12 @@ the wire, by the ADMIT stage of `gameserver/test-go.mjs`.
 
 ## 12. Modular building — `buildmod`
 
-Legacy `structures` is one entry per tile, which cannot hold a floor, two wall
-edges, a roof, a fixture and a decor piece at once. Modules therefore have their
+Legacy `structures` is one entry per tile, which cannot hold a floor, a wall,
+a fixture and a decor piece at once. Modules therefore have their
 own store keyed **`tile:slot`**, and the two systems do not mix: a tile carrying
 a legacy structure refuses modules, and vice versa.
 
-Slots are `floor`, `wall`, `roof`, `fixture`, `decor` (`MODULE_SLOTS` in
+Slots are `floor`, `wall`, `fixture`, `decor` (`MODULE_SLOTS` in
 `shared/defs.json`), and each module kind names its slot directly in
 `MODULES[kind].slot`.
 
@@ -857,7 +857,7 @@ themselves in on all four edges of their own tile with no way out. Saves written
 under the old model load through `legacySlot()`, which folds both edges onto the
 one `wall` slot.
 
-`mod_door` is a wall that does not block. Floors, roofs, fixtures and decor never
+`mod_door` is a wall that does not block. Floors, fixtures and decor never
 block anything, and a blocking wall may not be placed on a tile a player is
 standing on (`occupied`).
 
@@ -869,14 +869,13 @@ One rule, enforced server-side on both placement and removal:
 |---|---|
 | `floor` | nothing — free-standing |
 | `wall` | nothing — a fence or a screen is a legitimate build |
-| `roof` | a fixture on its own tile, or a wall on a **neighbouring** tile — its own tile has to stay walkable |
 | `fixture` | a floor on its own tile |
 | `decor` | a floor or a wall on its own tile |
 
 Placement of an unsupported piece is refused with `unsupported`. Removal
 **cascades**: destroying a piece takes down whatever it was holding up, repeating
-until the tile is stable (pulling a floor strands the fixture, which strands the
-roof), and every piece that falls refunds half its materials to whoever knocked
+until the tile is stable (pulling a floor strands the fixture and the decor on
+it), and every piece that falls refunds half its materials to whoever knocked
 it down. The client mirrors the table to colour its ghost; the server decides.
 
 ### 12.5 Bridges over water
@@ -901,18 +900,31 @@ reach land falls in and refunds half its materials to whoever cut it.
 The snapshot carries `modules` as an object keyed `"tile:slot"` with
 `{kind, hp, dir, owner}`. A load skips any entry whose key is malformed, whose
 tile is out of bounds, or whose kind or slot no longer exists in the defs, so
-rolling `shared/defs.json` back can never crash the server.
+rolling `shared/defs.json` back can never crash the server. This is also how the
+retired pieces (the `roof` slot and its three roofs, `mod_window`, `mod_arch`,
+`mod_stairs`, `mod_lantern_hook`) leave older saves: they are dropped on load.
 
 ### 12.7 What a build is for
 
-Modules are not decoration. A roof over a player's tile is **shelter**: the
-survival tick skips the sandstorm, blizzard, desert-heat and glacial-cold cases
-for a roofed player, the same protection the z=2 shelter interior gives, without
-leaving the surface. Hunger and thirst are deliberately *not* covered — a roof is
-not a larder.
+Modules shape space: a ring of walls keeps creatures out (their steering tests
+the same tiles), a door lets you in and out, pillars and decor dress a floor, and
+bridges cross water. Roofs, and the shelter they gave, were retired with the
+roof slot — weather is escaped underground, in the z=2 shelter, or with the
+right cloak.
 
-Because a roof needs a pillar under it or a wall beside it (§12.4), a sheltered
-tile is always part of a real structure. The rest follows from the collision
-rules: a ring of walls keeps creatures out (their steering tests the same tiles),
-a door lets you in and out, bridges cross water, and `mod_lantern_hook` lights
-the result at night.
+### 12.8 Starmetal Armor — `wear` with `starmetal_armor`
+
+`starmetal_armor` is `gear` (crafted once, at the forge, from a deliberately
+late-game bill — see `RECIPES`). It is worn in its **own slot**, independent of
+the cloak in `wornGear`: `{t:"wear", k:"starmetal_armor"}` toggles it, and
+`{t:"wear", k:null}` still only removes the cloak.
+
+Armored, every creature hit (contact, lancer beam, brute bolt) costs half its
+damage. HP is an integer, so the remainder is carried per player and a 1-damage
+hit lands every other time. Weather, water, hunger and fire ignore armor. A hit
+the armor reduced carries `blocked` (the damage it turned) on the `hp` frame.
+
+The worn state rides `armor: bool` on `init`, `inv`, each `players` entry,
+`pj`, and the `worn` broadcast (`{t:"worn", id, k, armor}`), and is saved in the
+profile (gated on owning the gear when restored).
+

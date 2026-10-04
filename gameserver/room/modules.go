@@ -14,7 +14,7 @@ import (
 // Modular building.
 //
 // The legacy `structures` map is one entry per tile, which cannot represent a
-// floor, two wall edges, a roof, a fixture and a decor piece on the same tile.
+// floor, a wall, a fixture and a decor piece on the same tile.
 // Modules therefore live in their own map keyed `tile:slot`, and are NOT
 // inventory items: `buildmod` spends the module's material cost straight out of
 // the player's bag (see defs.Module). Legacy structures are untouched — the two
@@ -266,7 +266,6 @@ func (r *Room) recheckBridges(p *Player, removed int) {
 //
 //	floor   free-standing
 //	wall    free-standing — a fence or a screen is a legitimate build
-//	roof    needs a fixture on its own tile, or a wall on a neighbouring one
 //	fixture needs a floor on its own tile
 //	decor   needs a floor or a wall on its own tile to hang from
 //
@@ -277,18 +276,6 @@ func (r *Room) supported(i int, slot string) bool {
 	switch slot {
 	case "floor", "wall":
 		return true
-	case "roof":
-		// its own tile must stay walkable, so a roof leans on a fixture here or
-		// on a wall next door — the shape of an actual hut
-		if _, fx := r.moduleAt(i, "fixture"); fx {
-			return true
-		}
-		for _, n := range neighbours4(i) {
-			if _, w := r.moduleAt(n, "wall"); w {
-				return true
-			}
-		}
-		return false
 	case "fixture":
 		_, fl := r.moduleAt(i, "floor")
 		return fl
@@ -301,22 +288,13 @@ func (r *Room) supported(i int, slot string) bool {
 }
 
 // cascadeUnsupported removes everything on a tile that has lost its support,
-// repeating until the tile is stable — taking a floor out from under a fixture
-// can in turn strand the roof the fixture was holding. Materials go back to the
-// player who caused it, at the same half rate as a deliberate demolition.
+// repeating until the tile is stable. Materials go back to the player who
+// caused it, at the same half rate as a deliberate demolition.
 func (r *Room) cascadeUnsupported(p *Player, i int) {
-	// a wall holds up the roofs around it, so the neighbours are re-checked too
-	for _, n := range neighbours4(i) {
-		if _, roofed := r.moduleAt(n, "roof"); roofed && !r.supported(n, "roof") {
-			mod, _ := r.moduleAt(n, "roof")
-			r.refundModule(p, mod)
-			r.destroyModule(n, "roof")
-		}
-	}
 	// checked in dependency order, deepest first, so one pass usually settles it
 	for again := true; again; {
 		again = false
-		for _, slot := range []string{"fixture", "decor", "roof"} {
+		for _, slot := range []string{"fixture", "decor"} {
 			if _, ok := r.moduleAt(i, slot); !ok || r.supported(i, slot) {
 				continue
 			}
@@ -371,16 +349,6 @@ func (r *Room) wallBlocks(i int) bool {
 	}
 	def, known := r.defs.Modules[mod.Kind]
 	return known && def.Blocks
-}
-
-// roofed reports whether a tile has a roof over it. A roof is what makes a
-// modular build worth the materials: it is shelter from the weather and from
-// biome exposure, the same protection the z=2 shelter interior gives, without
-// leaving the surface. Support (§12.4) already guarantees a roofed tile is part
-// of a real structure — a pillar under it or a wall beside it.
-func (r *Room) roofed(i int) bool {
-	_, ok := r.moduleAt(i, "roof")
-	return ok
 }
 
 // playerOnTile reports whether any player is standing on a tile. Placing a

@@ -136,6 +136,7 @@ export class Rig extends Phaser.GameObjects.Container {
   private tex = '';
   private shirtIdx: number;
   private cloak: Cloak = null;
+  private armor = false;
   private skin = '0';           // active skin id once its textures exist
   private actAnim = '';
 
@@ -209,6 +210,9 @@ export class Rig extends Phaser.GameObjects.Container {
   setCloak(k: string | null | undefined) {
     this.cloak = k === 'furcloak' || k === 'heatcloak' ? k : null;
   }
+
+  /** Starmetal Armor breastplate, worn under any cloak. */
+  setArmor(on: boolean | undefined) { this.armor = !!on; }
 
   // ── actions ──────────────────────────────────────────────────────────────
   /** Legacy entry point. kind==null means an explicitly empty hand (guide §2). */
@@ -302,8 +306,8 @@ export class Rig extends Phaser.GameObjects.Container {
     this.acting = this.actOn ? 1 : 0;
     this.loopT += dt; if (this.loopT > 3600) this.loopT = 0;
     // skin: switch only once the whole frame set is baked, so clips never mix skins
-    const want = skinId(this.shirtIdx, this.cloak);
-    if (want !== this.skin && ensureSkin(this.scene, ALL_FRAMES, this.shirtIdx, this.cloak)) this.skin = want;
+    const want = skinId(this.shirtIdx, this.cloak, this.armor);
+    if (want !== this.skin && ensureSkin(this.scene, ALL_FRAMES, this.shirtIdx, this.cloak, this.armor)) this.skin = want;
 
     // 2. sample into plain-number locals (zero allocation).
     let bx = 0, by = 0, brot = 0, sy = 1, lift = 0;

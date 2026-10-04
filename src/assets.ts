@@ -183,14 +183,13 @@ _manifest.push(
 );
 
 const _BM: [string, number, number][] = [
-  ['clay_bricks', 56, 38], ['crystal_lattice', 54, 44], ['glass_pane', 44, 46], ['iron_beam', 60, 34],
-  ['mod_arch', 64, 58], ['mod_bridge_segment', 74, 44], ['mod_door', 42, 52],
-  ['mod_floor_thatch', 64, 40], ['mod_floor_wood', 64, 40], ['mod_lantern_hook', 38, 54],
+  ['clay_bricks', 56, 38], ['crystal_lattice', 54, 44], ['glass_pane', 44, 46],
+  ['mod_bridge_segment', 74, 44], ['mod_door', 42, 52],
+  ['mod_floor_thatch', 64, 40], ['mod_floor_wood', 64, 40],
   ['mod_pillar_stone', 38, 64], ['mod_pillar_wood', 36, 62],
-  ['mod_roof_metal', 70, 48], ['mod_roof_shingle', 70, 48], ['mod_roof_thatch', 70, 48],
-  ['mod_stairs', 62, 44], ['mod_wall_crystal', 64, 58], ['mod_wall_stone', 64, 54], ['mod_wall_wood', 64, 54],
-  ['mod_window', 42, 46], ['reed_thatch', 58, 36], ['rope_coil', 44, 38],
-  ['starmetal_plate', 56, 38], ['stone_blocks', 56, 40], ['wood_planks', 52, 36],
+  ['mod_wall_crystal', 64, 58], ['mod_wall_stone', 64, 54], ['mod_wall_wood', 64, 54],
+  ['reed_thatch', 58, 36], ['rope_coil', 44, 38],
+  ['stone_blocks', 56, 40], ['wood_planks', 52, 36],
 ];
 for (const [k, w, h] of _BM) _manifest.push([k, `/sprites/building_materials/${k}.svg`, w, h]);
 const _RAW: [string, number, number][] = [

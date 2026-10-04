@@ -93,7 +93,9 @@ func TestBuildModRefusals(t *testing.T) {
 		why  string
 	}{
 		{"unknown kind", map[string]any{"i": float64(i), "kind": "mod_nope", "slot": "floor"}, "unknown-module"},
-		{"wrong slot for kind", map[string]any{"i": float64(i), "kind": "mod_floor_wood", "slot": "roof"}, "bad-slot"},
+		{"wrong slot for kind", map[string]any{"i": float64(i), "kind": "mod_floor_wood", "slot": "wall"}, "bad-slot"},
+		{"the retired roof slot", map[string]any{"i": float64(i), "kind": "mod_floor_wood", "slot": "roof"}, "bad-slot"},
+		{"a retired roof piece", map[string]any{"i": float64(i), "kind": "mod_roof_thatch", "slot": "roof"}, "unknown-module"},
 		{"invented slot", map[string]any{"i": float64(i), "kind": "mod_floor_wood", "slot": "basement"}, "bad-slot"},
 		{"out of reach", map[string]any{"i": float64(i + 40*world.SIZE), "kind": "mod_floor_wood", "slot": "floor"}, "too-far"},
 	}
@@ -176,7 +178,6 @@ func TestModulesSurviveSaveLoad(t *testing.T) {
 	stock(f)
 	i := modTile(t, f, 3)
 	f.r.handleBuildMod(f.p, map[string]any{"t": "buildmod", "i": float64(i), "kind": "mod_floor_stone", "slot": "floor"})
-	// a wall, not a roof: a roof needs something on the tile to rest on (§12.4)
 	f.r.handleBuildMod(f.p, map[string]any{"t": "buildmod", "i": float64(i), "kind": "mod_wall_wood", "slot": "wall"})
 	saved := f.r.modulesSnapshot()
 	if len(saved) != 2 {
@@ -186,6 +187,9 @@ func TestModulesSurviveSaveLoad(t *testing.T) {
 	saved["9999999999:floor"] = saved[modKey(i, "floor")]
 	saved["not-a-key"] = saved[modKey(i, "floor")]
 	saved[modKey(i+1, "floor")] = &persist.Module{Kind: "mod_from_a_rolled_back_defs", HP: 10}
+	// pieces retired from the game (roofs, windows, …) drop out of old saves
+	saved[modKey(i+2, "roof")] = &persist.Module{Kind: "mod_roof_thatch", HP: 15}
+	saved[modKey(i+2, "wall")] = &persist.Module{Kind: "mod_window", HP: 20}
 
 	g := newFixture(t)
 	g.r.loadModules(saved)
@@ -271,9 +275,8 @@ func TestSupportRefusesFloatingPieces(t *testing.T) {
 	f.stand(float64(i%world.SIZE), float64(i/world.SIZE), 0)
 	stock(f)
 
-	// a roof with nothing under it, and a fixture with no floor
+	// a fixture with no floor, and decor with nothing to hang from
 	for _, c := range []struct{ kind, slot string }{
-		{"mod_roof_thatch", "roof"},
 		{"mod_pillar_wood", "fixture"},
 		{"mod_banner_blank", "decor"},
 	} {
@@ -284,19 +287,19 @@ func TestSupportRefusesFloatingPieces(t *testing.T) {
 		}
 	}
 
-	// give it a floor and the fixture lands; the fixture then supports a roof
+	// give it a floor and both the fixture and the decor land
 	f.r.handleBuildMod(f.p, map[string]any{"t": "buildmod", "i": float64(i), "kind": "mod_floor_wood", "slot": "floor"})
 	f.r.handleBuildMod(f.p, map[string]any{"t": "buildmod", "i": float64(i), "kind": "mod_pillar_wood", "slot": "fixture"})
-	f.r.handleBuildMod(f.p, map[string]any{"t": "buildmod", "i": float64(i), "kind": "mod_roof_thatch", "slot": "roof"})
-	for _, slot := range []string{"floor", "fixture", "roof"} {
+	f.r.handleBuildMod(f.p, map[string]any{"t": "buildmod", "i": float64(i), "kind": "mod_banner_blank", "slot": "decor"})
+	for _, slot := range []string{"floor", "fixture", "decor"} {
 		if _, ok := f.r.moduleAt(i, slot); !ok {
 			t.Fatalf("%s was refused once its support existed: %v", slot, f.lastOfType("modfail"))
 		}
 	}
 }
 
-// Knocking out the floor takes the pillar with it, and the roof the pillar was
-// holding — one blow, the whole stack, refunded.
+// Knocking out the floor takes the pillar and the banner standing on it with
+// it — one blow, the whole stack, refunded.
 func TestCascadeTakesDownWhatItHeldUp(t *testing.T) {
 	f := newFixture(t)
 	i := modTile(t, f, 1)
@@ -305,7 +308,7 @@ func TestCascadeTakesDownWhatItHeldUp(t *testing.T) {
 	for _, c := range []struct{ kind, slot string }{
 		{"mod_floor_wood", "floor"},
 		{"mod_pillar_wood", "fixture"},
-		{"mod_roof_thatch", "roof"},
+		{"mod_banner_blank", "decor"},
 	} {
 		f.r.handleBuildMod(f.p, map[string]any{"t": "buildmod", "i": float64(i), "kind": c.kind, "slot": c.slot})
 	}
@@ -313,7 +316,6 @@ func TestCascadeTakesDownWhatItHeldUp(t *testing.T) {
 		t.Fatalf("setup placed %d modules, want 3", len(f.r.modOrder))
 	}
 	planks := f.p.Inv["wood_planks"]
-	thatch := f.p.Inv["reed_thatch"]
 
 	f.reset()
 	floor, _ := f.r.moduleAt(i, "floor")
@@ -322,12 +324,10 @@ func TestCascadeTakesDownWhatItHeldUp(t *testing.T) {
 	if len(f.r.modules) != 0 || len(f.r.modOrder) != 0 {
 		t.Fatalf("%d modules survived the cascade: %v", len(f.r.modules), f.r.modOrder)
 	}
-	// floor (2 planks) + pillar (2 planks) both refund 1, thatch roof refunds 1
+	// floor (2 planks) + pillar (2 planks) both refund 1; the banner's single
+	// cloth roll halves to nothing
 	if got := f.p.Inv["wood_planks"] - planks; got != 2 {
 		t.Fatalf("cascade refunded %d wood_planks, want 2", got)
-	}
-	if got := f.p.Inv["reed_thatch"] - thatch; got != 1 {
-		t.Fatalf("cascade refunded %d reed_thatch, want 1", got)
 	}
 	seen := map[string]bool{}
 	for _, m := range f.seen {
@@ -341,7 +341,7 @@ func TestCascadeTakesDownWhatItHeldUp(t *testing.T) {
 			seen[m["slot"].(string)] = true
 		}
 	}
-	for _, slot := range []string{"floor", "fixture", "roof"} {
+	for _, slot := range []string{"floor", "fixture", "decor"} {
 		if !seen[slot] {
 			t.Fatalf("no modd broadcast for the %s that came down", slot)
 		}
@@ -427,73 +427,5 @@ func TestCuttingASpanDropsTheRest(t *testing.T) {
 	}
 	if got := f.p.Inv["wood_planks"] - planks; got != 2 {
 		t.Fatalf("the cut span refunded %d wood_planks, want 2 (one per segment)", got)
-	}
-}
-
-// --- what a build is FOR ---------------------------------------------------
-
-// A roof is shelter: the desert stops burning you the moment one is over your
-// head, and hunger still does not care that you are indoors.
-func TestRoofShelters(t *testing.T) {
-	f := newFixture(t)
-	// a sand tile with a neighbour to put the wall on
-	sand := -1
-	for i := 0; i < world.SIZE*world.SIZE-1; i++ {
-		if f.r.world.Tiles[i] == world.TSand && f.r.world.Tiles[i+1] == world.TSand &&
-			!world.LandmarkBlock[i] && !world.LandmarkBlock[i+1] {
-			sand = i
-			break
-		}
-	}
-	if sand < 0 {
-		t.Fatal("no sand pair in the world")
-	}
-	x, y := float64(sand%world.SIZE), float64(sand/world.SIZE)
-	f.stand(x, y, 0)
-	stock(f)
-	f.r.time = 0.5 // midday: the desert-heat branch is armed
-	f.p.HP = f.r.defs.MaxHP
-
-	f.r.survivalTick()
-	if f.p.HP == f.r.defs.MaxHP {
-		t.Fatal("setup: exposed midday sand did not burn the player")
-	}
-
-	// wall the neighbouring tile, roof this one, and the burning stops
-	f.r.handleBuildMod(f.p, map[string]any{"t": "buildmod", "i": float64(sand + 1), "kind": "mod_wall_stone", "slot": "wall"})
-	f.r.handleBuildMod(f.p, map[string]any{"t": "buildmod", "i": float64(sand), "kind": "mod_roof_thatch", "slot": "roof"})
-	if !f.r.roofed(sand) {
-		t.Fatalf("roof not placed: %v", f.lastOfType("modfail"))
-	}
-	hp := f.p.HP
-	f.r.survivalTick()
-	if f.p.HP != hp {
-		t.Fatalf("the desert still burned a roofed player: %d -> %d", hp, f.p.HP)
-	}
-
-	// ...but a roof is not a larder
-	f.p.Hunger = 0
-	f.r.survivalTick()
-	if f.p.HP >= hp {
-		t.Fatal("a roof cancelled starvation — shelter must only cover the environment")
-	}
-}
-
-// Taking down the wall a roof leans on brings the roof with it.
-func TestRoofFallsWithItsWall(t *testing.T) {
-	f := newFixture(t)
-	i := modTile(t, f, 0)
-	n := i + 1
-	f.stand(float64(i%world.SIZE), float64(i/world.SIZE), 0)
-	stock(f)
-	f.r.handleBuildMod(f.p, map[string]any{"t": "buildmod", "i": float64(n), "kind": "mod_wall_wood", "slot": "wall"})
-	f.r.handleBuildMod(f.p, map[string]any{"t": "buildmod", "i": float64(i), "kind": "mod_roof_thatch", "slot": "roof"})
-	if !f.r.roofed(i) {
-		t.Fatalf("setup: roof not placed: %v", f.lastOfType("modfail"))
-	}
-	wall, _ := f.r.moduleAt(n, "wall")
-	f.r.hitModule(f.p, wall, 100)
-	if f.r.roofed(i) {
-		t.Fatal("the roof stayed up after the wall holding it came down")
 	}
 }

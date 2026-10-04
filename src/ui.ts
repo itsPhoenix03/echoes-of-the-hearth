@@ -28,6 +28,7 @@ export interface UIState {
   hp: number; hunger: number; thirst: number;
   inv: any; tools: Set<string>; gear: Set<string>; equipped: string | null;
   wornGear: string | null;
+  armorOn: boolean;
   inWater: boolean;
   selectedVehicle: 'boat' | 'sboat' | null;
   mono: boolean[]; day: number; time: number; won: boolean;
@@ -48,11 +49,13 @@ const icon = (k: string) =>
      banner: '🚩', stone_path: '🪨', lantern: '🏮', reed_vase: '🌾', rug: '🟫', trophy_antler: '🦌',
      fence: '🪵', farmplot: '🌱', grain: '🌾', glowcap: '✨', bread: '🍞', medicine: '🧪',
      wood_planks: '🟫', stone_blocks: '⬜', reed_thatch: '🌾', rope_coil: '🪢', cloth_roll: '🧵',
-     clay_bricks: '🧱', glass_pane: '🪟', iron_beam: '🔩', crystal_lattice: '🔷',
-     starmetal_plate: '✨' } as any)[k] || '▪';
+     clay_bricks: '🧱', glass_pane: '🪟', crystal_lattice: '🔷',
+     starmetal_armor: '🛡' } as any)[k] || '▪';
 
 const HOTBAR = ['axe', 'pick', 'spick', 'sword', 'isword'];
-const CLOAKS = ['heatcloak', 'furcloak'];
+const CLOAKS = ['heatcloak', 'furcloak', 'starmetal_armor'];   // wearables shown on the quickbar
+const isWorn = (st: { wornGear: string | null; armorOn: boolean }, t: string) =>
+  t === 'starmetal_armor' ? st.armorOn : st.wornGear === t;
 
 export function initUI(
   onCraft: (r: string) => void,
@@ -229,7 +232,7 @@ export function initUI(
 
     // inventory (modal) + quickbar — rebuild only when contents change
     // Task 4: add wornGear + selectedVehicle to signature
-    const sig = JSON.stringify([st.inv, [...st.tools], [...st.gear], selected, st.equipped, st.wornGear, st.selectedVehicle, st.inWater, st.zone]);
+    const sig = JSON.stringify([st.inv, [...st.tools], [...st.gear], selected, st.equipped, st.wornGear, st.armorOn, st.selectedVehicle, st.inWater, st.zone]);
     if (sig !== invSig) {
       invSig = sig;
       let html = RESOURCES.map((r) => `<span class="slot">${icon(r)} ${st.inv[r] || 0}</span>`).join('');
@@ -271,7 +274,7 @@ export function initUI(
         `<span class="slot tool ${st.equipped === t ? 'eq' : ''}" data-eq="${t}">[${HOTBAR.indexOf(t) + 1}] ${icon(t)} ${NAMES[t]}${st.equipped === t ? ' ✓' : ''}</span>`).join('');
       // Task 4: gear slots are clickable to wear/unwear
       html += [...st.gear].map((t) =>
-        `<span class="slot tool ${st.wornGear === t ? 'eq' : ''}" data-wear="${t}">${icon(t)} ${NAMES[t]} ${st.wornGear === t ? '✓ worn' : '(wear)'}</span>`
+        `<span class="slot tool ${isWorn(st, t) ? 'eq' : ''}" data-wear="${t}">${icon(t)} ${NAMES[t]} ${isWorn(st, t) ? '✓ worn' : '(wear)'}</span>`
       ).join('');
       $('inv').innerHTML = html;
       // quickbar: equipped tools + quick consumables + owned cloaks
@@ -285,7 +288,7 @@ export function initUI(
       // Task 4: cloaks in quickbar
       for (const t of CLOAKS) {
         if (st.gear.has(t)) {
-          qb += `<span class="slot tool ${st.wornGear === t ? 'eq' : ''}" data-wear="${t}">${icon(t)}${st.wornGear === t ? '✓' : ''}</span>`;
+          qb += `<span class="slot tool ${isWorn(st, t) ? 'eq' : ''}" data-wear="${t}">${icon(t)}${isWorn(st, t) ? '✓' : ''}</span>`;
         }
       }
       $('quickbar').innerHTML = qb;
@@ -370,11 +373,10 @@ export function initUI(
       if (bsig !== buildSig) {
         buildSig = bsig;
         let html = '<b>Building</b> <span style="color:#888">(B to close)</span><br>' +
-          '<span style="color:#8ab;font-size:11px">Paid for in crafted materials · a roof over your tile shelters you from the weather</span>';
-        const order = ['floor', 'wall', 'roof', 'fixture', 'decor'];
+          '<span style="color:#8ab;font-size:11px">Paid for in crafted materials</span>';
+        const order = ['floor', 'wall', 'fixture', 'decor'];
         const label: Record<string, string> = {
-          floor: 'Floors', wall: 'Walls & openings', roof: 'Roofs',
-          fixture: 'Fixtures', decor: 'Decor',
+          floor: 'Floors', wall: 'Walls & openings', fixture: 'Fixtures', decor: 'Decor',
         };
         for (const group of order) {
           const kinds = Object.entries(MODULES as any)

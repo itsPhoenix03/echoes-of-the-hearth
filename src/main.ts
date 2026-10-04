@@ -253,6 +253,8 @@ class Hearth extends Phaser.Scene {
   gear = new Set<string>();
   equipped: string | null = null;
   wornGear: string | null = null;
+  /** Starmetal Armor on (its own slot — stacks with the cloak). */
+  armorOn = false;
   actionSeq = 0;              // monotonic per-client counter for the validated action protocol (seq/act)
   pendingActSeq: number | null = null;   // most recent gather/dig/atk seq awaiting server confirmation
   mono = [false, false, false, false];
@@ -334,12 +336,7 @@ class Hearth extends Phaser.Scene {
   placeDir = 0;
   /** Modular building. modSpr is keyed "tileIndex:slot" — several per tile. */
   modSpr = new Map<string, Phaser.GameObjects.Sprite>();
-  /** Warm pools under lantern hooks, keyed like modSpr. */
-  modGlow = new Map<string, Phaser.GameObjects.Arc>();
-  /** True while the player stands under their own roof (drives the toast). */
-  sheltered = false;
   placingMod: string | null = null;
-  lastRoofTile = -1;
   modSeq = 0;
   updateUI!: (st: UIState) => void;
   uiApi!: any;
@@ -829,6 +826,16 @@ class Hearth extends Phaser.Scene {
     }
   }
 
+  /** The Starmetal Armor turned (some of) a creature hit: a shield glint over the keeper. */
+  armorClang() {
+    this.audio.thud();
+    const t = this.add
+      .text(this.me.x, this.me.y - 40, "🛡", { fontFamily: "Arial", fontSize: "14px" })
+      .setOrigin(0.5)
+      .setDepth(this.me.depth + 2);
+    this.tweens.add({ targets: t, y: t.y - 14, alpha: 0, scale: 1.3, duration: 450, onComplete: () => t.destroy() });
+  }
+
   /** `<res>_pop` one-shots with the pack's per-frame timing. */
   registerPopAnims() {
     for (const r of POP_RES)
@@ -893,7 +900,7 @@ class Hearth extends Phaser.Scene {
 
   /** Ambient keeper loop for our own rig — mirrors the server's exposure rules (tick.go). */
   selfRigStatus(): RigStatus {
-    if (this.z === 0 && !this.sheltered) {
+    if (this.z === 0) {
       const t = this.tileAt(this.px, this.py);
       const wt = this.swimming ? this.world.waterTemp?.[(this.py | 0) * SIZE + (this.px | 0)] ?? 0 : 0;
       if ((t === T.SNOW && this.wornGear !== "furcloak") || wt === 1) return "cold";
@@ -1241,8 +1248,6 @@ class Hearth extends Phaser.Scene {
     }
     // modules exist on the surface only; underground they fade with everything else
     for (const s of this.modSpr.values()) s.setAlpha(surfA);
-    for (const g of this.modGlow.values()) g.setAlpha(z === 0 ? 0.12 : 0.03);
-    this.lastRoofTile = -1; // re-evaluate roof fade for the new layer
     this.monoSpr.forEach((s) => s.setAlpha(surfA));
     for (const s of this.decorSpr.values()) s.setAlpha(surfA);
     for (const s of this.mountainSpr) s.setAlpha(surfA);
@@ -1428,6 +1433,7 @@ class Hearth extends Phaser.Scene {
       this.applyDevAccess();
       // Task 4: wornGear from init
       this.wornGear = m.wornGear ?? null;
+      this.armorOn = m.armor === true;
       // fix: init now carries hp/hunger/thirst — an injured reconnect must not show a full HUD
       if (m.hp !== undefined) this.hp = m.hp;
       if (m.hunger !== undefined) this.hunger = m.hunger;
@@ -1451,9 +1457,9 @@ class Hearth extends Phaser.Scene {
       // §3: `players` is now an array of {id,x,y,z,name,b,eq} objects. The legacy
       // array-of-arrays form is still accepted so ?legacy=1 keeps working.
       for (const e of m.players || []) {
-        const [pid, x, y, eq, pz, pname, pb, worn] = Array.isArray(e)
+        const [pid, x, y, eq, pz, pname, pb, worn, armor] = Array.isArray(e)
           ? e
-          : [e.id, e.x, e.y, e.eq, e.z, e.name, e.b, e.worn];
+          : [e.id, e.x, e.y, e.eq, e.z, e.name, e.b, e.worn, e.armor];
         this.addOther(pid, x, y, pname);
         const o = this.others.get(pid);
         if (o) {
@@ -1462,6 +1468,7 @@ class Hearth extends Phaser.Scene {
           o.label.setVisible(this.showNames && o.z === this.z);
           if (eq) o.rig.hold(eq);
           o.rig.setCloak(worn);
+          o.rig.setArmor(armor);
           this.setOtherBoat(o, pb | 0);
         }
       }
@@ -1499,6 +1506,7 @@ class Hearth extends Phaser.Scene {
     } else if (m.t === "pj") {
       this.addOther(m.id, m.x, m.y, m.name);
       this.others.get(m.id)?.rig.setCloak(m.worn);
+      this.others.get(m.id)?.rig.setArmor(m.armor);
       showMsg("A fellow Keeper has joined.");
     } else if (m.t === "pl") {
       const o = this.others.get(m.id);
@@ -1554,7 +1562,10 @@ class Hearth extends Phaser.Scene {
       o?.rig.hold(m.k);
     } else if (m.t === "worn") {
       // another keeper put on / took off a cloak (our own arrives via `inv`)
-      if (m.id !== this.id) this.others.get(m.id)?.rig.setCloak(m.k);
+      if (m.id !== this.id) {
+        this.others.get(m.id)?.rig.setCloak(m.k);
+        this.others.get(m.id)?.rig.setArmor(m.armor);
+      }
     } else if (m.t === "inv") {
       this.popGains(this.inv, m.inv);
       this.inv = m.inv;
@@ -1562,6 +1573,7 @@ class Hearth extends Phaser.Scene {
       this.gear = new Set(m.gear);
       // Task 4: wornGear from inv update
       this.wornGear = m.wornGear ?? null;
+      this.armorOn = m.armor === true;
     } else if (m.t === "msg") showMsg(m.s);
     else if (m.t === "medicOffer") {
       this.medicOffer = m.offer
@@ -1754,6 +1766,7 @@ class Hearth extends Phaser.Scene {
         600000,
       );
     } else if (m.t === "hp") {
+      if (m.blocked && this.me) this.armorClang();
       if (m.hp < this.hp) {
         this.audio.hurt();
         // ang is only present for creature contact damage — gate all hit effects on it (Guide §5 regression watchlist)
@@ -2143,7 +2156,7 @@ class Hearth extends Phaser.Scene {
   // Slot geometry. A wall fills its tile (wire spec §12.3) and is drawn like any
   // other standing structure — the art is a block with a diamond top and a ground
   // shadow, so anything else leaves it floating between tiles. Floors lie flat
-  // under entities and roofs draw above everything on the tile.
+  // under entities.
   modPlacement(slot: string, x: number, y: number) {
     const p = this.isoE(x, y);
     switch (slot) {
@@ -2151,26 +2164,19 @@ class Hearth extends Phaser.Scene {
         return { x: p.x, y: p.y, ox: 0.5, oy: 0.5, depth: p.y - 8 };
       case "wall":
         return { x: p.x, y: p.y + 16, ox: 0.5, oy: 0.86, depth: p.y + 20 };
-      case "roof":
-        return { x: p.x, y: p.y - 6, ox: 0.5, oy: 0.86, depth: p.y + 44 };
       default: // fixture, decor
         return { x: p.x, y: p.y + 20, ox: 0.5, oy: 0.92, depth: p.y + 20 };
     }
   }
 
   /**
-   * Mirror of the server's support rule (wire spec §12.3) — roofs rest on a wall
-   * or a fixture, fixtures on a floor, decor on a floor or a wall. Advisory only:
+   * Mirror of the server's support rule (wire spec §12.3) — fixtures rest on a
+   * floor, decor on a floor or a wall. Advisory only:
    * it colours the ghost, the server still decides.
    */
   modSupported(i: number, slot: string): boolean {
     const at = (s: string) => this.modSpr.has(`${i}:${s}`);
     switch (slot) {
-      case "roof":
-        return (
-          at("fixture") ||
-          [i - 1, i + 1, i - SIZE, i + SIZE].some((n) => this.modSpr.has(`${n}:wall`))
-        );
       case "fixture":
         return at("floor");
       case "decor":
@@ -2202,53 +2208,12 @@ class Hearth extends Phaser.Scene {
     spr.setScale(0.6).setY(finalY - 10);
     this.tweens.add({ targets: spr, scaleX: 1, scaleY: 1, y: finalY, duration: 160, ease: "Back.easeOut" });
     this.modSpr.set(key, spr);
-    if (kind === "mod_lantern_hook") {
-      // same warm additive pool the lantern decor uses, so a lit porch reads at night
-      this.modGlow.set(
-        key,
-        this.add
-          .circle(g.x, g.y - 6, 52, 0xffcc88, 0.12)
-          .setDepth(g.depth - 1)
-          .setBlendMode(Phaser.BlendModes.ADD)
-          .setAlpha(this.z !== 0 ? 0.03 : 0.12),
-      );
-    }
-    if (slot === "roof") this.lastRoofTile = -1; // force one roof-fade pass
   }
 
   removeModule(i: number, slot: string) {
     const key = `${i}:${slot}`;
     this.modSpr.get(key)?.destroy();
     this.modSpr.delete(key);
-    this.modGlow.get(key)?.destroy();
-    this.modGlow.delete(key);
-    if (slot === "roof") this.lastRoofTile = -1;
-  }
-
-  /**
-   * Roofs hide the player standing under them. Recomputed only when the player
-   * changes tile — a roof-heavy base would otherwise pay this every frame.
-   */
-  updateRoofFade() {
-    const tile = ((this.py | 0) * SIZE + (this.px | 0)) | 0;
-    if (tile === this.lastRoofTile) return;
-    this.lastRoofTile = tile;
-    // a roof overhead is real shelter server-side (§12.7) — say so once, on entry
-    const nowSheltered = this.z === 0 && this.modSpr.has(`${tile}:roof`);
-    if (nowSheltered !== this.sheltered) {
-      this.sheltered = nowSheltered;
-      if (nowSheltered)
-        showMsg("🏠 Under your roof — storms, desert heat and cold pass you by.", 2500);
-    }
-    for (const spr of this.modSpr.values()) {
-      if (spr.getData("slot") !== "roof") continue;
-      const i = spr.getData("i") as number;
-      const near =
-        this.z === 0 &&
-        Math.abs((i % SIZE) - this.px) <= 1.5 &&
-        Math.abs(((i / SIZE) | 0) - this.py) <= 1.5;
-      spr.setAlpha(this.z !== 0 ? 0.15 : near ? 0.3 : 1);
-    }
   }
 
   applyChunkMsg(m: ChunkMsg) {
@@ -3173,6 +3138,7 @@ class Hearth extends Phaser.Scene {
     this.me.setBoat(this.z === 0 && this.sailing ? this.boatKind || 1 : 0);   // seated in the hull, rowing
     this.me.setStatus(this.selfRigStatus());
     this.me.setCloak(this.wornGear);
+    this.me.setArmor(this.armorOn);
 
     // see-through structures: fade anything standing in front of the player
     if (this.z === 0) {
@@ -3250,9 +3216,6 @@ class Hearth extends Phaser.Scene {
         s.setDepth(s.y);
       }
     }
-    // roofs fade out while the player stands under them (no-op unless the
-    // player has changed tile)
-    if (this.modSpr.size) this.updateRoofFade();
 
     // ghost placement preview — modular first: it uses slot geometry, not recipes
     if (this.ghost && this.placingMod) {
@@ -3463,6 +3426,7 @@ class Hearth extends Phaser.Scene {
       gear: this.gear,
       equipped: this.equipped,
       wornGear: this.wornGear,
+      armorOn: this.armorOn,
       selectedVehicle: this.selectedVehicle,
       inWater: this.swimming || this.sailing,
       mono: this.mono,

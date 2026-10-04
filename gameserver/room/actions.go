@@ -560,6 +560,10 @@ func (r *Room) handleWear(p *Player, m map[string]any) {
 		return
 	}
 	k, isStr := v.(string)
+	if isStr && k == ArmorKey {
+		r.toggleArmor(p)
+		return
+	}
 	if !isStr || (k != "heatcloak" && k != "furcloak") || !p.Gear[k] {
 		return
 	}
@@ -577,10 +581,48 @@ func (r *Room) handleWear(p *Player, m map[string]any) {
 	}
 }
 
-// broadcastWorn tells every client which cloak (if any) a player now wears, so
-// their rig can drape it — the inventory frame above only reaches the wearer.
+// broadcastWorn tells every client which cloak (if any) a player now wears and
+// whether they have their armor on, so their rig can dress them — the inventory
+// frame above only reaches the wearer.
 func (r *Room) broadcastWorn(p *Player) {
-	r.broadcast(map[string]any{"t": "worn", "id": p.S.ID, "k": nullable(p.Worn)})
+	r.broadcast(map[string]any{"t": "worn", "id": p.S.ID, "k": nullable(p.Worn), "armor": p.Armor})
+}
+
+// ArmorKey is the Starmetal Armor's gear key. It is crafted once at the forge
+// (a deliberately late-game bill: starmetal, iron, diamond, essence, crystal)
+// and then worn in its own slot, so it stacks with whichever cloak is on.
+const ArmorKey = "starmetal_armor"
+
+// armorFactor is the share of creature damage the armor lets through.
+const armorFactor = 0.5
+
+func (r *Room) toggleArmor(p *Player) {
+	if !p.Gear[ArmorKey] {
+		return
+	}
+	p.Armor = !p.Armor
+	p.ArmorDebt = 0
+	r.sendInv(p)
+	r.broadcastWorn(p)
+	if p.Armor {
+		r.send(p, map[string]any{"t": "msg", "s": "🛡 You buckle on the Starmetal Armor — creatures hit for half."})
+	} else {
+		r.send(p, map[string]any{"t": "msg", "s": "You unbuckle the Starmetal Armor."})
+	}
+}
+
+// creatureDamage is the armor's whole effect: what a creature hit of dmg
+// actually costs this player. Armored, half of it lands; HP is an integer, so
+// the remainder is carried in ArmorDebt and a 1-damage hit lands every other
+// time. Weather, water, hunger and lava ignore armor — it stops claws, not cold.
+func (r *Room) creatureDamage(q *Player, dmg int) int {
+	if !q.Armor || dmg <= 0 {
+		return dmg
+	}
+	q.ArmorDebt += float64(dmg) * armorFactor
+	n := int(q.ArmorDebt)
+	q.ArmorDebt -= float64(n)
+	return n
 }
 
 // --- water and use --------------------------------------------------------

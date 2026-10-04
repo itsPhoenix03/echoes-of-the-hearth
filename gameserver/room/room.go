@@ -559,7 +559,7 @@ func (r *Room) onJoin(s *Session) {
 			continue
 		}
 		others = append(others, map[string]any{
-			"id": id, "x": q.X, "y": q.Y, "z": q.Z, "name": q.Name, "b": q.B, "eq": q.Equip, "worn": nullable(q.Worn),
+			"id": id, "x": q.X, "y": q.Y, "z": q.Z, "name": q.Name, "b": q.B, "eq": q.Equip, "worn": nullable(q.Worn), "armor": q.Armor,
 		})
 	}
 	r.send(p, map[string]any{
@@ -568,7 +568,7 @@ func (r *Room) onJoin(s *Session) {
 		"chunk": 64,
 		"x":     p.X, "y": p.Y, "z": p.Z,
 		"hp": p.HP, "maxHp": r.defs.MaxHP, "hunger": statInt(p.Hunger), "thirst": statInt(p.Thirst),
-		"inv": p.Inv, "tools": keysOf(p.Tools), "gear": keysOf(p.Gear), "wornGear": p.Worn,
+		"inv": p.Inv, "tools": keysOf(p.Tools), "gear": keysOf(p.Gear), "wornGear": p.Worn, "armor": p.Armor,
 		"players": others,
 		"time":    r.time, "day": r.day, "mono": r.mono[:], "won": r.won,
 		// Slice 3 global state. Weather is one value and corruption is a short,
@@ -592,7 +592,7 @@ func (r *Room) onJoin(s *Session) {
 		"dev": r.devAllowed(p),
 	})
 	r.pushChunks(p)
-	r.broadcast(map[string]any{"t": "pj", "id": s.ID, "x": p.X, "y": p.Y, "name": p.Name, "worn": nullable(p.Worn)})
+	r.broadcast(map[string]any{"t": "pj", "id": s.ID, "x": p.X, "y": p.Y, "name": p.Name, "worn": nullable(p.Worn), "armor": p.Armor})
 	r.cfg.Logger.Printf("[hearth] %s (%s) joined (%d online)", s.ID, p.Name, len(r.players))
 }
 
@@ -720,7 +720,7 @@ func (r *Room) snapshotInto(p *Player) {
 	r.profiles[p.S.UserID] = &persist.Profile{
 		Name: p.Name, X: p.X, Y: p.Y, Z: p.Z,
 		HP: p.HP, Hunger: p.Hunger, Thirst: p.Thirst,
-		Inv: inv, Tools: keysOf(p.Tools), Gear: keysOf(p.Gear), Worn: p.Worn,
+		Inv: inv, Tools: keysOf(p.Tools), Gear: keysOf(p.Gear), Worn: p.Worn, Armor: p.Armor,
 	}
 }
 
@@ -751,6 +751,7 @@ func (r *Room) restore(p *Player, prof *persist.Profile) {
 	if prof.Worn != "" && p.Gear[prof.Worn] {
 		p.Worn = prof.Worn
 	}
+	p.Armor = prof.Armor && p.Gear[ArmorKey]
 	// The ticket owns the name; a saved name never overrides it.
 }
 

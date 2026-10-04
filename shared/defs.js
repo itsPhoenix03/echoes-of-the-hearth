@@ -377,13 +377,6 @@ const D = {
       "station": "forge",
       "material": true
     },
-    "iron_beam": {
-      "cost": {
-        "iron": 3
-      },
-      "station": "forge",
-      "material": true
-    },
     "crystal_lattice": {
       "cost": {
         "crystal": 4,
@@ -392,13 +385,16 @@ const D = {
       "station": "forge",
       "material": true
     },
-    "starmetal_plate": {
+    "starmetal_armor": {
       "cost": {
-        "starmetal": 2,
-        "iron": 2
+        "starmetal": 15,
+        "iron": 12,
+        "diamond": 4,
+        "essence": 12,
+        "crystal": 8
       },
       "station": "forge",
-      "material": true
+      "gear": true
     }
   },
   "NAMES": {
@@ -452,26 +448,18 @@ const D = {
     "cloth_roll": "Cloth Roll",
     "clay_bricks": "Clay Bricks",
     "glass_pane": "Glass Pane",
-    "iron_beam": "Iron Beam",
     "crystal_lattice": "Crystal Lattice",
-    "starmetal_plate": "Starmetal Plate",
+    "starmetal_armor": "Starmetal Armor",
     "mod_floor_wood": "Wooden Floor",
     "mod_floor_stone": "Stone Floor",
     "mod_floor_thatch": "Thatch Floor",
     "mod_wall_wood": "Wooden Wall",
     "mod_wall_stone": "Stone Wall",
     "mod_wall_crystal": "Crystal Wall",
-    "mod_window": "Window",
     "mod_door": "Door",
     "mod_railing": "Railing",
-    "mod_roof_thatch": "Thatch Roof",
-    "mod_roof_shingle": "Shingle Roof",
-    "mod_roof_metal": "Metal Roof",
     "mod_pillar_wood": "Wooden Pillar",
     "mod_pillar_stone": "Stone Pillar",
-    "mod_arch": "Stone Arch",
-    "mod_stairs": "Stairs",
-    "mod_lantern_hook": "Lantern Hook",
     "mod_banner_blank": "Blank Banner",
     "mod_bridge_segment": "Bridge Segment"
   },
@@ -597,9 +585,7 @@ const D = {
     "cloth_roll",
     "clay_bricks",
     "glass_pane",
-    "iron_beam",
-    "crystal_lattice",
-    "starmetal_plate"
+    "crystal_lattice"
   ],
   "MEDIC_TRADE_POOLS": {
     "woods": [
@@ -703,9 +689,7 @@ const D = {
     "cloth_roll",
     "clay_bricks",
     "glass_pane",
-    "iron_beam",
-    "crystal_lattice",
-    "starmetal_plate"
+    "crystal_lattice"
   ],
   "MODULES": {
     "mod_floor_wood": {
@@ -754,15 +738,6 @@ const D = {
       "hp": 50,
       "blocks": true
     },
-    "mod_window": {
-      "slot": "wall",
-      "cost": {
-        "wood_planks": 1,
-        "glass_pane": 1
-      },
-      "hp": 20,
-      "blocks": true
-    },
     "mod_door": {
       "slot": "wall",
       "cost": {
@@ -780,28 +755,6 @@ const D = {
       "hp": 10,
       "blocks": true
     },
-    "mod_roof_thatch": {
-      "slot": "roof",
-      "cost": {
-        "reed_thatch": 3
-      },
-      "hp": 15
-    },
-    "mod_roof_shingle": {
-      "slot": "roof",
-      "cost": {
-        "wood_planks": 3
-      },
-      "hp": 25
-    },
-    "mod_roof_metal": {
-      "slot": "roof",
-      "cost": {
-        "iron_beam": 2,
-        "starmetal_plate": 1
-      },
-      "hp": 45
-    },
     "mod_pillar_wood": {
       "slot": "fixture",
       "cost": {
@@ -815,28 +768,6 @@ const D = {
         "stone_blocks": 2
       },
       "hp": 35
-    },
-    "mod_arch": {
-      "slot": "fixture",
-      "cost": {
-        "stone_blocks": 3
-      },
-      "hp": 35
-    },
-    "mod_stairs": {
-      "slot": "fixture",
-      "cost": {
-        "wood_planks": 3
-      },
-      "hp": 20
-    },
-    "mod_lantern_hook": {
-      "slot": "fixture",
-      "cost": {
-        "iron_beam": 1,
-        "rope_coil": 1
-      },
-      "hp": 10
     },
     "mod_banner_blank": {
       "slot": "decor",
@@ -858,7 +789,6 @@ const D = {
   "MODULE_SLOTS": [
     "floor",
     "wall",
-    "roof",
     "fixture",
     "decor"
   ]

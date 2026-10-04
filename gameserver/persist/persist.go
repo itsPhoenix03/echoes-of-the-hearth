@@ -36,6 +36,7 @@ type Profile struct {
 	Tools  []string       `json:"tools"`
 	Gear   []string       `json:"gear"`
 	Worn   string         `json:"wornGear,omitempty"`
+	Armor  bool           `json:"armor,omitempty"`
 }
 
 // Struct is one placed player structure.

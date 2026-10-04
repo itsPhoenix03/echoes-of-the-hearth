@@ -82,10 +82,8 @@ Load all three frames per species and cycle: `1 → 2 → 3 → 2`.
 | cloth_roll | `sprites/building_materials/cloth_roll.svg` | Finished material icon |
 | crystal_lattice | `sprites/building_materials/crystal_lattice.svg` | Finished material icon |
 | glass_pane | `sprites/building_materials/glass_pane.svg` | Finished material icon |
-| iron_beam | `sprites/building_materials/iron_beam.svg` | Finished material icon |
 | reed_thatch | `sprites/building_materials/reed_thatch.svg` | Finished material icon |
 | rope_coil | `sprites/building_materials/rope_coil.svg` | Finished material icon |
-| starmetal_plate | `sprites/building_materials/starmetal_plate.svg` | Finished material icon |
 | stone_blocks | `sprites/building_materials/stone_blocks.svg` | Finished material icon |
 | wood_planks | `sprites/building_materials/wood_planks.svg` | Finished material icon |
 
@@ -93,25 +91,18 @@ Load all three frames per species and cycle: `1 → 2 → 3 → 2`.
 
 | Suggested Key | Path | Role |
 |---|---|---|
-| mod_arch | `sprites/building_materials/mod_arch.svg` | Connective arch trim |
 | mod_banner_blank | `sprites/building_materials/mod_banner_blank.svg` | Decorative blank banner |
 | mod_bridge_segment | `sprites/building_materials/mod_bridge_segment.svg` | Walkway component |
 | mod_door | `sprites/building_materials/mod_door.svg` | Entry/exit module |
 | mod_floor_stone | `sprites/building_materials/mod_floor_stone.svg` | Floor variant |
 | mod_floor_thatch | `sprites/building_materials/mod_floor_thatch.svg` | Floor variant |
 | mod_floor_wood | `sprites/building_materials/mod_floor_wood.svg` | Floor variant |
-| mod_lantern_hook | `sprites/building_materials/mod_lantern_hook.svg` | Light fixture attachment |
 | mod_pillar_stone | `sprites/building_materials/mod_pillar_stone.svg` | Support column variant |
 | mod_pillar_wood | `sprites/building_materials/mod_pillar_wood.svg` | Support column variant |
 | mod_railing | `sprites/building_materials/mod_railing.svg` | Safety/perimeter trim |
-| mod_roof_metal | `sprites/building_materials/mod_roof_metal.svg` | Roof variant |
-| mod_roof_shingle | `sprites/building_materials/mod_roof_shingle.svg` | Roof variant |
-| mod_roof_thatch | `sprites/building_materials/mod_roof_thatch.svg` | Roof variant |
-| mod_stairs | `sprites/building_materials/mod_stairs.svg` | Vertical connection |
 | mod_wall_crystal | `sprites/building_materials/mod_wall_crystal.svg` | Wall variant |
 | mod_wall_stone | `sprites/building_materials/mod_wall_stone.svg` | Wall variant |
 | mod_wall_wood | `sprites/building_materials/mod_wall_wood.svg` | Wall variant |
-| mod_window | `sprites/building_materials/mod_window.svg` | Opening/light module |
 
 ### Raw Resource Icons (inventory/craft tracking)
 

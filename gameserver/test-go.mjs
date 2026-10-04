@@ -1412,9 +1412,9 @@ console.log(`DEVOK spawn OK: all ${CRE_TYPE_KEYS.length} creature types spawned 
 
   // slot/kind mismatch is refused the same way
   D.msgs = D.msgs.filter((m) => m.t !== 'modfail');
-  D.send({ t: 'buildmod', i: mi, kind: 'mod_floor_wood', slot: 'roof', seq: 4 });
+  D.send({ t: 'buildmod', i: mi, kind: 'mod_floor_wood', slot: 'wall', seq: 4 });
   const badSlot = await D.wait('modfail', 3000);
-  if (badSlot.why !== 'bad-slot') fail('MOD: a floor in the roof slot answered ' + JSON.stringify(badSlot));
+  if (badSlot.why !== 'bad-slot') fail('MOD: a floor in the wall slot answered ' + JSON.stringify(badSlot));
 
   // a blocking wall may not be dropped on the tile a player is standing on
   D.msgs = D.msgs.filter((m) => m.t !== 'modfail');
@@ -1430,11 +1430,11 @@ console.log(`DEVOK spawn OK: all ${CRE_TYPE_KEYS.length} creature types spawned 
   const wall = await D.wait('mod', 3000);
   if (wall.slot !== 'wall') fail('MOD: the wall was refused: ' + JSON.stringify(wall));
 
-  // the roof leans on that wall, and a roofed tile is shelter (§12.7)
+  // roofs were retired from the game: the piece is unknown now
   D.msgs = D.msgs.filter((m) => m.t !== 'mod' && m.t !== 'modfail');
   D.send({ t: 'buildmod', i: mi, kind: 'mod_roof_thatch', slot: 'roof', seq: 7 });
-  const roof = await D.wait('mod', 3000);
-  if (roof.slot !== 'roof') fail('MOD: the roof was refused: ' + JSON.stringify(roof));
+  const roof = await D.wait('modfail', 3000);
+  if (roof.why !== 'unknown-module') fail('MOD: a retired roof answered ' + JSON.stringify(roof));
 
   warp(D, mx, my); await sleep(120);
   D.msgs = D.msgs.filter((m) => m.t !== 'fix');
@@ -1443,22 +1443,12 @@ console.log(`DEVOK spawn OK: all ${CRE_TYPE_KEYS.length} creature types spawned 
   if (Math.abs(fix.x - mx) > 0.6) fail(`MOD: walking into a wall tile was allowed — snapped to ${fix.x}`);
   console.log('MOD wall OK: the wall filled its tile and the step was refused');
 
-  // an unroofed player on this open sand burns at midday; under the roof they do not
-  D.send({ t: 'devcmd', cmd: 'time', v: 0.5 }); await sleep(400);
-  const hpNow = () => (lastOf(D, 'hp') || {}).hp ?? D.state.hp ?? MAX_HP;
-  D.msgs = D.msgs.filter((m) => m.t !== 'hp' && m.t !== 'msg');
-  await sleep(9000);
-  if (D.msgs.some((m) => m.t === 'msg' && /desert heat/i.test(m.s)))
-    fail('MOD: the desert still burned a player standing under their own roof');
-  console.log(`MOD shelter OK: no desert-heat damage under the roof (hp ${hpNow()})`);
-
   // demolition: swing until a piece on this tile comes down and expect half its
   // materials back. Which piece falls first is the server's ordering to decide,
   // so the refund is asserted against whichever slot it reports.
-  const REFUND = { floor: 'wood_planks', fixture: 'wood_planks', roof: 'reed_thatch', wall: 'stone_blocks' };
+  const REFUND = { floor: 'wood_planks', fixture: 'wood_planks', wall: 'stone_blocks' };
   const before = {
     wood_planks: D.state.inv.wood_planks,
-    reed_thatch: D.state.inv.reed_thatch,
     stone_blocks: D.state.inv.stone_blocks,
   };
   // A swing takes the nearest creature or animal FIRST, and standing still on
@@ -1481,7 +1471,7 @@ console.log(`DEVOK spawn OK: all ${CRE_TYPE_KEYS.length} creature types spawned 
   await sleep(250);
   if (D.state.inv[res] <= before[res])
     fail(`MOD: demolishing the ${gone.slot} refunded no ${res}`);
-  console.log(`MOD OK: slots stacked, wall blocked, roof sheltered, demolished the ${gone.slot} for ${res}`);
+  console.log(`MOD OK: slots stacked, wall blocked, roof retired, demolished the ${gone.slot} for ${res}`);
 
   // bridges: the one piece allowed over water, and only moored to land (§12.5)
   const coast = (() => {

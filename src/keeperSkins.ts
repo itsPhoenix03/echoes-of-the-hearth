@@ -1,14 +1,15 @@
 import Phaser from 'phaser';
 
 /* ────────────────────────────────────────────────────────────────────────────
- * Keeper skins — per-player shirt colour and worn cloak, baked into textures.
+ * Keeper skins — per-player shirt colour and worn gear, baked into textures.
  *
- * The keeper art has one fixed blue shirt and no cloak. A skin is that same
- * frame set with (a) the shirt fills recoloured and (b) the keeper-equipment
- * cloak drape injected into the body group, so it follows every body motion
- * while the arms, head and held prop stay drawn on top of it.
+ * The keeper art has one fixed blue shirt and no gear. A skin is that same
+ * frame set with (a) the shirt fills recoloured, (b) the Starmetal Armor
+ * breastplate and/or (c) the keeper-equipment cloak drape injected into the
+ * body group, so they follow every body motion while the arms, head and held
+ * prop stay drawn on top. Layering, inside out: shirt → armor → cloak.
  *
- * Skin 0 without a cloak is the shipped art: its keys are the plain frame keys
+ * Skin 0 without gear is the shipped art: its keys are the plain frame keys
  * the preloader already made, so nothing is generated for the common case.
  * Any other skin is built once per texture manager (lazily, async); until it
  * is ready the rig keeps showing the plain frames.
@@ -49,8 +50,19 @@ const CLOAK_ART: Record<'furcloak' | 'heatcloak', string> = {
 
 const CLOAK_TAG: Record<'furcloak' | 'heatcloak', string> = { furcloak: 'f', heatcloak: 'h' };
 
-export function skinId(shirt: number, cloak: Cloak): string {
-  return `${shirt}${cloak ? CLOAK_TAG[cloak] : ''}`;
+// Starmetal Armor, keeper torso space: slate cuirass with a pale steel plate,
+// the starmetal star on the chest, and pauldrons the arms are drawn over.
+const ARMOR_ART =
+  '<ellipse cx="9.6" cy="25.6" rx="3" ry="2.1" fill="#6e8393" stroke="#253547" stroke-width=".5"/>' +
+  '<ellipse cx="22.4" cy="25.6" rx="3" ry="2.1" fill="#6e8393" stroke="#253547" stroke-width=".5"/>' +
+  '<path d="M10.3 24.4Q16 22.6 21.7 24.4L22.9 34.6Q16 37.2 9.1 34.6Z" fill="#4b5b70" stroke="#253547" stroke-width=".6"/>' +
+  '<path d="M11.8 25.4Q16 24.1 20.2 25.4L21 32.9Q16 34.9 11 32.9Z" fill="#6e8393" stroke="#9eb8bc" stroke-width=".45"/>' +
+  '<path d="M16 24.6V34.4" stroke="#41576b" stroke-width=".6"/>' +
+  '<path d="M16 27.2 16.8 29 18.7 29.3 17.3 30.5 17.7 32.3 16 31.4 14.3 32.3 14.7 30.5 13.3 29.3 15.2 29Z" fill="#a4dbe1"/>' +
+  '<path d="M16 28.3 16.4 29.4 17.5 29.6 16.7 30.3 16.9 31.3 16 30.8 15.1 31.3 15.3 30.3 14.5 29.6 15.6 29.4Z" fill="#d7f2e9"/>';
+
+export function skinId(shirt: number, cloak: Cloak, armor = false): string {
+  return `${shirt}${armor ? 'a' : ''}${cloak ? CLOAK_TAG[cloak] : ''}`;
 }
 
 /** Texture key of `frame` in a skin ('0' is the shipped art itself). */
@@ -64,14 +76,17 @@ const mix = (hex: string, to: number, t: number) => {
   return '#' + ((ch(16) << 16) | (ch(8) << 8) | ch(0)).toString(16).padStart(6, '0');
 };
 
-function skinSvg(src: string, shirt: number, cloak: Cloak): string {
+function skinSvg(src: string, shirt: number, cloak: Cloak, armor = false): string {
   let s = src;
-  if (cloak) {
-    // the vest trim and collar sit on the shirt front — the cloak now covers it
+  if (cloak || armor) {
+    // the vest trim and collar sit on the shirt front — the gear now covers it
     s = s.replace(/<path[^>]*fill="#688fa5"[^>]*\/>/i, '').replace(/<path[^>]*stroke="#d3cec0"[^>]*\/>/i, '');
-    // drape goes right after the belt buckle: over torso + legs, under arms/head/prop
-    s = s.replace(/(<path[^>]*fill="#c4a879"[^>]*\/>)/i, `$1${CLOAK_ART[cloak]}`);
   }
+  // Gear goes right after the belt buckle: over the torso, under arms/head/prop.
+  // Cloak first, then armor at the same point, so the cloak ends up outermost.
+  const BUCKLE = /(<path[^>]*fill="#c4a879"[^>]*\/>)/i;
+  if (cloak) s = s.replace(BUCKLE, `$1${CLOAK_ART[cloak]}`);
+  if (armor) s = s.replace(BUCKLE, `$1${ARMOR_ART}`);
   if (shirt) {
     const c = SHIRTS[shirt];
     s = s.replace(/#456d89/gi, c).replace(/#688fa5/gi, mix(c, 255, 0.25));
@@ -96,8 +111,8 @@ const getSource = (frame: string) => {
 const built = new WeakMap<Phaser.Textures.TextureManager, Map<string, boolean>>();
 
 /** True once every frame of skin `id` exists; starts the bake on first ask. */
-export function ensureSkin(scene: Phaser.Scene, frames: string[], shirt: number, cloak: Cloak): boolean {
-  const id = skinId(shirt, cloak);
+export function ensureSkin(scene: Phaser.Scene, frames: string[], shirt: number, cloak: Cloak, armor = false): boolean {
+  const id = skinId(shirt, cloak, armor);
   if (id === '0') return true;
   const tm = scene.textures;
   let m = built.get(tm);
@@ -110,7 +125,7 @@ export function ensureSkin(scene: Phaser.Scene, frames: string[], shirt: number,
       const key = skinKey(f, id);
       if (tm.exists(key)) return;
       const img = new Image();
-      img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(skinSvg(await getSource(f), shirt, cloak));
+      img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(skinSvg(await getSource(f), shirt, cloak, armor));
       await img.decode();
       if (!tm.exists(key)) tm.addImage(key, img);
     }),
