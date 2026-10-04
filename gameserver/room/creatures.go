@@ -730,7 +730,7 @@ func (r *Room) stepCreature(c *Creature, strength int, nowMs int64) {
 	swims := canSwim[typ]
 	_, occupied := r.structures[ni]
 	if !inBounds(ni) || (r.tileAt(ni) == world.TWater && !swims) || r.medicTiles[ni] ||
-		(occupied && r.creBlocked(ni)) {
+		(occupied && r.creBlocked(ni)) || r.wallBlocks(ni) {
 		moved := false
 		for _, rot := range [2]float64{35 * math.Pi / 180, -35 * math.Pi / 180} {
 			tryAng := moveAng + rot
@@ -739,7 +739,7 @@ func (r *Room) stepCreature(c *Creature, strength int, nowMs int64) {
 			tni := ti(tnx, tny)
 			_, tOcc := r.structures[tni]
 			if inBounds(tni) && (r.tileAt(tni) != world.TWater || swims) && !r.medicTiles[tni] &&
-				(!tOcc || !r.creBlocked(tni)) {
+				(!tOcc || !r.creBlocked(tni)) && !r.wallBlocks(tni) {
 				nx, ny, ni = tnx, tny, tni
 				moved = true
 				break
@@ -822,12 +822,17 @@ func (r *Room) creatureContact(c *Creature, cdmg int, sendSlow bool, nowMs int64
 // on death, and optionally sends the frost-wraith slow.
 func (r *Room) hitPlayer(q *Player, c *Creature, dmg int, nowMs int64, slow bool) {
 	q.LastDamageAt = nowMs
-	q.HP -= dmg
+	taken := r.creatureDamage(q, dmg)
+	q.HP -= taken
 	cAng := math.Atan2(q.Y-c.Y, q.X-c.X) // away from the creature = push direction
 	if q.HP <= 0 {
 		r.respawn(q, false)
 	}
-	r.send(q, map[string]any{"t": "hp", "hp": q.HP, "x": q.X, "y": q.Y, "ang": cAng})
+	out := map[string]any{"t": "hp", "hp": q.HP, "x": q.X, "y": q.Y, "ang": cAng}
+	if taken < dmg {
+		out["blocked"] = dmg - taken // the armor turned some or all of it
+	}
+	r.send(q, out)
 	if slow {
 		r.send(q, map[string]any{"t": "slow", "ticks": 30})
 	}
@@ -891,7 +896,7 @@ func (r *Room) lancerBeam(c *Creature, nowMs int64) {
 			}
 		} else {
 			q.LastDamageAt = nowMs
-			q.HP -= 2
+			q.HP -= r.creatureDamage(q, 2)
 			lAng := math.Atan2(q.Y-c.Y, q.X-c.X)
 			if q.HP <= 0 {
 				r.respawn(q, false)
@@ -916,7 +921,7 @@ func (r *Room) bruteBolt(c *Creature, nowMs int64) {
 		if q.Z == 0 && d > 1.5 && d < 7 && r.tileAtXY(q.X, q.Y) == world.TWater {
 			c.ShotCd = 3 // one bolt every ~3s
 			q.LastDamageAt = nowMs
-			q.HP--
+			q.HP -= r.creatureDamage(q, 1)
 			cAng := math.Atan2(q.Y-c.Y, q.X-c.X)
 			r.broadcast(map[string]any{
 				"t":  "shot",

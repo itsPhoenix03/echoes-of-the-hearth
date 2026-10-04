@@ -13,7 +13,7 @@ const (
 	MaxSpeed     = 6.2   // fastest world-space speed in the game: sailing
 	SpeedSlack   = 1.6   // headroom for lag, jitter and frame batching
 	PosSlack     = 1.0   // flat allowance absorbing the client's 100ms send-throttle boundary
-	ZNear        = 3.0   // a layer change must land next to its mineshaft/shelter anchor
+	ZNear        = 3.0   // a layer change must land next to its mineshaft anchor
 	ZCooldownMS  = 500   // minimum gap between accepted layer changes
 	FixMS        = 250   // at most one snapback per player per window
 	WarpGraceMS  = 1000  // after a server-side teleport, forgive in-flight 'pos' from the old spot
@@ -47,7 +47,7 @@ type Structure struct {
 	Lvl   int
 }
 
-// Furniture is shelter/mine furniture. Empty in Slice 1; see Structure.
+// Furniture is mine furniture. Empty in Slice 1; see Structure.
 type Furniture struct {
 	Kind  string
 	Owner string
@@ -65,9 +65,6 @@ func (r *Room) posBlocked(x, y float64, z int, fromX, fromY float64) bool {
 	if z == 1 {
 		return !r.digs[i] // underground: only carved tunnels
 	}
-	if z == 2 {
-		return false // shelter interior: the server has no shelterAnchor
-	}
 	if r.world.Tiles[i] == world.TWater {
 		return false // swim / sail
 	}
@@ -80,11 +77,12 @@ func (r *Room) posBlocked(x, y float64, z int, fromX, fromY float64) bool {
 		return true
 	}
 	s, ok := r.structures[i]
-	// shelters are enterable; non-blocking decor and farmplots are walkable
-	if ok && s.Kind != "shelter" && !r.defs.DecorNonBlk[s.Kind] && s.Kind != "farmplot" {
+	// non-blocking decor and farmplots are walkable
+	if ok && !r.defs.DecorNonBlk[s.Kind] && s.Kind != "farmplot" {
 		return true
 	}
-	return false
+	// a modular wall fills its tile the way a palisade does; a door does not
+	return r.wallBlocks(i)
 }
 
 // warped is called after ANY server-side reposition — otherwise the client's
@@ -99,7 +97,7 @@ func (r *Room) warped(p *Player) {
 // zAnchor gates layer changes. A legit layer change happens at ONE structure:
 // the player stands next to it and lands on its anchor, so origin AND
 // destination are both within ZNear of that same structure. Checking the
-// destination alone would let a client "transition" to any mineshaft or shelter
+// destination alone would let a client "transition" to any mineshaft
 // on the map — an unbounded teleport, since the z branch skips the distance
 // check.
 func (r *Room) zAnchor(kind string, ax, ay, bx, by float64) bool {
@@ -168,21 +166,18 @@ func (r *Room) handlePos(p *Player, m map[string]any) {
 
 	if math.IsNaN(nx) || math.IsInf(nx, 0) || math.IsNaN(ny) || math.IsInf(ny, 0) ||
 		nx < 0 || ny < 0 || nx >= world.SIZE || ny >= world.SIZE ||
-		nz < 0 || nz > 2 || nb < 0 || nb > 2 {
+		nz < 0 || nz > 1 || nb < 0 || nb > 2 {
 		snapback()
 		return
 	}
 
 	zChange := nz != p.Z
 	if zChange {
-		// every legit layer change is a scripted teleport onto a
-		// mineshaft/shelter anchor, so travelled distance is meaningless — a
-		// single shared structure bounding BOTH endpoints is the gate
-		if (nz == 1 || p.Z == 1) && !r.zAnchor("mineshaft", p.X, p.Y, nx, ny) {
-			snapback()
-			return
-		}
-		if (nz == 2 || p.Z == 2) && !r.zAnchor("shelter", p.X, p.Y, nx, ny) {
+		// every legit layer change is a scripted teleport onto a mineshaft
+		// anchor, so travelled distance is meaningless — a single shared
+		// mineshaft bounding BOTH endpoints is the gate. The mines are the only
+		// other layer: keepers have no houses, the mines are their safe place.
+		if !r.zAnchor("mineshaft", p.X, p.Y, nx, ny) {
 			snapback()
 			return
 		}

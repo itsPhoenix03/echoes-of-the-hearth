@@ -200,7 +200,7 @@ server-authoritative movement work:
 
 - speed budget: `dt` (clamped to 1s) × `6.2` × `1.6` + `1.0` tiles
 - collision mirroring the client's rules, z-aware; water passable at `z=0`
-- layer changes gated by `zAnchor` — one mineshaft/shelter within 3.0 tiles of **both**
+- layer changes gated by `zAnchor` — one mineshaft within 3.0 tiles of **both**
   endpoints — plus a 500 ms cooldown
 - rejection → `{ t:'fix', x, y, z, b }`, throttled to one per 250 ms per player
 - every server-side reposition opens a 1 s grace window suppressing the distance check
@@ -246,7 +246,7 @@ the `init`/chunk work of Slice 1.
 | `build` | `i, kind, dir?` | range 6 |
 | `dig` | `i, seq?, dx?, dy?` | `z=1` only, range 2, needs pick/spick |
 | `plant` / `harvest` | `i, crop?` | range 2.5, on a `farmplot` |
-| `furn` | `i, kind` | `z=1` (carved tile) or `z=2` (shelter room) |
+| `furn` | `i, kind` | `z=1` (carved tile) — furniture lives in the mines only |
 | `torch` | — | `z=1`, on the player's own carved tile |
 | `eq` / `wear` | `k` (or `null`) | must own the tool / gear |
 | `use` | `k` | `medicine` throttled to one per 750 ms |
@@ -286,8 +286,9 @@ omitted array means empty.
   "removed": [localIdx, ...],                  // nodes harvested, awaiting respawn
   "brokenBergs": [localIdx, ...],              // icebergs smashed by a reinforced hull
   "structs": [[localIdx, kind, hp, dir, lvl], ...],
-  "furn":    [[localIdx, kind, z], ...],       // chests, beds, mine/shelter decor
-  "farms":   [[localIdx, crop, stage], ...]    // stage 0..2
+  "furn":    [[localIdx, kind, z], ...],       // chests, beds, mine decor
+  "farms":   [[localIdx, crop, stage], ...],   // stage 0..2
+  "mods":    [[localIdx, slot, kind, hp, dir], ...]  // modular building (§12)
 }
 ```
 
@@ -380,7 +381,7 @@ biome is who it hurts:
 - `snowstorm` (Spire) — 1 hp per 5 s on `SNOW` unless a **campfire** is within 6 tiles. A fur
   cloak does not help; that is what separates a blizzard from ordinary cold.
 
-Being underground or indoors (`z != 0`) shelters from all of it. "Blizzard" is the client's
+Being underground (`z != 0`) shelters from all of it. "Blizzard" is the client's
 name for `snowstorm`, and ambient snowfall is a permanent client-side particle layer in the
 Spire biome — neither is a distinct server state.
 
@@ -493,7 +494,7 @@ when a later one also applies:
 | `reason` | Cause |
 | --- | --- |
 | `unknown-medic` | `medicId` is not one of the world's medics |
-| `wrong-level` | the player is underground or inside a shelter (`z != 0`) |
+| `wrong-level` | the player is underground (`z != 0`) |
 | `too-far` | further than 2.5 tiles |
 | `in-combat` | took combat damage in the last 5 s |
 | `offer-mismatch` | `accept` with no offer, the wrong `offerId`, or the other medic's offer |
@@ -791,3 +792,144 @@ same identity.
 
 Covered by `gameserver/room/admission_test.go`, `gameserver/hosting/hosting_test.go` and, over
 the wire, by the ADMIT stage of `gameserver/test-go.mjs`.
+
+---
+
+## 12. Modular building — `buildmod`
+
+Legacy `structures` is one entry per tile, which cannot hold a floor, a wall,
+a fixture and a decor piece at once. Modules therefore have their
+own store keyed **`tile:slot`**, and the two systems do not mix: a tile carrying
+a legacy structure refuses modules, and vice versa.
+
+Slots are `floor`, `wall`, `fixture`, `decor` (`MODULE_SLOTS` in
+`shared/defs.json`), and each module kind names its slot directly in
+`MODULES[kind].slot`.
+
+**Modules are not inventory items.** `MODULES[kind].cost` is spent straight from
+the player's bag in building materials — the `MATERIALS` tier (`wood_planks`,
+`stone_blocks`, `glass_pane`, ...), which are themselves ordinary crafted
+recipes. Nothing about a module ever enters `INV_KEYS`.
+
+### 12.1 Client → server
+
+| type | payload | notes |
+|---|---|---|
+| `buildmod` | `i, kind, slot, dir?, seq?` | range 6, `z=0`, dir is 0 or 1 |
+
+Placement is refused — with nothing charged — when the kind is unknown, the slot
+does not fit the kind, the tile is water, a landmark, a medic hut or already
+carries a legacy structure, the `tile:slot` is taken, the player is out of reach
+or indoors, or the materials are not in the bag.
+
+Modules are taken back down with the ordinary `atk` swing: an attack that finds
+no creature and no legacy structure in range hits the nearest module within 2.4
+tiles and refunds half its materials, mirroring structure demolition.
+
+### 12.2 Server → client
+
+```jsonc
+{ "t": "mod",     "i": 1234, "slot": "wall", "kind": "mod_wall_stone", "hp": 40, "dir": 0 }
+{ "t": "modhp",   "i": 1234, "slot": "wall", "hp": 22 }     // damaged, still standing
+{ "t": "modd",    "i": 1234, "slot": "wall" }               // destroyed or demolished
+{ "t": "modfail", "seq": 17, "why": "slot-occupied" }       // unicast to the sender only
+```
+
+`modfail` echoes the request's `seq` so the client clears that exact preview
+instead of guessing. `why` is one of `unknown-module`, `bad-slot`, `bad-tile`,
+`outdoors-only`, `too-far`, `water`, `blocked`, `tile-occupied`,
+`slot-occupied`, `unsupported`, `occupied`, `no-anchor`, `cost`. It is advisory text for the UI — the authoritative fact
+is simply that no `mod` broadcast followed.
+
+Existing modules arrive with their chunk (§8.3 `mods`), never in `init`.
+
+### 12.3 Walls fill their tile
+
+A wall owns its whole tile, exactly as the legacy palisade does: `posBlocked`
+refuses it, creature steering refuses it, and the client's `blockedAt` mirrors
+both. A room is a ring of wall tiles around floor tiles.
+
+An earlier pass modelled walls as *edges* (`wallNE`/`wallNW`) and it was wrong on
+both counts. The art is drawn as a tile-filling block — a diamond top, two side
+faces and a ground shadow — so an edge-mounted sprite rendered as a post floating
+between tiles with no meaningful facing to rotate; and a player could wall
+themselves in on all four edges of their own tile with no way out. Saves written
+under the old model load through `legacySlot()`, which folds both edges onto the
+one `wall` slot.
+
+`mod_door` is a wall that does not block. Floors, fixtures and decor never
+block anything, and a blocking wall may not be placed on a tile a player is
+standing on (`occupied`).
+
+### 12.4 Support and cascade
+
+One rule, enforced server-side on both placement and removal:
+
+| slot | needs |
+|---|---|
+| `floor` | nothing — free-standing |
+| `wall` | nothing — a fence or a screen is a legitimate build |
+| `fixture` | a floor on its own tile |
+| `decor` | a floor or a wall on its own tile |
+
+Placement of an unsupported piece is refused with `unsupported`. Removal
+**cascades**: destroying a piece takes down whatever it was holding up, repeating
+until the tile is stable (pulling a floor strands the fixture and the decor on
+it), and every piece that falls refunds half its materials to whoever knocked
+it down. The client mirrors the table to colour its ghost; the server decides.
+
+### 12.5 Bridges over water
+
+`mod_bridge_segment` (`water: true` in `MODULES`) is the only piece that may be
+built over open water, and only when the span reaches dry land: a segment is
+anchored if a 4-neighbour is land, or another segment that is itself anchored —
+checked breadth-first across the whole span, so a hundred-tile causeway is
+validated in one traversal. Anything else over water is refused with `water`; an
+unmoored segment with `no-anchor`.
+
+Standing on a deck is **not** being in the water: the survival tick skips thermal
+water damage for a player on a bridge tile, and the client neither starts
+swimming nor launches a boat there. Water stays walkable at z=0 either way
+(invariant §5), so no collision rule changes.
+
+Cutting a span cascades outward from the gap: every segment that can no longer
+reach land falls in and refunds half its materials to whoever cut it.
+
+### 12.6 Persistence
+
+The snapshot carries `modules` as an object keyed `"tile:slot"` with
+`{kind, hp, dir, owner}`. A load skips any entry whose key is malformed, whose
+tile is out of bounds, or whose kind or slot no longer exists in the defs, so
+rolling `shared/defs.json` back can never crash the server. This is also how the
+retired pieces (the `roof` slot and its three roofs, `mod_window`, `mod_arch`,
+`mod_stairs`, `mod_lantern_hook`) leave older saves: they are dropped on load.
+
+### 12.7 What a build is for
+
+Modules shape space: a ring of walls keeps creatures out (their steering tests
+the same tiles), a door lets you in and out, pillars and decor dress a floor, and
+bridges cross water. Roofs, and the shelter they gave, were retired with the
+roof slot — weather is escaped underground or with the right cloak.
+
+Keepers have no houses either: the `shelter` structure and its z=2 interior
+were retired. The layers are now the surface (z=0) and the mines (z=1) — the
+mines are the safe place (no weather, no creatures) and the only place furniture
+can stand. Old saves drop shelter structures and z=2 furniture on load, and a
+`pos` asking for z=2 is snapped back.
+
+### 12.8 Starmetal Armor — `wear` with `starmetal_armor`
+
+`starmetal_armor` is `gear` (crafted once, at the forge, from a deliberately
+late-game bill — see `RECIPES`). It is worn in its **own slot**, independent of
+the cloak in `wornGear`: `{t:"wear", k:"starmetal_armor"}` toggles it, and
+`{t:"wear", k:null}` still only removes the cloak.
+
+Armored, every creature hit (contact, lancer beam, brute bolt) costs half its
+damage. HP is an integer, so the remainder is carried per player and a 1-damage
+hit lands every other time. Weather, water, hunger and fire ignore armor. A hit
+the armor reduced carries `blocked` (the damage it turned) on the `hp` frame.
+
+The worn state rides `armor: bool` on `init`, `inv`, each `players` entry,
+`pj`, and the `worn` broadcast (`{t:"worn", id, k, armor}`), and is saved in the
+profile (gated on owning the gear when restored).
+

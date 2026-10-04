@@ -25,6 +25,15 @@ const lanIp = (() => {
   }
   return null;
 })();
+// Fourth and fifth instances, spawned late: a control plane RESTART. Same
+// machine, same secret source, fresh process and therefore a fresh in-memory
+// profile Map — the exact condition that used to hand a returning player a new
+// random userId and orphan their saved character.
+const PORT4 = 8096;
+const BASE4 = `http://localhost:${PORT4}`;
+const PORT5 = 8095;
+const BASE5 = `http://localhost:${PORT5}`;
+
 const WORLDS_CFG = [
   { worldId: 'default', seed: 'hearth-1', instanceId: 'local', ws: 'ws://localhost:8082', name: 'The Hearth' },
   { worldId: 'frontier', seed: 'seed-frontier', instanceId: 'inst-2', ws: 'ws://localhost:8083' },
@@ -302,6 +311,35 @@ try {
   const wl1 = await (await fetch(`${BASE}/api/worlds`)).json();
   if (wl1.worlds.length !== 1 || wl1.worlds[0].worldId !== 'default') fail('worlds: single-world default broke: ' + JSON.stringify(wl1));
   console.log('worlds OK: single-world default preserved');
+
+  // --- userId survives a control-plane restart (the save key) -------------
+  // The Go server files a player's whole profile under userId, so this is the
+  // difference between rejoining your character and rejoining a new one.
+  const tokSave = 'test-save-' + Math.random().toString(36).slice(2);
+  const jBefore = await join('Settler', tokSave);
+  const idBefore = payloadOf(jBefore.body.ticket).userId;
+  if (!/^u_[0-9a-f]{24}$/.test(idBefore)) fail('userId: unexpected shape ' + idBefore);
+
+  spawnControl(PORT4, { HEARTH_WORLDS: '', HEARTH_DEV_TOKS: '', HEARTH_DEV_USERS: '' });
+  await waitForHealth(BASE4);
+  const jAfter = await join('Settler', tokSave, {}, BASE4);
+  const idAfter = payloadOf(jAfter.body.ticket).userId;
+  if (idAfter !== idBefore) fail(`userId: restart changed the save key ${idBefore} -> ${idAfter} (player would lose their character)`);
+  console.log('userId OK: stable across a restart:', idAfter);
+
+  // Distinct accounts must still be distinct — a derivation that collapsed every
+  // tok onto one id would pass the test above and merge everyone's save.
+  const jOther = await join('Stranger', tokSave + '-other', {}, BASE4);
+  if (payloadOf(jOther.body.ticket).userId === idAfter) fail('userId: two different toks derived the same userId');
+  console.log('userId OK: distinct toks derive distinct ids');
+
+  // ...and it is genuinely derived from the secret, not read back from a file
+  // this process happens to share: a different HEARTH_ID_SECRET renames the account.
+  spawnControl(PORT5, { HEARTH_WORLDS: '', HEARTH_DEV_TOKS: '', HEARTH_DEV_USERS: '', HEARTH_ID_SECRET: 'a-different-deployment-secret' });
+  await waitForHealth(BASE5);
+  const jElsewhere = await join('Settler', tokSave, {}, BASE5);
+  if (payloadOf(jElsewhere.body.ticket).userId === idAfter) fail('userId: HEARTH_ID_SECRET had no effect — id is not keyed');
+  console.log('userId OK: keyed by HEARTH_ID_SECRET (separate deployments do not share an id space)');
 
   console.log('ALL TESTS PASSED');
   for (const c of kids) c.kill();

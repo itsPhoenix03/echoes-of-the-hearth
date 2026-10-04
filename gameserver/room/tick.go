@@ -119,8 +119,9 @@ func (r *Room) survivalTick() {
 		idx := ti(q.X, q.Y)
 		tile := r.world.Tiles[idx]
 
-		// Thermal water damage (BEFORE the weather checks) — boats protect.
-		if tile == world.TWater && q.Z == 0 && q.B == 0 {
+		// Thermal water damage (BEFORE the weather checks) — boats protect, and
+		// so does a bridge: standing on the deck is not being in the water.
+		if tile == world.TWater && q.Z == 0 && q.B == 0 && !r.isBridge(idx) {
 			if wt := r.world.WaterTemp[idx]; wt > 0 {
 				q.ThermN++
 				prot := (wt == 1 && q.Worn == "furcloak") || (wt == 2 && q.Worn == "heatcloak")

@@ -50,6 +50,17 @@ export const PLACEABLES = D.PLACEABLES;
 // decor kinds that do NOT block movement (fence is blocking, farmplot is walkable)
 export const DECOR_NONBLOCKING = new Set(D.DECOR_NONBLOCKING);
 export const CROPS = D.CROPS;
+// crafted intermediates (planks, blocks, panes...) — spent on building modules,
+// never placed directly. Recipes carry material:true; this is the display order.
+export const MATERIALS = D.MATERIALS;
+
+// Modular building: kind -> { slot, cost (materials), hp, blocks? }. Modules are
+// NOT inventory items - the buildmod message spends their material cost from the
+// bag, so one tile can carry a floor, two wall edges, a roof, a fixture and a
+// decor piece without five placeable slots cluttering the inventory.
+export const MODULES = D.MODULES;
+// the concrete tile slots. A wall owns its whole tile (the art is a block).
+export const MODULE_SLOTS = D.MODULE_SLOTS;
 
 export const emptyInv = () => Object.fromEntries(D.INV_KEYS.map((k) => [k, 0]));
 

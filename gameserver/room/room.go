@@ -142,6 +142,10 @@ type Room struct {
 	mudTiles    map[int]bool
 	sectorChops map[int]int // 16x16 sector key -> trees felled
 	farms       map[int]*Farm
+	// Modular building, keyed "tile:slot". modOrder is the insertion-order
+	// mirror: chunk frames, saves and demolition ties all read it (§3).
+	modules     map[string]*Module
+	modOrder    []string
 	chestInv    map[int]map[string]int
 	brokenBergs map[int]bool
 	wave        *waveState
@@ -274,6 +278,7 @@ func New(cfg Config) (*Room, error) {
 		mudTiles:      map[int]bool{},
 		sectorChops:   map[int]int{},
 		farms:         map[int]*Farm{},
+		modules:       map[string]*Module{},
 		chestInv:      map[int]map[string]int{},
 		brokenBergs:   map[int]bool{},
 		chunkCache:    map[int]*staticChunk{},
@@ -554,7 +559,7 @@ func (r *Room) onJoin(s *Session) {
 			continue
 		}
 		others = append(others, map[string]any{
-			"id": id, "x": q.X, "y": q.Y, "z": q.Z, "name": q.Name, "b": q.B, "eq": q.Equip,
+			"id": id, "x": q.X, "y": q.Y, "z": q.Z, "name": q.Name, "b": q.B, "eq": q.Equip, "worn": nullable(q.Worn), "armor": q.Armor,
 		})
 	}
 	r.send(p, map[string]any{
@@ -563,7 +568,7 @@ func (r *Room) onJoin(s *Session) {
 		"chunk": 64,
 		"x":     p.X, "y": p.Y, "z": p.Z,
 		"hp": p.HP, "maxHp": r.defs.MaxHP, "hunger": statInt(p.Hunger), "thirst": statInt(p.Thirst),
-		"inv": p.Inv, "tools": keysOf(p.Tools), "gear": keysOf(p.Gear), "wornGear": p.Worn,
+		"inv": p.Inv, "tools": keysOf(p.Tools), "gear": keysOf(p.Gear), "wornGear": p.Worn, "armor": p.Armor,
 		"players": others,
 		"time":    r.time, "day": r.day, "mono": r.mono[:], "won": r.won,
 		// Slice 3 global state. Weather is one value and corruption is a short,
@@ -587,7 +592,7 @@ func (r *Room) onJoin(s *Session) {
 		"dev": r.devAllowed(p),
 	})
 	r.pushChunks(p)
-	r.broadcast(map[string]any{"t": "pj", "id": s.ID, "x": p.X, "y": p.Y, "name": p.Name})
+	r.broadcast(map[string]any{"t": "pj", "id": s.ID, "x": p.X, "y": p.Y, "name": p.Name, "worn": nullable(p.Worn), "armor": p.Armor})
 	r.cfg.Logger.Printf("[hearth] %s (%s) joined (%d online)", s.ID, p.Name, len(r.players))
 }
 
@@ -636,6 +641,8 @@ func (r *Room) onMessage(in Inbound) {
 		r.handleCraft(p, in.Data)
 	case "build":
 		r.handleBuild(p, in.Data)
+	case "buildmod":
+		r.handleBuildMod(p, in.Data)
 	case "dig":
 		r.handleDig(p, in.Data)
 	case "plant":
@@ -713,7 +720,7 @@ func (r *Room) snapshotInto(p *Player) {
 	r.profiles[p.S.UserID] = &persist.Profile{
 		Name: p.Name, X: p.X, Y: p.Y, Z: p.Z,
 		HP: p.HP, Hunger: p.Hunger, Thirst: p.Thirst,
-		Inv: inv, Tools: keysOf(p.Tools), Gear: keysOf(p.Gear), Worn: p.Worn,
+		Inv: inv, Tools: keysOf(p.Tools), Gear: keysOf(p.Gear), Worn: p.Worn, Armor: p.Armor,
 	}
 }
 
@@ -744,6 +751,7 @@ func (r *Room) restore(p *Player, prof *persist.Profile) {
 	if prof.Worn != "" && p.Gear[prof.Worn] {
 		p.Worn = prof.Worn
 	}
+	p.Armor = prof.Armor && p.Gear[ArmorKey]
 	// The ticket owns the name; a saved name never overrides it.
 }
 
@@ -805,7 +813,8 @@ func (r *Room) loadSave() error {
 	}
 	for k, f := range snap.Furn {
 		i, err := strconv.Atoi(k)
-		if err != nil || !inWorld(i) || f == nil {
+		// z=2 was the retired shelter interior: its furniture has nowhere to stand
+		if err != nil || !inWorld(i) || f == nil || f.Z != 1 {
 			continue
 		}
 		r.furn[i] = &Furniture{Kind: f.Kind, Owner: f.Owner, Z: f.Z}
@@ -839,8 +848,9 @@ func (r *Room) loadSave() error {
 		}
 		r.chestInv[i] = cp
 	}
-	r.cfg.Logger.Printf("[hearth] save loaded: day %d, %d structures, %d digs, %d farms, %d profiles",
-		r.day, len(r.structures), len(r.digs), len(r.farms), len(r.profiles))
+	r.loadModules(snap.Modules)
+	r.cfg.Logger.Printf("[hearth] save loaded: day %d, %d structures, %d modules, %d digs, %d farms, %d profiles",
+		r.day, len(r.structures), len(r.modules), len(r.digs), len(r.farms), len(r.profiles))
 	return nil
 }
 
@@ -861,6 +871,7 @@ func (r *Room) saveGame() error {
 		Furn:        map[string]*persist.Furn{},
 		Farms:       map[string]*persist.Farm{},
 		ChestInv:    map[string]map[string]int{},
+		Modules:     r.modulesSnapshot(),
 	}
 	for i, at := range r.removed {
 		snap.Removed = append(snap.Removed, persist.NodeRespawn{I: i, Remaining: maxInt64(0, at-now)})

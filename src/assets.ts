@@ -21,7 +21,6 @@ export const STRUCT_SPR: Record<string, [number, number]> = {
   forge:     [52,  60],
   engine:    [64,  84],
   mineshaft: [52,  48],
-  shelter:   [104, 100],
 };
 
 const _manifest: [string, string, number, number][] = [];
@@ -57,6 +56,7 @@ _manifest.push(
   ['ironore',    '/sprites/ironore.svg',          30, 24],
   ['diamondore', '/sprites/diamondore.svg',       30, 24],
   ['boat',       '/sprites/boat.svg',             56, 30],
+  ['boat_front', '/sprites/boat_front.svg',       56, 30],  // near gunwale, drawn over a seated keeper (rig.ts)
   ['iceberg',    '/sprites/iceberg.svg',          44, 42],
   ['torch',      '/sprites/torch.svg',            16, 34],
   ['note',       '/sprites/note.svg',             26, 30],
@@ -182,14 +182,13 @@ _manifest.push(
 );
 
 const _BM: [string, number, number][] = [
-  ['clay_bricks', 56, 38], ['crystal_lattice', 54, 44], ['glass_pane', 44, 46], ['iron_beam', 60, 34],
-  ['mod_arch', 64, 58], ['mod_bridge_segment', 74, 44], ['mod_door', 42, 52],
-  ['mod_floor_thatch', 64, 40], ['mod_floor_wood', 64, 40], ['mod_lantern_hook', 38, 54],
+  ['clay_bricks', 56, 38], ['crystal_lattice', 54, 44], ['glass_pane', 44, 46],
+  ['mod_bridge_segment', 74, 44], ['mod_door', 42, 52],
+  ['mod_floor_thatch', 64, 40], ['mod_floor_wood', 64, 40],
   ['mod_pillar_stone', 38, 64], ['mod_pillar_wood', 36, 62],
-  ['mod_roof_metal', 70, 48], ['mod_roof_shingle', 70, 48], ['mod_roof_thatch', 70, 48],
-  ['mod_stairs', 62, 44], ['mod_wall_crystal', 64, 58], ['mod_wall_stone', 64, 54], ['mod_wall_wood', 64, 54],
-  ['mod_window', 42, 46], ['reed_thatch', 58, 36], ['rope_coil', 44, 38],
-  ['starmetal_plate', 56, 38], ['stone_blocks', 56, 40], ['wood_planks', 52, 36],
+  ['mod_wall_crystal', 64, 58], ['mod_wall_stone', 64, 54], ['mod_wall_wood', 64, 54],
+  ['reed_thatch', 58, 36], ['rope_coil', 44, 38],
+  ['stone_blocks', 56, 40], ['wood_planks', 52, 36],
 ];
 for (const [k, w, h] of _BM) _manifest.push([k, `/sprites/building_materials/${k}.svg`, w, h]);
 const _RAW: [string, number, number][] = [
@@ -202,5 +201,43 @@ const _RAW: [string, number, number][] = [
   ['raw_starmetal_nugget', 42, 36], ['raw_tin_ore', 44, 38],
 ];
 for (const [k, w, h] of _RAW) _manifest.push([k, `/sprites/building_materials/raw/${k}.svg`, w, h]);
+
+// --- hand-synced human clips: `<char>_<action>_01..NN`, same canvas as the character base ---
+// Played by rig.ts (keeper) and Phaser anims `<char>_<action>` (NPCs/medics, see registerHumanAnims).
+export const HUMAN_CLIPS: [string, string, number][] = [
+  ['keeper', 'build', 9],
+  ['keeper', 'injured', 7], ['keeper', 'meds', 7], ['keeper', 'shiver', 9],
+  ['keeper', 'sweat', 9], ['keeper', 'swim', 9],
+  // posed by tools/art/keeper-frames.mjs from the pack's template parts
+  ['keeper', 'walk', 8], ['keeper', 'chop', 8], ['keeper', 'mine', 8], ['keeper', 'spick', 8],
+  ['keeper', 'pickup', 7], ['keeper', 'punch', 7],
+  ['keeper', 'slash', 7], ['keeper', 'islash', 7], ['keeper', 'jump', 7], ['keeper', 'leap', 7], ['keeper', 'torch', 7], ['keeper', 'row', 8],
+  ['villager', 'walk', 9], ['villager', 'collect', 9], ['villager', 'build', 9], ['villager', 'sit', 7],
+  ['villager2', 'walk', 9], ['villager2', 'collect', 9], ['villager2', 'craft', 9], ['villager2', 'sit', 7],
+  ['medic', 'walk', 9], ['medic', 'heal', 9], ['medic', 'prepare', 9],
+  ['medic_snow', 'walk', 9], ['medic_snow', 'heal', 9], ['medic_snow', 'prepare', 9], ['medic_snow', 'shiver', 9],
+];
+// swings that reach past the 32px body canvas: 64×48, body still centred
+const _HUMAN_WIDE = new Set([
+  'keeper_slash', 'keeper_islash', 'keeper_punch', 'keeper_chop', 'keeper_mine', 'keeper_spick', 'keeper_row',
+]);
+const _HUMAN_SIZE: Record<string, [number, number]> = {
+  keeper: [32, 48], villager: [32, 48], villager2: [32, 48], medic: [42, 58], medic_snow: [42, 58],
+};
+export const humanFrame = (char: string, action: string, i: number) =>
+  `${char}_${action}_${String(i).padStart(2, '0')}`;
+for (const [c, a, n] of HUMAN_CLIPS) {
+  const [w, h] = _HUMAN_WIDE.has(`${c}_${a}`) ? [64, 48] : _HUMAN_SIZE[c];
+  for (let i = 1; i <= n; i++) { const k = humanFrame(c, a, i); _manifest.push([k, `/sprites/${k}.svg`, w, h]); }
+}
+
+// --- pickup pop effects: `<res>_pop_01..05`, 32×40, shared ground contact at y=36 ---
+export const POP_RES = ['wood', 'stone', 'meat', 'fiber', 'crystal', 'starmetal', 'iron', 'essence', 'diamond'];
+export const POP_FRAME_MS = [45, 65, 75, 70, 95];   // pack's suggested timing
+for (const r of POP_RES)
+  for (let i = 1; i <= POP_FRAME_MS.length; i++) {
+    const k = `${r}_pop_0${i}`;
+    _manifest.push([k, `/sprites/pickup/${k}.svg`, 32, 40]);
+  }
 
 export const ASSET_MANIFEST: [string, string, number, number][] = _manifest;

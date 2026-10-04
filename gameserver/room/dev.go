@@ -68,12 +68,12 @@ var devKitInv = map[string]int{
 	"wood": 500, "stone": 500, "fiber": 200, "crystal": 100, "iron": 100,
 	"diamond": 50, "starmetal": 50, "essence": 100, "water": 10, "meat": 5,
 	"cookedmeat": 10, "wall": 50, "campfire": 5, "workbench": 3, "forge": 2,
-	"mineshaft": 3, "shelter": 9, "engine": 1, "core": 4, "boat": 2,
+	"mineshaft": 3, "engine": 1, "core": 4, "boat": 2,
 	"sboat": 1, "torch": 30,
 }
 
 var devKitTools = []string{"axe", "pick", "spick", "sword", "isword"}
-var devKitGear = []string{"heatcloak", "furcloak"}
+var devKitGear = []string{"heatcloak", "furcloak", ArmorKey}
 
 // handleDev is the F9 kit: every tool, both cloaks, and enough of everything to
 // reach the endgame in one sitting.
@@ -84,6 +84,11 @@ func (r *Room) handleDev(p *Player) {
 	}
 	for k, v := range devKitInv {
 		p.Inv[k] = v
+	}
+	// building materials come from defs rather than the literal above, so a new
+	// material never needs a dev-kit edit to be testable
+	for _, k := range r.defs.Materials {
+		p.Inv[k] = 100
 	}
 	for _, t := range devKitTools {
 		p.Tools[t] = true

@@ -36,6 +36,7 @@ type Profile struct {
 	Tools  []string       `json:"tools"`
 	Gear   []string       `json:"gear"`
 	Worn   string         `json:"wornGear,omitempty"`
+	Armor  bool           `json:"armor,omitempty"`
 }
 
 // Struct is one placed player structure.
@@ -47,11 +48,19 @@ type Struct struct {
 	Lvl   int    `json:"lvl"`
 }
 
-// Furn is one piece of shelter/mine furniture.
+// Furn is one piece of mine furniture.
 type Furn struct {
 	Kind  string `json:"kind"`
 	Owner string `json:"owner,omitempty"`
 	Z     int    `json:"z"`
+}
+
+// Module is one placed modular-building piece. The map key is "tile:slot".
+type Module struct {
+	Kind  string `json:"kind"`
+	HP    int    `json:"hp"`
+	Dir   int    `json:"dir"`
+	Owner string `json:"owner,omitempty"`
 }
 
 // Farm is one planted crop. Elapsed is ticks since planting (see the package
@@ -91,6 +100,7 @@ type Snapshot struct {
 	BrokenBergs []int                     `json:"brokenBergs,omitempty"`
 	Farms       map[string]*Farm          `json:"farms,omitempty"`
 	ChestInv    map[string]map[string]int `json:"chestInv,omitempty"`
+	Modules     map[string]*Module        `json:"modules,omitempty"`
 }
 
 // Store is the persistence seam. Implementations must be safe to call from the

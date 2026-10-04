@@ -23,15 +23,30 @@ agent re-deriving something an earlier session already settled.
 ## 2. Non-negotiable rules
 
 ### Verification gate
-Nothing is "done" until all three pass. Run them yourself; do not trust a subagent's claim.
+Nothing is "done" until these pass. **Run them yourself; do not trust a subagent's claim** —
+three subagent reports in the 2026-09-20 session were wrong in ways only running the suite
+revealed. The authoritative server is now **Go**, not `server/index.js`; see
+`PROJECT_STATE.md` §2 for the full gate and the reasoning.
 
 ```bash
-npx tsc --noEmit          # esbuild does NOT type-check. This is the only gate. It has caught real crashes.
-npx vite build            # must succeed
-# then, with stale node processes killed and server/save.json deleted:
-node server/index.js &    # start server
-node test.mjs             # must end with "ALL TESTS PASSED"
+npx tsc --noEmit          # esbuild does NOT type-check. It has caught real crashes.
+npx vite build
+cd gameserver && go build ./... && go vet ./... && gofmt -l . && go test ./...
+node tools/worldparity/compare.mjs    # MANDATORY after any worldgen edit
+npm run test:control
+
+# wire suites — need a FRESH server (they are stateful):
+rm -f gameserver/world*.save.json
+npm run stack:servers     # one terminal (sets HEARTH_ALLOW_WARP and pins the ticket keypair)
+npm run test:go           # another — must end "ALL TESTS PASSED" with zero skips
+node gameserver/test-multiworld.mjs
 ```
+
+`npm run test:legacy` covers the pre-migration :8081 server, which is still maintained.
+
+**Never bind :8081 or write `server/save.json`** without backing it up — it is the owner's real
+save. To exercise the legacy path safely, copy `server/index.js` with `PORT`/`SAVE_PATH` swapped
+and point a copy of `test.mjs` at the new port.
 
 Use the **Bash** tool, not PowerShell. PowerShell mangles UTF-8 on writes and has thrown
 OutOfMemoryException in this repo. Write files with the Write/Edit tools only — never shell piping.

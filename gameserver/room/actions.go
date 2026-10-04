@@ -89,7 +89,8 @@ func (r *Room) handleGather(p *Player, m map[string]any) {
 		}
 		actA = "mine"
 	default:
-		actTool, actA = nil, "punch"
+		// bushes and loose stones are picked up by hand, not struck
+		actTool, actA = nil, "collect"
 	}
 	r.broadcast(map[string]any{
 		"t": "act", "id": p.S.ID, "seq": seq, "a": actA, "tool": actTool,
@@ -188,13 +189,10 @@ func (r *Room) handleBuild(p *Player, m map[string]any) {
 		return
 	}
 	if existing, occupied := r.structures[i]; occupied {
-		// stack: walls to 2, shelters to 3 stories
+		// stack: walls to 2 stories; nothing else stacks
 		maxLvl := 0
-		switch kind {
-		case "wall":
+		if kind == "wall" {
 			maxLvl = 2
-		case "shelter":
-			maxLvl = 3
 		}
 		if kind != existing.Kind || existing.lvlOr1() >= maxLvl {
 			return
@@ -227,18 +225,6 @@ func (r *Room) handleBuild(p *Player, m map[string]any) {
 	if kind == "mineshaft" && !r.diggable(i) {
 		r.send(p, map[string]any{"t": "msg", "s": "Mines can only be dug in the Woods, Dunes or Spire."})
 		return
-	}
-	if kind == "shelter" {
-		// rooms are (lvl+2)-radius: keep them from overlapping
-		for si, s2 := range r.structures {
-			if s2.Kind != "shelter" {
-				continue
-			}
-			if maxAbs(float64(si%world.SIZE)-x, float64(si/world.SIZE)-y) <= 10 {
-				r.send(p, map[string]any{"t": "msg", "s": "Too close to another shelter — their rooms would overlap."})
-				return
-			}
-		}
 	}
 	if kind == "engine" && i != world.ACTIVATION_I {
 		r.send(p, map[string]any{"t": "msg", "s": "The World Engine must be built on the activation dais at the temple heart."})
@@ -475,21 +461,6 @@ func (r *Room) handleFurn(p *Player, m map[string]any) {
 	}
 	x, y := float64(i%world.SIZE), float64(i/world.SIZE)
 	switch p.Z {
-	case 2:
-		// SHELTER interior: Chebyshev <= lvl + 2
-		inRoom := false
-		for si, s := range r.structures {
-			if s.Kind != "shelter" {
-				continue
-			}
-			if maxAbs(float64(si%world.SIZE)-x, float64(si/world.SIZE)-y) <= float64(s.lvlOr1()+2) {
-				inRoom = true
-				break
-			}
-		}
-		if !inRoom || math.Hypot(x-p.X, y-p.Y) > 5 {
-			return
-		}
 	case 1:
 		// furniture in mines: the tile must be dug; torches use their own flow
 		if !r.digs[i] || kind == "torch" {
@@ -525,7 +496,7 @@ func (r *Room) handleTorch(p *Player) {
 	}
 	p.Inv["torch"]--
 	r.torches[i] = true
-	r.broadcast(map[string]any{"t": "torch", "i": i})
+	r.broadcast(map[string]any{"t": "torch", "i": i, "by": p.S.ID})
 	r.sendInv(p)
 }
 
@@ -554,10 +525,15 @@ func (r *Room) handleWear(p *Player, m map[string]any) {
 		// `k: null` runs the toggle with k === null: worn becomes null either way
 		p.Worn = ""
 		r.sendInv(p)
+		r.broadcastWorn(p)
 		r.send(p, map[string]any{"t": "msg", "s": "You remove your cloak."})
 		return
 	}
 	k, isStr := v.(string)
+	if isStr && k == ArmorKey {
+		r.toggleArmor(p)
+		return
+	}
 	if !isStr || (k != "heatcloak" && k != "furcloak") || !p.Gear[k] {
 		return
 	}
@@ -567,11 +543,56 @@ func (r *Room) handleWear(p *Player, m map[string]any) {
 		p.Worn = k
 	}
 	r.sendInv(p)
+	r.broadcastWorn(p)
 	if p.Worn != "" {
 		r.send(p, map[string]any{"t": "msg", "s": "You wrap yourself in the " + r.defs.Names[p.Worn] + "."})
 	} else {
 		r.send(p, map[string]any{"t": "msg", "s": "You remove your cloak."})
 	}
+}
+
+// broadcastWorn tells every client which cloak (if any) a player now wears and
+// whether they have their armor on, so their rig can dress them — the inventory
+// frame above only reaches the wearer.
+func (r *Room) broadcastWorn(p *Player) {
+	r.broadcast(map[string]any{"t": "worn", "id": p.S.ID, "k": nullable(p.Worn), "armor": p.Armor})
+}
+
+// ArmorKey is the Starmetal Armor's gear key. It is crafted once at the forge
+// (a deliberately late-game bill: starmetal, iron, diamond, essence, crystal)
+// and then worn in its own slot, so it stacks with whichever cloak is on.
+const ArmorKey = "starmetal_armor"
+
+// armorFactor is the share of creature damage the armor lets through.
+const armorFactor = 0.5
+
+func (r *Room) toggleArmor(p *Player) {
+	if !p.Gear[ArmorKey] {
+		return
+	}
+	p.Armor = !p.Armor
+	p.ArmorDebt = 0
+	r.sendInv(p)
+	r.broadcastWorn(p)
+	if p.Armor {
+		r.send(p, map[string]any{"t": "msg", "s": "🛡 You buckle on the Starmetal Armor — creatures hit for half."})
+	} else {
+		r.send(p, map[string]any{"t": "msg", "s": "You unbuckle the Starmetal Armor."})
+	}
+}
+
+// creatureDamage is the armor's whole effect: what a creature hit of dmg
+// actually costs this player. Armored, half of it lands; HP is an integer, so
+// the remainder is carried in ArmorDebt and a 1-damage hit lands every other
+// time. Weather, water, hunger and lava ignore armor — it stops claws, not cold.
+func (r *Room) creatureDamage(q *Player, dmg int) int {
+	if !q.Armor || dmg <= 0 {
+		return dmg
+	}
+	q.ArmorDebt += float64(dmg) * armorFactor
+	n := int(q.ArmorDebt)
+	q.ArmorDebt -= float64(n)
+	return n
 }
 
 // --- water and use --------------------------------------------------------
@@ -829,6 +850,11 @@ func (r *Room) handleAtk(p *Player, m map[string]any) {
 		}
 	}
 	if bsi < 0 {
+		// no legacy structure either: fall through to modular construction,
+		// which is the only way to take a placed module back down
+		if mod, _ := r.nearestModule(p, 2.4); mod != nil {
+			r.hitModule(p, mod, dmg)
+		}
 		return
 	}
 	s := r.structures[bsi]

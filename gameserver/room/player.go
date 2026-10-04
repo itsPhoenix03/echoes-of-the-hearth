@@ -30,6 +30,11 @@ type Player struct {
 	Gear  map[string]bool
 	Worn  string
 	Equip string
+	// Armor is the Starmetal Armor, worn in its own slot alongside any cloak.
+	// ArmorDebt carries the fraction of creature damage it has not yet let
+	// through (see creatureDamage), so halving works with integer HP.
+	Armor     bool
+	ArmorDebt float64
 
 	Name string
 

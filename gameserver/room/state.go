@@ -155,7 +155,7 @@ func (rm *Room) nearStruct(p *Player, kind string, radius float64) bool {
 func (r *Room) sendInv(p *Player) {
 	r.send(p, map[string]any{
 		"t": "inv", "inv": p.Inv, "tools": keysOf(p.Tools), "gear": keysOf(p.Gear),
-		"wornGear": nullable(p.Worn),
+		"wornGear": nullable(p.Worn), "armor": p.Armor,
 	})
 }
 

@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="40" viewBox="0 0 64 40">
+  <defs><clipPath id="surface"><path d="M32 0 64 16 32 32 0 16Z"/></clipPath></defs>
+  <path d="M0 16 32 32 32 40 0 24Z" fill="#285d7e"/><path d="M64 16 32 32 32 40 64 24Z" fill="#204962"/>
+  <path d="M32 0 64 16 32 32 0 16Z" fill="#397796"/>
+  <g clip-path="url(#surface)" transform="translate(-2 0)"><path d="M4 16q14-6 29-5 11-2 27 5l-14 6q-9-4-17-1-12 3-25-5Z" fill="#4a88a3"/><path d="M8 17q6-3 12-1t13-1m0 8q8-3 15-1M18 11q5-2 10-1" stroke="#b9dddc" stroke-width="1.2" fill="none" stroke-linecap="round" opacity=".8"/><path d="m14 19 5 0m21-5 6 1" stroke="#23617c" stroke-width="1.2" opacity=".7"/></g>
+  <path d="M0 16 32 32 64 16" fill="none" stroke="#a8d4d4" stroke-width=".8" opacity=".5"/>
+  
+</svg>

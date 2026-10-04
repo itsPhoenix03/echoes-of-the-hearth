@@ -1,0 +1,30 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><title>Surface tile repeat preview</title>
+<style>
+ body{margin:0;background:#172334;color:#f1ecda;font:16px system-ui}
+ main{max-width:1220px;margin:26px auto;padding:0 20px}
+ h1{font-size:28px;margin:0 0 8px}p{color:#b9cac4;margin:0 0 22px}
+ .grid{display:grid;grid-template-columns:repeat(2,1fr);gap:18px}
+ section{background:#253744;border:1px solid #405b5a;border-radius:10px;padding:12px}
+ h2{font-size:16px;margin:0 0 6px}
+ .patch{height:190px;position:relative;overflow:hidden;background:#1b2d38;border-radius:6px}
+ .patch img{position:absolute;width:64px;height:40px;image-rendering:auto}
+</style>
+<main><h1>Repeated surface patches</h1><p>Base tiles on the left; optional variants mixed in on the right.</p><div class="grid" id="grid"></div></main>
+<script>
+const grid=document.getElementById('grid');
+for(const type of ['grass','sand','snow','water'])for(const variants of [false,true]){
+ const section=document.createElement('section');
+ section.innerHTML=`<h2>${type} — ${variants?'mixed variants':'base repeated'}</h2><div class="patch"></div>`;
+ const patch=section.querySelector('.patch');
+ for(let y=0;y<5;y++)for(let x=0;x<5;x++){
+  const image=new Image();
+  const suffix=variants && (x+2*y)%3 ? `_variant_${(x+2*y)%3}`:'';
+  image.src=`tiles/${type}${suffix}.svg`;
+  image.style.left=`${225+(x-y)*32}px`;
+  image.style.top=`${12+(x+y)*16}px`;
+  image.style.zIndex=x+y;
+  patch.appendChild(image);
+ }
+ grid.appendChild(section);
+}
+</script>

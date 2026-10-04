@@ -166,13 +166,13 @@ worldgen, bump the default seed or tell the user to delete the save.</div>
 <table>
 <tr><th>Msg</th><th>Payload</th><th>Notes</th></tr>
 <tr><td><code>hello</code></td><td><code>{tok}</code></td><td><b>Must be the first message.</b> tok = persistent browser identity (localStorage <code>hearth-tok</code>); restores saved profile. Server replies with <code>init</code>.</td></tr>
-<tr><td><code>pos</code></td><td><code>{x,y,z,b}</code></td><td>10 Hz. z: 0 surface / 1 underground / 2 shelter interior. b: 0 walking / 1 wooden boat / 2 reinforced boat (triggers iceberg checks). Server also computes <b>fall damage</b> here: elevation drop ≥2 in a &lt;3-tile step → (drop−1) hp.</td></tr>
+<tr><td><code>pos</code></td><td><code>{x,y,z,b}</code></td><td>10 Hz. z: 0 surface / 1 underground (the only other layer — shelters were retired). b: 0 walking / 1 wooden boat / 2 reinforced boat (triggers iceberg checks). Server also computes <b>fall damage</b> here: elevation drop ≥2 in a &lt;3-tile step → (drop−1) hp.</td></tr>
 <tr><td><code>gather</code></td><td><code>{i}</code></td><td>Hit node at tile i. Server checks distance ≤2.5, tool, node hp; rate 250ms.</td></tr>
 <tr><td><code>dig</code></td><td><code>{i}</code></td><td>Underground only (z=1), adjacent (≤2), pickaxe required, tile DIGGABLE & undug. May yield iron/diamond/stone from veins.</td></tr>
 <tr><td><code>craft</code></td><td><code>{r}</code></td><td>r = recipe key. Server checks cost + station proximity (within 4 tiles of workbench/forge/campfire).</td></tr>
-<tr><td><code>build</code></td><td><code>{i,kind,dir}</code></td><td>Place structure (consumes inventory item). dir 0/1 = wall orientation. Building on same-kind structure stacks (wall→2, shelter→3). Engine: only near CORE with 4 monoliths lit. Mineshaft: DIGGABLE tiles; carves 3×3 chamber.</td></tr>
+<tr><td><code>build</code></td><td><code>{i,kind,dir}</code></td><td>Place structure (consumes inventory item). dir 0/1 = wall orientation. Building on same-kind structure stacks (wall→2). Engine: only near CORE with 4 monoliths lit. Mineshaft: DIGGABLE tiles; carves 3×3 chamber.</td></tr>
 <tr><td><code>torch</code></td><td><code>{}</code></td><td>Place torch at player's current underground tile (z=1, dug, has torch item).</td></tr>
-<tr><td><code>furn</code></td><td><code>{i,kind}</code></td><td>Place shelter furniture ('chest'|'bed'|'torch'). Requires z=2 and the tile inside a shelter's room (Chebyshev ≤ shelter lvl). Bed = personal respawn point (beats campfires).</td></tr>
+<tr><td><code>furn</code></td><td><code>{i,kind}</code></td><td>Place mine furniture ('chest'|'bed'|indoor decor). Requires z=1 on a dug tile (was: shelter room, Chebyshev ≤ shelter lvl). Bed = personal respawn point (beats campfires).</td></tr>
 <tr><td><code>atk</code></td><td><code>{}</code></td><td>Melee. Rejected when z=1. Hits nearest creature/animal ≤2.4, else demolishes nearest structure (double dmg, refunds half cost). Dmg: isword 5 / sword 3 / axe 2 / else 1 (uses <b>equipped</b>, not owned).</td></tr>
 <tr><td><code>eq</code></td><td><code>{k}</code></td><td>Equip tool k (must own) or null. Broadcast so others see held item.</td></tr>
 <tr><td><code>usecore</code></td><td><code>{i}</code></td><td>Awaken monolith index 0-3 (needs core item, within 3 tiles).</td></tr>
@@ -193,7 +193,7 @@ worldgen, bump the default seed or tell the user to delete the save.</div>
 <tr><td><code>hp</code></td><td><code>{hp,x,y}</code></td><td>Damage/regen. hp back to 10 after ≤1 = death respawn (client teleports, resets z).</td></tr>
 <tr><td><code>build / sd</code></td><td><code>{i,kind,hp,dir,lvl} / {i,hp}</code></td><td>Structure placed(or stacked) / damaged (hp=0 → remove).</td></tr>
 <tr><td><code>mud / infect / cure</code></td><td><code>{tiles[]}</code></td><td>Tile overlays: ecosystem collapse / wisp corruption / decay back.</td></tr>
-<tr><td><code>dig / torch / furn</code></td><td><code>{tiles[]} / {i} / {i,kind}</code></td><td>Underground carve / torch placed / shelter furniture placed.</td></tr>
+<tr><td><code>dig / torch / furn</code></td><td><code>{tiles[]} / {i} / {i,kind}</code></td><td>Underground carve / torch placed / mine furniture placed.</td></tr>
 <tr><td><code>cre</code></td><td><code>{c:[[id,x,y,type]], a:[[id,x,y,type]], time, day}</code></td><td>5 Hz sim broadcast: monsters, animals, world clock (0..1; night = &gt;0.65 or &lt;0.1) <b>and the day counter</b> (day was once only sent at init — the HUD day tracker froze; keep day in this broadcast).</td></tr>
 <tr><td><code>chit</code></td><td><code>{id}</code></td><td>Creature/animal hit flash.</td></tr>
 <tr><td><code>eq / anim</code></td><td><code>{id,k} / {id,a}</code></td><td>Remote equip / animation relays.</td></tr>
@@ -229,21 +229,20 @@ Saves world mutations + day/time/mono/won + <code>profiles</code>. Player profil
 elevation: each tile is drawn <code>elev</code> times stacked 10px apart (skirts become cliff faces).
 Tile mutations go through <code>setTileMut(i, key|null)</code> which repaints the tile + its 3 southern
 neighbors on all loaded chunks.</li>
-<li><b>Three Z layers.</b> <code>z=0</code> surface, <code>z=1</code> underground, <code>z=2</code> shelter interior.
-<code>setZ()</code> swaps visibility: surface fades to alpha 0.15, layer sprites show (cave: ugFloor/ugRock/ugOre/torches;
-interior: generated wood floor + <code>furnSpr</code>), creatures/animals hide, other players show only on the same layer.
-Non-surface positions use flat <code>iso()</code> + 16 (no elevation). Interior room size = Chebyshev radius =
-shelter <code>lvl</code> (3×3 → 7×7), anchored at <code>shelterAnchor</code>; enter/exit via E with the shared 900ms
+<li><b>Two Z layers.</b> <code>z=0</code> surface, <code>z=1</code> underground (the mines — keepers' safe place).
+The old <code>z=2</code> shelter interior was retired with the shelter structure.
+<code>setZ()</code> swaps visibility: surface fades to alpha 0.15, layer sprites show (cave: ugFloor/ugRock/ugOre/torches
++ <code>furnSpr</code>), creatures/animals hide, other players show only on the same layer.
+Non-surface positions use flat <code>iso()</code> + 16 (no elevation); enter/exit via E with the shared 900ms
 <code>zToggleAt</code> cooldown. <b>All server z-guards use <code>q.z !== 0</code></b> (attack rejection, monster
 targeting/contact, weather immunity) so both non-surface layers are protected — keep that pattern for any new layer.
 <code>addDug(i)</code> maintains floor sprites + rock-wall sprites around tunnels + ore glints from <code>veins</code>.
 Darkness: <code>darkRT</code> screen-overlay filled black 0.93, with radial-gradient light holes erased at the
 player (glow-s), torches and mineshafts (glow-l).</li>
 <li><b>Movement</b> is screen-relative WASD mapped onto iso axes, ~4.4 tiles/s (2.2 on mud, 6.2 sailing).
-<code>blockedAt()</code> is the single collision gate: bounds → (z=1: only dug tiles) → (z=2: stay inside the
-shelter room) → water (passable only with a boat) → cliffs (<b>ascent-only</b>: climbing &gt;1 level blocked,
+<code>blockedAt()</code> is the single collision gate: bounds → (z=1: only dug tiles) → water (passable only with a boat) → cliffs (<b>ascent-only</b>: climbing &gt;1 level blocked,
 &gt;2 while jumping; dropping any height is allowed and the SERVER applies fall damage) → structures
-(shelters are enterable/walkable).</li>
+(non-blocking decor and farmplots are walkable).</li>
 <li><b>Boats:</b> walking onto water with a boat item auto-boards (sboat preferred); walking ashore
 disembarks; boat sprite follows under the rig. Server destroys wooden boats near icebergs (see pos msg).</li>
 <li><b>Rig (rig.ts):</b> characters/tools are generated textures; walk cycle & swings are code (tweens).
@@ -266,7 +265,7 @@ footsteps keyed by surface; growls scale with nearest-monster distance; generati
 <h2 id="balance">9. Game design & balance tables</h2>
 <h3>Progression chain (intended)</h3>
 <pre>wood/fiber/stones by hand → Workbench(8w) → Axe(6w4f) → Campfire(5w3s) → Pickaxe(6w4s)
-→ Stone Pickaxe(8w10s) → Stone Sword / Walls / Shelter → Boat(25w10f) → sail to Dunes (Heat Cloak 15f5w)
+→ Stone Pickaxe(8w10s) → Stone Sword / Walls / Mineshaft → Boat(25w10f) → sail to Dunes (Heat Cloak 15f5w)
 → Marsh (bushes, marsh crystal) → find rare STARMETAL (Woods/Dunes/Marsh only, 14 nodes/world)
 → Reinforced Boat(20w8f+5⭐) → survive icebergs → Frozen Spire (Fur Cloak 20f8w) → Crystal (needs spick)
 → Aether Forge(25w20s6💎) → Iron Sword (mine iron underground) → 4× Monolith Core(8💎4🟣 each)
@@ -300,7 +299,7 @@ footsteps keyed by surface; growls scale with nearest-monster distance; generati
 Cooked meat +5. Campfire: regen 1hp/5s within 4 tiles, blocks Blight-Storm erosion within 6, respawn point (nearest own) —
 but an owned <b>Bed</b> (furniture) outranks campfires. Fall damage: dropping N≥2 levels costs N−1 hp.
 Day = 300s; night = time&gt;0.65 or &lt;0.1. Carrying raw meat or essence doubles monster scent range.
-Shelter interiors (z=2) are fully safe; furniture recipes: chest 8w, bed 10w+6f (workbench).</p>
+The mines (z=1) are fully safe; furniture (placed in the mines) recipes: chest 8w, bed 10w+6f (workbench).</p>
 
 <h2 id="howto">10. How-to: common change recipes</h2>
 <h3>Add a craftable item</h3>
@@ -355,8 +354,8 @@ diagonal (see current wall.svg: parallelogram at 2:1 slope, ±20px span so neigh
 toggle flip-flopped every 300ms while E was held until a 900ms <code>zToggleAt</code> cooldown was added.
 Any state toggle triggered from polled keys needs its own cooldown.</div>
 <div class="warn"><b>Ordering matters in interact():</b> current priority is
-(z=2: chest → exit) → (z=1: shaft exit → dig) → mine entrance → shelter enter → notes → nodes → monolith → water.
-The mine/shelter checks must precede nodes or nearby trees steal the keypress forever; all layer toggles share the
+(z=1: chest → shaft exit → dig) → mine entrance → notes → nodes → monolith → water.
+The mine checks must precede nodes or nearby trees steal the keypress forever; all layer toggles share the
 900ms <code>zToggleAt</code> cooldown.</div>
 <div class="warn"><b>Phaser missing texture = black/green box.</b> Equipping the stone pickaxe showed one
 because <code>i-spick</code> was never generated. Every new equippable/tool/creature type needs its texture
@@ -375,7 +374,7 @@ matching feature (preload + one entry in the relevant map is all that's needed):
 <tr><td><code>sprites/fire.svg</code></td><td>Flame overlay for the fire cellular-automata system (burning trees/structures spread by wind).</td></tr>
 <tr><td><code>sprites/obsidian.svg</code></td><td>Obsidian node — mine near lava, endgame tool/building tier.</td></tr>
 <tr><td><code>sprites/blightedtree.svg</code></td><td>Corrupted tree variant — swap in when infection touches forest tiles.</td></tr>
-<tr><td><code>sprites/chest.svg + bed.svg</code></td><td><b>WIRED</b> as shelter furniture (z=2). Remaining work: the chest's actual storage UI (E on a chest currently shows a placeholder toast).</td></tr>
+<tr><td><code>sprites/chest.svg + bed.svg</code></td><td><b>WIRED</b> as mine furniture (z=1). Remaining work: the chest's actual storage UI (E on a chest currently shows a placeholder toast).</td></tr>
 <tr><td><code>sprites/bridge.svg</code></td><td>Buildable bridge segment — cross rivers/lakes without a boat.</td></tr>
 <tr><td><code>sprites/farmplot.svg + crop.svg</code></td><td>Farming: till plot, plant, grows over in-game days (mud sectors block growth per the ecosystem rule).</td></tr>
 <tr><td><i>(bed follow-up)</i></td><td>Skip-night-if-all-players-sleep is still unimplemented.</td></tr>

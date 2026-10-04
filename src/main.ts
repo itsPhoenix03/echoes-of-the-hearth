@@ -19,13 +19,15 @@ import {
   emptyInv,
   DECOR_NONBLOCKING,
   FURNITURE,
+  MODULES,
 } from "../shared/defs.js";
 import { isNightTime, NIGHT_START } from "../shared/time.js";
-import { Rig, makePartTextures } from "./rig.ts";
+import { Rig, type RigStatus } from "./rig.ts";
+import { shirtFor } from "./keeperSkins.ts";
 import { initUI, showMsg, reset as resetUI, UIState } from "./ui.ts";
 import { GameAudio } from "./audio.ts";
 import { getSetting } from "./settings.ts";
-import { ASSET_MANIFEST, NODE_SPR, STRUCT_SPR } from "./assets.ts";
+import { ASSET_MANIFEST, HUMAN_CLIPS, NODE_SPR, POP_FRAME_MS, POP_RES, STRUCT_SPR, humanFrame } from "./assets.ts";
 import { TileStore, UNLOADED, CHUNK, type ChunkMsg } from "./tiles.ts";
 import { LEGACY, LEGACY_WS_PORT, requestJoin, identityToken } from "./net.ts";
 
@@ -42,13 +44,8 @@ const MONO_NAMES = [
 const DEV_OFF_MSG =
   "Dev tools are not enabled for this session. Run `npm run start:dev` to grant them on " +
   "this machine, or allowlist a named account with HEARTH_DEV_TOKS.";
-const STORY_OFF: Record<string, number> = { wall: 25, shelter: 52 };
-const MAX_LVL: Record<string, number> = { wall: 2, shelter: 3 };
-const colorFor = (id: string) => {
-  let h = 0;
-  for (const c of id) h = (h * 31 + c.charCodeAt(0)) & 0xffffff;
-  return Phaser.Display.Color.HSLToColor((h % 360) / 360, 0.6, 0.55).color;
-};
+const STORY_OFF: Record<string, number> = { wall: 25 };
+const MAX_LVL: Record<string, number> = { wall: 2 };
 
 /** A medic and its hut, exactly as the Go server sends them in `init` (§3). */
 type Medic = {
@@ -73,6 +70,19 @@ const CRE_TEX: Record<string, string> = {
   drowned: "drowned",
   blight_lancer: "blight_lancer",
 };
+// Cosmetic enemy leaps (see creatureJumpTick): ground hunters pounce when the local
+// player is close; heavies only war-stomp on their server telegraph ('ctel').
+// dur = seconds, h = peak lift in px.
+const CRE_POUNCE: Record<string, { dur: number; h: number }> = {
+  crawler: { dur: 0.42, h: 12 },
+  drowned: { dur: 0.45, h: 12 },
+  stalker: { dur: 0.5, h: 16 },
+  husk_wolf: { dur: 0.55, h: 20 },
+};
+const CRE_STOMP: Record<string, { dur: number; h: number }> = {
+  brute: { dur: 0.5, h: 9 },
+  bog_shambler: { dur: 0.55, h: 8 },
+};
 // decor/furniture kind -> texture key. SINGLE source of truth — ghost preview,
 // addStruct (outdoor) and addFurn (indoor) must all use this map.
 const DECOR_TEX: Record<string, string> = {
@@ -82,6 +92,22 @@ const DECOR_TEX: Record<string, string> = {
   reed_vase: "reed_bundle",
   trophy_antler: "bone_totem",
   fence: "mod_railing",
+};
+// buildmod rejection reasons -> short player-facing text (wire spec §12.2)
+const MODFAIL_MSG: Record<string, string> = {
+  "unknown-module": "That piece does not exist.",
+  "bad-slot": "That piece does not fit there.",
+  "bad-tile": "That is not a valid tile.",
+  "outdoors-only": "Modular building only works outdoors.",
+  "too-far": "Too far away — move closer.",
+  water: "You cannot build on water yet.",
+  blocked: "Something already occupies that ground.",
+  "tile-occupied": "A structure already stands on that tile.",
+  "slot-occupied": "That slot is already filled.",
+  unsupported: "Nothing there to hold it up — build a floor or a wall first.",
+  "no-anchor": "A bridge must reach back to land or to another segment.",
+  occupied: "Someone is standing there — you cannot wall them in.",
+  cost: "You do not have the materials.",
 };
 // medicResult/medicOffer failure reasons -> short player-facing text (server protocol is machine-readable only)
 const MEDIC_REASON_MSG: Record<string, string> = {
@@ -221,10 +247,14 @@ class Hearth extends Phaser.Scene {
   hunger = 10;
   thirst = 10;
   inv: any = emptyInv();
+  /** Where our latest gain came from (hit node, dug tile, nearby kill) — pickup pops start there. */
+  lastGainSrc: { x: number; y: number; at: number } | null = null;
   tools = new Set<string>();
   gear = new Set<string>();
   equipped: string | null = null;
   wornGear: string | null = null;
+  /** Starmetal Armor on (its own slot — stacks with the cloak). */
+  armorOn = false;
   actionSeq = 0;              // monotonic per-client counter for the validated action protocol (seq/act)
   pendingActSeq: number | null = null;   // most recent gather/dig/atk seq awaiting server confirmation
   mono = [false, false, false, false];
@@ -242,8 +272,6 @@ class Hearth extends Phaser.Scene {
       wy: number;
       z: number;
       b: number;
-      boat: Phaser.GameObjects.Image | null;
-      boatPhase: number;
       wakeT: number;
       label: Phaser.GameObjects.Text;
     }
@@ -286,8 +314,6 @@ class Hearth extends Phaser.Scene {
   sailing = false;
   swimming = false;
   boatKind = 0;
-  boatSpr: Phaser.GameObjects.Image | null = null;
-  boatBobT = 0; // local boat hull-bob phase (visual only — never touches px/py)
   wakeTimer = 0; // local boat wake-spawn cadence
   selectedVehicle: "boat" | "sboat" | null = null;
   warnedWaterTemp = false;
@@ -298,9 +324,6 @@ class Hearth extends Phaser.Scene {
   torchSpr = new Map<number, Phaser.GameObjects.Image>();
   darkRT!: Phaser.GameObjects.RenderTexture;
   notes: { x: number; y: number; text: string }[] = [];
-  shelterAnchor = -1;
-  shelterLvl = 1;
-  intFloor: Phaser.GameObjects.Image[] = [];
   furnSpr = new Map<number, Phaser.GameObjects.Image>();
   exitSpr = new Map<number, Phaser.GameObjects.Image>();
   keys!: any;
@@ -308,6 +331,10 @@ class Hearth extends Phaser.Scene {
   ghost: Phaser.GameObjects.Sprite | null = null;
   placing: string | null = null;
   placeDir = 0;
+  /** Modular building. modSpr is keyed "tileIndex:slot" — several per tile. */
+  modSpr = new Map<string, Phaser.GameObjects.Sprite>();
+  placingMod: string | null = null;
+  modSeq = 0;
   updateUI!: (st: UIState) => void;
   uiApi!: any;
   cropSpr = new Map<number, Phaser.GameObjects.Image>(); // farmplot i -> crop overlay sprite
@@ -365,10 +392,11 @@ class Hearth extends Phaser.Scene {
   create() {
     activeScene = this;
     this.quitting = false;
-    makePartTextures(this);
     this.makeWeatherFx();
     this.makeGlowTextures();
     this.registerBirdAnims();
+    this.registerHumanAnims();
+    this.registerPopAnims();
     // Task 5: player display name
     const urlName = new URLSearchParams(location.search).get("name");
     if (urlName) {
@@ -385,7 +413,10 @@ class Hearth extends Phaser.Scene {
     );
     this.input.keyboard!.on("keydown-SPACE", () => this.jump());
     this.input.keyboard!.on("keydown-F", () => this.attack());
-    this.input.keyboard!.on("keydown-ESC", () => this.setPlacing(null));
+    this.input.keyboard!.on("keydown-ESC", () => {
+      this.setPlacing(null);
+      this.setPlacingMod(null);
+    });
     this.input.keyboard!.on("keydown-R", () => {
       if (
         this.placing &&
@@ -396,7 +427,10 @@ class Hearth extends Phaser.Scene {
       }
     });
     this.input.keyboard!.on("keydown-T", () => {
-      if (this.z === 1 && this.inv.torch > 0) this.send({ t: "torch" });
+      if (this.z === 1 && this.inv.torch > 0) {
+        this.me.playAction({ name: "torch", tool: null });   // kneel and plant it
+        this.send({ t: "torch" });
+      }
       else if (this.z === 1) showMsg("Craft torches first (2 wood + 1 fiber).");
     });
     const HOTBAR = ["axe", "pick", "spick", "sword", "isword"];
@@ -777,6 +811,101 @@ class Hearth extends Phaser.Scene {
     }
   }
 
+  /** `<char>_<action>` anims for NPC/medic sprites (the player rig samples frames itself). */
+  registerHumanAnims() {
+    for (const [c, a, n] of HUMAN_CLIPS) {
+      this.anims.create({
+        key: `${c}_${a}`,
+        frames: Array.from({ length: n }, (_, i) => ({ key: humanFrame(c, a, i + 1) })),
+        frameRate: 11,                                    // ~90ms/frame, the pack's preview timing
+        repeat: a === "walk" || a === "sit" ? -1 : 0,
+      });
+    }
+  }
+
+  /** The Starmetal Armor turned (some of) a creature hit: a shield glint over the keeper. */
+  armorClang() {
+    this.audio.thud();
+    const t = this.add
+      .text(this.me.x, this.me.y - 40, "🛡", { fontFamily: "Arial", fontSize: "14px" })
+      .setOrigin(0.5)
+      .setDepth(this.me.depth + 2);
+    this.tweens.add({ targets: t, y: t.y - 14, alpha: 0, scale: 1.3, duration: 450, onComplete: () => t.destroy() });
+  }
+
+  /** `<res>_pop` one-shots with the pack's per-frame timing. */
+  registerPopAnims() {
+    for (const r of POP_RES)
+      this.anims.create({
+        key: `${r}_pop`,
+        frames: POP_FRAME_MS.map((ms, i) => ({ key: `${r}_pop_0${i + 1}`, duration: ms })),
+      });
+  }
+
+  /** Pop every resource that went up in this inventory update, from where it was gathered. */
+  popGains(prev: Record<string, number>, next: Record<string, number>) {
+    if (!this.me) return;
+    const gains = POP_RES.filter((r) => (next?.[r] ?? 0) > (prev?.[r] ?? 0));
+    if (!gains.length) return;
+    // a gain with no fresh source (chest, craft, reward) pops at the keeper's feet
+    const src =
+      this.lastGainSrc && this.time.now - this.lastGainSrc.at < 1500
+        ? this.lastGainSrc
+        : { x: this.me.x, y: this.me.y };
+    gains.forEach((r, i) => {
+      const n = next[r] - (prev?.[r] ?? 0);
+      const x = src.x + (i - (gains.length - 1) / 2) * 14;
+      this.time.delayedCall(i * 70, () => this.spawnPop(r, x, src.y, n));
+    });
+  }
+
+  /** Pop-out frames, a short hold, then the item flies into the keeper. */
+  spawnPop(res: string, x: number, y: number, n: number) {
+    if (!this.me) return;
+    const s = this.add.sprite(x, y, `${res}_pop_01`).setOrigin(0.5, 0.9).setDepth(y + 30);
+    s.play(`${res}_pop`);
+    s.once(Phaser.Animations.Events.ANIMATION_COMPLETE, () => {
+      this.tweens.add({
+        targets: s,
+        delay: 140,
+        x: this.me.x,
+        y: this.me.y - 26,
+        scale: 0.55,
+        alpha: 0,
+        duration: 300,
+        ease: "Cubic.easeIn",
+        onComplete: () => s.destroy(),
+      });
+    });
+    if (n > 1) {
+      const t = this.add
+        .text(x, y - 34, `+${n}`, { fontFamily: "Arial", fontSize: "11px", color: "#ffffff", stroke: "#000000", strokeThickness: 3 })
+        .setOrigin(0.5)
+        .setDepth(y + 31);
+      this.tweens.add({ targets: t, y: y - 46, alpha: 0, duration: 700, onComplete: () => t.destroy() });
+    }
+  }
+
+  /** Play a one-shot medic clip, then settle back on the still base pose. */
+  playMedic(medicId: string, action: "heal" | "prepare" | "shiver") {
+    const s = this.medicSpr.get(medicId);
+    const md = this.medics.find((m) => m.id === medicId);
+    if (!s || !md || !this.anims.exists(`${md.sprite}_${action}`)) return;
+    s.play(`${md.sprite}_${action}`);
+    s.once(Phaser.Animations.Events.ANIMATION_COMPLETE, () => s.setTexture(md.sprite));
+  }
+
+  /** Ambient keeper loop for our own rig — mirrors the server's exposure rules (tick.go). */
+  selfRigStatus(): RigStatus {
+    if (this.z === 0) {
+      const t = this.tileAt(this.px, this.py);
+      const wt = this.swimming ? this.world.waterTemp?.[(this.py | 0) * SIZE + (this.px | 0)] ?? 0 : 0;
+      if ((t === T.SNOW && this.wornGear !== "furcloak") || wt === 1) return "cold";
+      if ((t === T.SAND && !isNightTime(this.wtime) && this.wornGear !== "heatcloak") || wt === 2) return "hot";
+    }
+    return this.hp <= 3 ? "injured" : null;
+  }
+
   // Deterministic world-space birds, seeded from the SHARED server clock (day + time-of-day):
   // every client near the same island computes the exact same species, path and timing.
   birdSeen = new Set<number>();
@@ -954,6 +1083,7 @@ class Hearth extends Phaser.Scene {
   jump() {
     if (!this.ready || this.jumpT >= 0 || this.sailing || this.swimming) return;
     this.jumpT = 0;
+    this.me.playJump();   // the rig owns the hop (frames + bodyRoot lift); jumpT gates ledge climbing
     this.send({ t: "anim", a: "j" });
     this.audio.swing();
   }
@@ -1008,24 +1138,14 @@ class Hearth extends Phaser.Scene {
     }
   }
 
-  // FIX 1: furniture visibility gate — only show furn tiles belonging to THIS shelter or THIS mine tunnel
-  // furniture is only visible on the LAYER it was placed on (tile indices are shared
-  // between layers — a mine tunnel can run directly under a shelter's floor)
+  // furniture lives in the mines only, and only shows on its own carved tile
   furnVisible(i: number, fz: number): boolean {
     if (fz !== this.z) return false;
-    if (this.z === 2) {
-      const ax = this.shelterAnchor % SIZE,
-        ay = (this.shelterAnchor / SIZE) | 0;
-      return (
-        Math.max(Math.abs((i % SIZE) - ax), Math.abs(((i / SIZE) | 0) - ay)) <=
-        this.shelterLvl + 2
-      );
-    }
     if (this.z === 1) return this.digs.has(i);
     return false;
   }
 
-  addFurn(i: number, kind: string, fz = 2) {
+  addFurn(i: number, kind: string, fz = 1) {
     if (this.furnSpr.has(i)) return;
     const p = this.iso(i % SIZE, (i / SIZE) | 0);
     const tex = DECOR_TEX[kind] || kind;
@@ -1080,29 +1200,10 @@ class Hearth extends Phaser.Scene {
     this.z = z;
     const surfA = z !== 0 ? 0.15 : 1;
     // FEATURE 1: camera zoom per layer (clamped so the view area never grows)
-    this.baseZoom = z === 2 || z === 1 ? 1.02 : 1;
+    this.baseZoom = z === 1 ? 1.02 : 1;
     this.applyViewClamp(400);
-    // shelter interior floor — FEATURE 1: room half-width = shelterLvl + 2
-    this.intFloor.forEach((s) => s.destroy());
-    this.intFloor = [];
-    if (z === 2 && this.shelterAnchor >= 0) {
-      const ax = this.shelterAnchor % SIZE,
-        ay = (this.shelterAnchor / SIZE) | 0,
-        r = this.shelterLvl + 2;
-      for (let dy = -r; dy <= r; dy++)
-        for (let dx = -r; dx <= r; dx++) {
-          const p = this.iso(ax + dx, ay + dy);
-          this.intFloor.push(
-            this.add
-              .image(p.x, p.y, "cavefloor")
-              .setOrigin(0.5, 0)
-              .setTint(0xb8865a)
-              .setDepth(-0.4),
-          );
-        }
-    }
     for (const rt of this.chunks.values()) rt.setAlpha(surfA);
-    // nodes: fully hidden in mines (faded ghosts read as "inside the cave"), faded in shelters
+    // nodes: fully hidden in mines (faded ghosts would read as "inside the cave")
     for (const s of this.nodeSpr.values()) {
       s.setVisible(z !== 1);
       s.setAlpha(surfA);
@@ -1113,6 +1214,8 @@ class Hearth extends Phaser.Scene {
       const glowA2 = z === 1 ? 0.03 : 0.13;
       e.glow?.setAlpha(glowA2).setData("baseA", glowA2);
     }
+    // modules exist on the surface only; underground they fade with everything else
+    for (const s of this.modSpr.values()) s.setAlpha(surfA);
     this.monoSpr.forEach((s) => s.setAlpha(surfA));
     for (const s of this.decorSpr.values()) s.setAlpha(surfA);
     for (const s of this.mountainSpr) s.setAlpha(surfA);
@@ -1136,7 +1239,6 @@ class Hearth extends Phaser.Scene {
     for (const o of this.others.values()) {
       o.rig.setVisible(o.z === z);
       o.label.setVisible(this.showNames && o.z === z);
-      o.boat?.setVisible(o.z === z);
     }
     // hide birds underground
     for (const b of this.birds) b.spr.setVisible(z === 0);
@@ -1157,6 +1259,10 @@ class Hearth extends Phaser.Scene {
   }
 
   setPlacing(kind: string | null) {
+    // the two placement modes share one ghost sprite, so selecting a structure
+    // drops any modular selection (cleared directly — setPlacingMod calls back
+    // into this method)
+    if (kind) this.placingMod = null;
     this.placing = kind;
     this.ghost?.destroy();
     this.ghost = null;
@@ -1167,12 +1273,57 @@ class Hearth extends Phaser.Scene {
       const rotable = r?.rot || kind === "wall";
       if (rotable) this.ghost.setFlipX(this.placeDir === 1);
       showMsg(
-        `Placing ${NAMES[kind] || kind} — click a tile (ESC cancels${rotable ? ", R rotates" : ""}${kind === "wall" || kind === "shelter" ? ", click existing to stack" : ""})`,
+        `Placing ${NAMES[kind] || kind} — click a tile (ESC cancels${rotable ? ", R rotates" : ""}${kind === "wall" ? ", click existing to stack" : ""})`,
       );
     }
   }
 
+  /**
+   * Enter modular build mode. Mutually exclusive with structure placing: the
+   * two share one ghost sprite and one click handler.
+   */
+  setPlacingMod(kind: string | null) {
+    if (kind) this.setPlacing(null);
+    this.placingMod = kind;
+    this.ghost?.destroy();
+    this.ghost = null;
+    if (!kind) return;
+    const def = (MODULES as any)[kind];
+    if (!def) return;
+    this.ghost = this.add.sprite(0, 0, kind).setAlpha(0.55).setDepth(999999);
+    const cost = Object.entries(def.cost)
+      .map(([k, v]) => `${v} ${NAMES[k] || k}`)
+      .join(", ");
+    showMsg(
+      `Building ${NAMES[kind] || kind} (${cost}) — click a tile` +
+        " (ESC cancels)",
+    );
+  }
+
+  /** The slot the currently selected module would occupy. */
+  modSlotFor(kind: string): string {
+    return (MODULES as any)[kind]?.slot ?? "floor";
+  }
+
   onClick(ptr: Phaser.Input.Pointer) {
+    if (this.ready && this.placingMod) {
+      const wp = this.cameras.main.getWorldPoint(ptr.x, ptr.y);
+      const { x, y } = this.unIso(wp.x, wp.y);
+      if (x < 0 || y < 0 || x >= SIZE || y >= SIZE) return;
+      if (this.z !== 0) {
+        showMsg("Modular building only works outdoors.");
+        return;
+      }
+      this.send({
+        t: "buildmod",
+        i: y * SIZE + x,
+        kind: this.placingMod,
+        slot: this.modSlotFor(this.placingMod),
+        dir: 0,
+        seq: ++this.modSeq,
+      });
+      return;
+    }
     if (!this.ready || !this.placing) return;
     const wp = this.cameras.main.getWorldPoint(ptr.x, ptr.y);
     const { x, y } = this.unIso(wp.x, wp.y);
@@ -1197,7 +1348,7 @@ class Hearth extends Phaser.Scene {
     const p = this.isoE(x, y);
     // color derives from the server-broadcast NAME (same string every client sees),
     // so a player's color matches on every screen — including their own.
-    const rig = new Rig(this, p.x, p.y, colorFor(name || pid));
+    const rig = new Rig(this, p.x, p.y, shirtFor(name || pid));
     rig.setDepth(p.y);
     const labelText = name || "Keeper";
     const label = this.add
@@ -1211,7 +1362,7 @@ class Hearth extends Phaser.Scene {
       .setOrigin(0.5, 1)
       .setDepth(p.y + 1);
     // new players join on the surface (z=0) — hide them unless WE are on the surface too,
-    // otherwise a player inside a shelter/mine sees the newcomer walking through their interior
+    // otherwise a player down a mine sees the newcomer walking through their interior
     rig.setVisible(this.z === 0);
     label.setVisible(this.showNames && this.z === 0);
     this.others.set(pid, {
@@ -1222,32 +1373,15 @@ class Hearth extends Phaser.Scene {
       wy: y,
       z: 0,
       b: 0,
-      boat: null,
-      boatPhase: Math.random() * 10,
       wakeT: 0,
       label,
     });
   }
 
-  // server-driven boat state for a remote player (b: 0 none, 1 wooden, 2 reinforced)
-  setOtherBoat(
-    o: { b: number; boat: Phaser.GameObjects.Image | null; rig: Rig },
-    b: number,
-  ) {
-    if (o.b === b) return;
+  // server-driven boat state for a remote player (b: 0 none, 1 wooden, 2 reinforced);
+  // the rig draws the hull, so this only records it (applied per frame with o.z)
+  setOtherBoat(o: { b: number; rig: Rig }, b: number) {
     o.b = b;
-    if (b > 0 && !o.boat) {
-      o.boat = this.add
-        .image(o.rig.x, o.rig.y + 4, "boat")
-        .setOrigin(0.5, 0.6)
-        .setVisible(o.rig.visible);
-      if (b === 2) o.boat.setTint(0x9ad4e8);
-    } else if (b > 0 && o.boat) {
-      b === 2 ? o.boat.setTint(0x9ad4e8) : o.boat.clearTint();
-    } else if (b === 0 && o.boat) {
-      o.boat.destroy();
-      o.boat = null;
-    }
   }
 
   onMsg(m: any) {
@@ -1267,6 +1401,7 @@ class Hearth extends Phaser.Scene {
       this.applyDevAccess();
       // Task 4: wornGear from init
       this.wornGear = m.wornGear ?? null;
+      this.armorOn = m.armor === true;
       // fix: init now carries hp/hunger/thirst — an injured reconnect must not show a full HUD
       if (m.hp !== undefined) this.hp = m.hp;
       if (m.hunger !== undefined) this.hunger = m.hunger;
@@ -1284,15 +1419,15 @@ class Hearth extends Phaser.Scene {
           this.addStruct(i, kind, hp, dir, l);
       for (const i of m.digs || []) this.addDug(i);
       for (const i of m.torches || []) this.addTorch(i);
-      for (const [i, kind, fz] of m.furn || []) this.addFurn(i, kind, fz ?? 2);
+      for (const [i, kind, fz] of m.furn || []) this.addFurn(i, kind, fz ?? 1);
       for (const [i, crop, stage] of m.farms || [])
         this.addCropOverlay(i, crop, stage);
       // §3: `players` is now an array of {id,x,y,z,name,b,eq} objects. The legacy
       // array-of-arrays form is still accepted so ?legacy=1 keeps working.
       for (const e of m.players || []) {
-        const [pid, x, y, eq, pz, pname, pb] = Array.isArray(e)
+        const [pid, x, y, eq, pz, pname, pb, worn, armor] = Array.isArray(e)
           ? e
-          : [e.id, e.x, e.y, e.eq, e.z, e.name, e.b];
+          : [e.id, e.x, e.y, e.eq, e.z, e.name, e.b, e.worn, e.armor];
         this.addOther(pid, x, y, pname);
         const o = this.others.get(pid);
         if (o) {
@@ -1300,6 +1435,8 @@ class Hearth extends Phaser.Scene {
           o.rig.setVisible(o.z === this.z);
           o.label.setVisible(this.showNames && o.z === this.z);
           if (eq) o.rig.hold(eq);
+          o.rig.setCloak(worn);
+          o.rig.setArmor(armor);
           this.setOtherBoat(o, pb | 0);
         }
       }
@@ -1336,12 +1473,13 @@ class Hearth extends Phaser.Scene {
       });
     } else if (m.t === "pj") {
       this.addOther(m.id, m.x, m.y, m.name);
+      this.others.get(m.id)?.rig.setCloak(m.worn);
+      this.others.get(m.id)?.rig.setArmor(m.armor);
       showMsg("A fellow Keeper has joined.");
     } else if (m.t === "pl") {
       const o = this.others.get(m.id);
       if (o) {
         o.label.destroy();
-        o.boat?.destroy();
         o.rig.destroy();
       }
       this.others.delete(m.id);
@@ -1360,26 +1498,27 @@ class Hearth extends Phaser.Scene {
           o.z = nz;
           o.rig.setVisible(o.z === this.z);
           o.label.setVisible(this.showNames && o.z === this.z);
-          o.boat?.setVisible(o.z === this.z);
           o.rig.setPosition(p.x, p.y);
         }
       }
     } else if (m.t === "anim") {
       // cosmetic jump only — gather/dig/atk now drive rigs via the validated 'act' broadcast below
       const o = this.others.get(m.id);
-      if (o && m.a === "j")
-        this.tweens.add({
-          targets: o.rig,
-          y: o.rig.y - 20,
-          duration: 220,
-          yoyo: true,
-          ease: "Sine.out",
-        });
+      if (o && m.a === "j") o.rig.playJump();
     } else if (m.t === "act") {
       // server-validated & derived action-start: drive remote rigs only — the local player
       // already predicted this clip at send time via me.act()
       if (m.id !== this.id) {
         const o = this.others.get(m.id);
+        if (o && (m.a === "slash" || m.a === "thrust" || m.a === "punch")) {
+          // their swing should land on the creature they are fighting: nearest one on screen
+          let best = 150, tdx = 0;
+          for (const c of this.creSpr.values()) {
+            const d = Math.hypot(c.x - o.rig.x, c.y - o.rig.y);
+            if (d < best) { best = d; tdx = c.x - o.rig.x; }
+          }
+          if (tdx) o.rig.face(tdx);
+        }
         o?.rig.playAction({ name: m.a, tool: m.tool, dirX: m.dx, dirY: m.dy });
       }
     } else if (m.t === "actReject") {
@@ -1389,12 +1528,20 @@ class Hearth extends Phaser.Scene {
     } else if (m.t === "eq") {
       const o = this.others.get(m.id);
       o?.rig.hold(m.k);
+    } else if (m.t === "worn") {
+      // another keeper put on / took off a cloak (our own arrives via `inv`)
+      if (m.id !== this.id) {
+        this.others.get(m.id)?.rig.setCloak(m.k);
+        this.others.get(m.id)?.rig.setArmor(m.armor);
+      }
     } else if (m.t === "inv") {
+      this.popGains(this.inv, m.inv);
       this.inv = m.inv;
       this.tools = new Set(m.tools);
       this.gear = new Set(m.gear);
       // Task 4: wornGear from inv update
       this.wornGear = m.wornGear ?? null;
+      this.armorOn = m.armor === true;
     } else if (m.t === "msg") showMsg(m.s);
     else if (m.t === "medicOffer") {
       this.medicOffer = m.offer
@@ -1406,8 +1553,13 @@ class Hearth extends Phaser.Scene {
             expiresAt: Date.now() + m.offer.expiresInMs,
           }
         : null;
+      if (m.offer) this.playMedic(m.medicId, "prepare");
     } else if (m.t === "medicResult") {
       this.medicOffer = null;
+      if (m.ok) {
+        this.me?.playAction({ name: "meds" });
+        if (m.medicId) this.playMedic(m.medicId, "heal");
+      }
       if (m.ok)
         showMsg(
           `💊 Healed to full — paid ${m.paid.amount} ${NAMES[m.paid.resource] || m.paid.resource}.`,
@@ -1419,6 +1571,7 @@ class Hearth extends Phaser.Scene {
       if (m.by === this.id && m.seq === this.pendingActSeq && m.hp !== -1)
         this.audio.chop();
       const s = this.nodeSpr.get(m.i);
+      if (m.by === this.id && s) this.lastGainSrc = { x: s.x, y: s.y, at: this.time.now };
       if (m.hp === -1) this.removedNodes.delete(m.i);
       else if (m.hp === 0) this.removedNodes.add(m.i);
       if (m.hp === 0 && s) {
@@ -1448,18 +1601,22 @@ class Hearth extends Phaser.Scene {
       showMsg("The soil sours — this sector's ecosystem is collapsing!");
     } else if (m.t === "dig") {
       if (m.by === this.id && m.seq === this.pendingActSeq) this.audio.chop();
+      if (m.by === this.id && m.tiles?.length) {
+        const t = m.tiles[0], dp = this.iso(t % SIZE, (t / SIZE) | 0);
+        this.lastGainSrc = { x: dp.x, y: dp.y + 16, at: this.time.now };
+      }
       for (const i of m.tiles) this.addDug(i);
     } else if (m.t === "torch") {
+      // another keeper planting one plays the same clip (ours was predicted on keypress)
+      if (m.by && m.by !== this.id) this.others.get(m.by)?.rig.playAction({ name: "torch", tool: null });
       this.addTorch(m.i);
       this.audio.build();
     } else if (m.t === "furn") {
-      this.addFurn(m.i, m.kind, m.z ?? 2);
+      this.addFurn(m.i, m.kind, m.z ?? 1);
       this.audio.build();
     } else if (m.t === "boat") {
       this.sailing = false;
       this.boatKind = 0;
-      this.boatSpr?.destroy();
-      this.boatSpr = null;
       this.audio.hurt();
       // the hull is gone — you're in the water now, swim for it
       if (this.z === 0 && this.tileAt(this.px, this.py) === T.WATER)
@@ -1513,6 +1670,15 @@ class Hearth extends Phaser.Scene {
           this.uiApi.updateChest(m.i, m.slots || {});
         }
       }
+    } else if (m.t === "mod") {
+      this.addModule(m.i, m.slot, m.kind, m.hp, m.dir | 0);
+    } else if (m.t === "modhp") {
+      this.modSpr.get(`${m.i}:${m.slot}`)?.setData("hp", m.hp);
+    } else if (m.t === "modd") {
+      this.removeModule(m.i, m.slot);
+    } else if (m.t === "modfail") {
+      // advisory only — the authoritative fact is that no `mod` arrived
+      showMsg(MODFAIL_MSG[m.why] || "You cannot build that here.", 2000);
     } else if (m.t === "sd") {
       if (m.i === this.engineI) this.engineHp = m.hp > 0 ? m.hp : null;
       const s = this.structSpr.get(m.i);
@@ -1568,6 +1734,7 @@ class Hearth extends Phaser.Scene {
         600000,
       );
     } else if (m.t === "hp") {
+      if (m.blocked && this.me) this.armorClang();
       if (m.hp < this.hp) {
         this.audio.hurt();
         // ang is only present for creature contact damage — gate all hit effects on it (Guide §5 regression watchlist)
@@ -1623,7 +1790,7 @@ class Hearth extends Phaser.Scene {
         this.px = m.x;
         this.py = m.y;
         // a long-range teleport (e.g. dev fast-travel) always lands on the surface —
-        // never leave the player stranded on the mine/shelter layer of the new spot
+        // never leave the player stranded in the mine layer of the new spot
         if (this.z !== 0) this.setZ(0);
       }
       this.hp = m.hp;
@@ -1636,8 +1803,6 @@ class Hearth extends Phaser.Scene {
       if (!m.b) {
         this.sailing = false;
         this.boatKind = 0;
-        this.boatSpr?.destroy();
-        this.boatSpr = null;
       } else {
         this.boatKind = m.b;
         this.sailing = true;
@@ -1653,6 +1818,7 @@ class Hearth extends Phaser.Scene {
       if (bs) {
         bs.setTint(0xffaa00);
         this.audio.telegraph();
+        this.startCreatureJump(bs, CRE_STOMP[bs.getData("ctype")]);
         // tint clears when next cre broadcast updates position (windup is 8 ticks ~0.8s)
         // scene-owned timer: dies with the scene, so it can never touch a sprite freed by a quit
         this.time.delayedCall(900, () => bs.clearTint());
@@ -1761,12 +1927,15 @@ class Hearth extends Phaser.Scene {
             .setData("gBase", base)
             .setData("gPhase", Math.random() * 10);
         }
-        s.setData("tx", p.x).setData("ty", p.y);
+        s.setData("tx", p.x).setData("ty", p.y).setData("cx", x).setData("cy", y);
       }
       for (const [cid, s] of this.creSpr)
         if (!seen.has(cid)) {
           // death tween: 120 ms scale→0.7, alpha→0, angle±20, then 4 particles (Guide §2.4)
           this.audio.killmob();
+          // essence from a kill we were fighting pops out of the body
+          if (this.me && Math.hypot(s.x - this.me.x, s.y - this.me.y) < 200)
+            this.lastGainSrc = { x: s.x, y: s.y, at: this.time.now };
           const angleDir = Math.random() < 0.5 ? 20 : -20;
           this.tweens.add({
             targets: s,
@@ -1796,6 +1965,7 @@ class Hearth extends Phaser.Scene {
               s.destroy();
             },
           });
+          s.getData("jShadow")?.destroy();
           this.creSpr.delete(cid);
         }
       const aseen = new Set<string>();
@@ -1812,10 +1982,12 @@ class Hearth extends Phaser.Scene {
         }
         if (p.x < s.x - 0.5) s.setFlipX(true);
         else if (p.x > s.x + 0.5) s.setFlipX(false);
-        s.setData("tx", p.x).setData("ty", p.y);
+        s.setData("tx", p.x).setData("ty", p.y).setData("cx", x).setData("cy", y);
       }
       for (const [aid, s] of this.aniSpr)
         if (!aseen.has(aid)) {
+          if (this.me && Math.hypot(s.x - this.me.x, s.y - this.me.y) < 200)
+            this.lastGainSrc = { x: s.x, y: s.y, at: this.time.now };   // meat from the hunt
           s.destroy();
           this.aniSpr.delete(aid);
         }
@@ -1931,6 +2103,13 @@ class Hearth extends Phaser.Scene {
         .setDepth(this.iso(md.x, md.y).y + 18)
         .setVisible(this.z === 0);
       this.medicSpr.set(md.id, s);
+      // the Spire medic shivers now and then between customers
+      if (this.anims.exists(`${md.sprite}_shiver`))
+        this.time.addEvent({
+          delay: 6000 + Math.random() * 4000,
+          loop: true,
+          callback: () => { if (s.active && !s.anims.isPlaying) this.playMedic(md.id, "shiver"); },
+        });
     }
     this.pendingMedics = still;
   }
@@ -1940,6 +2119,71 @@ class Hearth extends Phaser.Scene {
    * everything the chunk introduced. A corrupt chunk is dropped whole by the store (§4.3),
    * so nothing here can ever paint half a chunk.
    */
+  // --- modular building ----------------------------------------------------
+  //
+  // Slot geometry. A wall fills its tile (wire spec §12.3) and is drawn like any
+  // other standing structure — the art is a block with a diamond top and a ground
+  // shadow, so anything else leaves it floating between tiles. Floors lie flat
+  // under entities.
+  modPlacement(slot: string, x: number, y: number) {
+    const p = this.isoE(x, y);
+    switch (slot) {
+      case "floor":
+        return { x: p.x, y: p.y, ox: 0.5, oy: 0.5, depth: p.y - 8 };
+      case "wall":
+        return { x: p.x, y: p.y + 16, ox: 0.5, oy: 0.86, depth: p.y + 20 };
+      default: // fixture, decor
+        return { x: p.x, y: p.y + 20, ox: 0.5, oy: 0.92, depth: p.y + 20 };
+    }
+  }
+
+  /**
+   * Mirror of the server's support rule (wire spec §12.3) — fixtures rest on a
+   * floor, decor on a floor or a wall. Advisory only:
+   * it colours the ghost, the server still decides.
+   */
+  modSupported(i: number, slot: string): boolean {
+    const at = (s: string) => this.modSpr.has(`${i}:${s}`);
+    switch (slot) {
+      case "fixture":
+        return at("floor");
+      case "decor":
+        return at("floor") || at("wall");
+      default:
+        return true; // floors and walls stand on their own
+    }
+  }
+
+  /** True when a bridge deck covers this tile — you walk on it, not in it. */
+  bridgeAt(i: number): boolean {
+    const spr = this.modSpr.get(`${i}:floor`);
+    return !!spr && (MODULES as any)[spr.getData("kind")]?.water === true;
+  }
+
+  addModule(i: number, slot: string, kind: string, hp: number, dir: number) {
+    const key = `${i}:${slot}`;
+    if (this.modSpr.has(key)) return;
+    if (!(MODULES as any)[kind]) return; // a kind this client does not know
+    const g = this.modPlacement(slot, i % SIZE, (i / SIZE) | 0);
+    const spr = this.add
+      .sprite(g.x, g.y, kind)
+      .setOrigin(g.ox, g.oy)
+      .setDepth(g.depth)
+      .setAlpha(this.z !== 0 ? 0.15 : 1);
+    spr.setData("slot", slot).setData("i", i).setData("kind", kind).setData("hp", hp).setData("dir", dir);
+    // same pop-in as a structure, so placing reads as weight landing
+    const finalY = spr.y;
+    spr.setScale(0.6).setY(finalY - 10);
+    this.tweens.add({ targets: spr, scaleX: 1, scaleY: 1, y: finalY, duration: 160, ease: "Back.easeOut" });
+    this.modSpr.set(key, spr);
+  }
+
+  removeModule(i: number, slot: string) {
+    const key = `${i}:${slot}`;
+    this.modSpr.get(key)?.destroy();
+    this.modSpr.delete(key);
+  }
+
   applyChunkMsg(m: ChunkMsg) {
     const d = this.world.applyChunk(m);
     if (!d) return;
@@ -1950,6 +2194,7 @@ class Hearth extends Phaser.Scene {
     for (const st of d.structs)
       for (let l = 1; l <= (st.lvl || 1); l++)
         this.addStruct(st.i, st.kind, st.hp, st.dir, l);
+    for (const md of d.mods) this.addModule(md.i, md.slot, md.kind, md.hp, md.dir);
     // Repainting is coalesced to one pass per frame: a join delivers 25 chunks at once.
     this.terrainDirty = true;
     this.placePendingNotes();
@@ -1975,13 +2220,15 @@ class Hearth extends Phaser.Scene {
       .sprite(p.x, p.y + 20, tex)
       .setOrigin(0.5, 0.92)
       .setDepth(p.y + 20)
-      .setAlpha(this.z === 2 ? 0.15 : 1)
       .setAngle(0)
       .setVisible(this.z !== 1);
     this.nodeSpr.set(i, s);
   }
 
   addStruct(i: number, kind: string, hp: number, dir = 0, lvl = 1) {
+    // a kind retired from the game (e.g. the old shelter) has no art any more:
+    // skip it rather than drawing Phaser's black missing-texture box
+    if (!this.textures.exists(DECOR_TEX[kind] || kind)) return;
     const existing = this.structSpr.get(i);
     if (existing && lvl > 1 && existing.kind === kind) {
       // stacked story on top
@@ -2070,7 +2317,7 @@ class Hearth extends Phaser.Scene {
       this.exitSpr.set(i, es);
     }
     if (kind === "engine") { this.engineI = i; this.engineHp = hp; }
-    // structures placed by OTHER players while we're in a shelter/mine must arrive faded
+    // structures placed by OTHER players while we're down a mine must arrive faded
     const sa = this.z !== 0 ? 0.15 : 1;
     entry.spr.setAlpha(sa);
     const glowA = this.z !== 0 ? 0.03 : 0.1;
@@ -2170,7 +2417,7 @@ class Hearth extends Phaser.Scene {
     this.placePendingMedics();
 
     const mp = this.isoE(this.px, this.py);
-    this.me = new Rig(this, mp.x, mp.y, colorFor(this.myName)); // same hash others use for us
+    this.me = new Rig(this, mp.x, mp.y, shirtFor(this.myName)); // same hash others use for us
     this.me.setDepth(mp.y);
     this.cameras.main.startFollow(this.me, true, 0.15, 0.15);
 
@@ -2217,16 +2464,6 @@ class Hearth extends Phaser.Scene {
   blockedAt(x: number, y: number) {
     if (x < 0 || y < 0 || x >= SIZE || y >= SIZE) return true;
     if (this.z === 1) return !this.digs.has((y | 0) * SIZE + (x | 0)); // underground: only carved tunnels
-    if (this.z === 2) {
-      // shelter interior: stay in the room
-      const ax = this.shelterAnchor % SIZE,
-        ay = (this.shelterAnchor / SIZE) | 0;
-      // FEATURE 1: room half-width = shelterLvl + 2
-      return (
-        Math.max(Math.abs((x | 0) - ax), Math.abs((y | 0) - ay)) >
-        this.shelterLvl + 2
-      );
-    }
     // Terrain that has not streamed in is impassable — the player must never walk off the
     // edge of the loaded world into a hole (§4, unloaded state).
     if (!this.world.loadedAt(x, y)) return true;
@@ -2236,14 +2473,16 @@ class Hearth extends Phaser.Scene {
     // you can always drop DOWN a cliff (fall damage applies) — only climbing is limited
     if (this.elevAt(x, y) - this.elevAt(this.px, this.py) > climb) return true;
     const st = this.structSpr.get((y | 0) * SIZE + (x | 0));
-    // shelters are enterable; non-blocking decor and farmplots are walkable
+    // non-blocking decor and farmplots are walkable
     if (
       st &&
-      st.kind !== "shelter" &&
       !DECOR_NONBLOCKING.has(st.kind) &&
       st.kind !== "farmplot"
     )
       return true;
+    // a modular wall fills its tile the way a palisade does; a door does not
+    const wall = this.modSpr.get(`${(y | 0) * SIZE + (x | 0)}:wall`);
+    if (wall && (MODULES as any)[wall.getData("kind")]?.blocks) return true;
     // TASK 2d: landmark blocked tiles
     if (LANDMARK_BLOCK && LANDMARK_BLOCK.has((y | 0) * SIZE + (x | 0)))
       return true;
@@ -2267,32 +2506,6 @@ class Hearth extends Phaser.Scene {
     if (now - this.lastGather < 300) return;
     this.lastGather = now;
 
-    if (this.z === 2) {
-      // FIX 3: chest check BEFORE shelter-exit — radius raised to 1.8
-      for (const [i, s] of this.furnSpr)
-        if (
-          s.texture.key === "chest" &&
-          s.getData("fz") === 2 &&
-          Math.hypot((i % SIZE) - this.px, ((i / SIZE) | 0) - this.py) < 1.8
-        ) {
-          this.chestReqI = i;
-          this.send({ t: "chest_open", i });
-          return;
-        }
-      // close chest panel if E pressed while not near chest
-      if (this.uiApi?.isChestOpen()) {
-        this.uiApi.closeChest();
-        return;
-      }
-      if (now - this.zToggleAt > 900) {
-        this.zToggleAt = now;
-        // always step out at THIS shelter's door — overlapping rooms must not teleport you elsewhere
-        this.px = (this.shelterAnchor % SIZE) + 0.5;
-        this.py = ((this.shelterAnchor / SIZE) | 0) + 1.5;
-        this.setZ(0);
-      }
-      return;
-    }
     if (this.z === 1) {
       // FEATURE 2: chest check in mine before shaft-exit and dig logic
       for (const [i, s] of this.furnSpr)
@@ -2359,24 +2572,6 @@ class Hearth extends Phaser.Scene {
       this.setZ(1);
       return;
     }
-    // a shelter? step inside
-    if (now - this.zToggleAt > 900)
-      for (const [i, s] of this.structSpr)
-        if (
-          s.kind === "shelter" &&
-          Math.hypot((i % SIZE) - this.px, ((i / SIZE) | 0) - this.py) < 1.6
-        ) {
-          this.zToggleAt = now;
-          this.shelterAnchor = i;
-          this.shelterLvl = s.lvl || 1;
-          this.px = (i % SIZE) + 0.5;
-          this.py = ((i / SIZE) | 0) + 0.5;
-          this.setZ(2);
-          showMsg(
-            "🏠 Home. Place a Bed (respawn), Chest and Torches here. E to step outside.",
-          );
-          return;
-        }
     // farmplot? plant or harvest
     for (const [i, s] of this.structSpr) {
       if (s.kind !== "farmplot") continue;
@@ -2437,8 +2632,15 @@ class Hearth extends Phaser.Scene {
               ? "pick"
               : null
             : null;
-      // anticipation only — audio.chop() now fires on server-confirmed 'node' (see onMsg)
-      this.me.act(tool);
+      // turn to the node so the swing / reach lands on it
+      const ns = this.nodeSpr.get(best);
+      if (ns) this.me.face(ns.x - this.me.x);
+      // anticipation only — audio.chop() now fires on server-confirmed 'node' (see onMsg).
+      // Same clip the server derives: tools swing, a bare-handed tree is punched,
+      // everything else (bushes, loose stone) is picked up by hand.
+      if (tool) this.me.act(tool);
+      else if (kind === 0) this.me.act(null);
+      else this.me.playAction({ name: "collect", tool: null });
       this.send({
         t: "gather",
         seq: this.nextActSeq(),
@@ -2464,15 +2666,31 @@ class Hearth extends Phaser.Scene {
     for (let dy = -1; dy <= 1; dy++)
       for (let dx = -1; dx <= 1; dx++)
         if (this.tileAt(this.px + dx, this.py + dy) === T.WATER) {
-          this.me.act(null);
+          this.me.playAction({ name: "collect", tool: null });   // scoop it up
           this.send({ t: "water" });
           return;
         }
   }
 
+  /** Screen-space x offset to what the server will hit: nearest creature, else animal, within 2.4 tiles (actions.go). */
+  attackTargetDx(): number | null {
+    for (const pool of [this.creSpr, this.aniSpr]) {
+      let best: Phaser.GameObjects.Sprite | null = null, bd = 2.4;
+      for (const s of pool.values()) {
+        const d = Math.hypot(s.getData("cx") - this.px, s.getData("cy") - this.py);
+        if (d < bd) { bd = d; best = s; }
+      }
+      if (best) return best.x - this.me.x;
+    }
+    return null;
+  }
+
   attack() {
     if (!this.ready) return;
     this.audio.swing();   // wind-up sound stays at action start (Guide §impact audio)
+    // turn to the target so the level cut lands on it, whichever side it is on
+    const tdx = this.attackTargetDx();
+    if (tdx) this.me.face(tdx);
     this.me.act(this.equipped);
     this.send({
       t: "atk",
@@ -2542,6 +2760,71 @@ class Hearth extends Phaser.Scene {
       } else s.clearTint();
     }
     s.setData("gPhase", phase);
+  }
+
+  /** Begin a leap on a creature sprite (no-op mid-leap or for types that never jump). */
+  startCreatureJump(s: Phaser.GameObjects.Sprite, spec?: { dur: number; h: number }) {
+    if (!spec || (s.getData("jT") ?? -1) >= 0) return;
+    s.setData("jT", 0).setData("jDur", spec.dur).setData("jH", spec.h).setData("jLanded", false);
+  }
+
+  // Leap layer on top of the gait: anticipation crouch → stretched arc → landing squash
+  // with a dust puff, plus a ground shadow that stays put while the body rises. Runs after
+  // creatureGaitTick in the same frame, so it multiplies the gait's scale for this frame
+  // and returns the y lift; like the gait it is client-local and purely cosmetic.
+  creatureJumpTick(
+    s: Phaser.GameObjects.Sprite,
+    type: string,
+    dt: number,
+    near: boolean,
+    gx: number,
+    gy: number,
+  ): number {
+    let t: number = s.getData("jT") ?? -1;
+    if (t < 0) {
+      const pounce = CRE_POUNCE[type];
+      if (!pounce) return 0;
+      const cd = (s.getData("jCd") ?? 0.6 + Math.random() * 1.5) - dt;
+      s.setData("jCd", cd);
+      if (!near || cd > 0 || !s.visible) return 0;
+      this.startCreatureJump(s, pounce);
+      t = 0;
+    }
+    const dur: number = s.getData("jDur"), h: number = s.getData("jH");
+    t += dt;
+    const p = t / dur;
+    let shadow: Phaser.GameObjects.Ellipse | undefined = s.getData("jShadow");
+    if (p >= 1) {
+      shadow?.destroy();
+      s.setData("jT", -1).setData("jShadow", undefined).setData("jCd", 2.2 + Math.random() * 2.5);
+      return 0;
+    }
+    s.setData("jT", t);
+    let lift = 0, mx = 1, my = 1;
+    if (p < 0.2) {
+      const q = p / 0.2;                                   // gather: wide and low
+      mx = 1 + 0.15 * q; my = 1 - 0.22 * q;
+    } else if (p < 0.85) {
+      const q = (p - 0.2) / 0.65;                          // airborne arc
+      lift = h * Math.sin(Math.PI * q);
+      mx = 1 - 0.08 * (1 - q); my = 1 + 0.14 * (1 - q);   // stretched on the way up
+    } else {
+      const q = (p - 0.85) / 0.15, k = Math.sin(Math.PI * q);   // landing squash
+      mx = 1 + 0.18 * k; my = 1 - 0.2 * k;
+      if (!s.getData("jLanded")) {
+        s.setData("jLanded", true);
+        this.spawnDust(gx, gy + 2);
+      }
+    }
+    s.setScale(s.scaleX * mx, s.scaleY * my);
+    if (!shadow) {
+      shadow = this.add.ellipse(gx, gy, s.displayWidth * 0.55, 5, 0x16151a, 0.22);
+      s.setData("jShadow", shadow);
+    }
+    const air = lift / Math.max(1, h);
+    shadow.setPosition(gx, gy).setDepth(gy - 1).setVisible(s.visible)
+      .setScale(1 - 0.35 * air).setAlpha(1 - 0.5 * air);
+    return lift;
   }
 
   // One-shot dust puff reusing the already-generated 'glow-s' soft-circle texture
@@ -2663,7 +2946,7 @@ class Hearth extends Phaser.Scene {
     }
     // decrement slow counter each frame (client-side, not per-tick)
     if (this.slowUntil > 0) this.slowUntil--;
-    this.me.moving = !!(dx || dy) && !this.sailing; // no leg-walk while seated in a boat
+    this.me.moving = !!(dx || dy); // in a boat the rig turns this into the paddle stroke
     if (dx || dy) {
       const len = Math.hypot(dx, dy);
       const wx = dx / len + dy / len,
@@ -2688,12 +2971,10 @@ class Hearth extends Phaser.Scene {
     }
     if (k.E.isDown) this.interact();
     this.me.tick(dt);
-    // jump arc
-    let hop = 0;
+    // jump window (the visible hop is the rig's jump clip, same 0.45s)
     if (this.jumpT >= 0) {
       this.jumpT += dt / 0.45;
       if (this.jumpT >= 1) this.jumpT = -1;
-      else hop = Math.sin(Math.PI * this.jumpT) * 20;
     }
     // underground is flat — no hill offsets down there
     const p =
@@ -2701,7 +2982,7 @@ class Hearth extends Phaser.Scene {
     if (this.z !== 0)
       p.y += 16; // stand on the flat interior/cave floor
     else if (this.swimming) p.y += 12; // swimming: sink to head level
-    this.me.setPosition(p.x, p.y - hop).setDepth(p.y);
+    this.me.setPosition(p.x, p.y).setDepth(p.y);
     this.ensureChunks();
     this.updateVegetationSway(dt);
     this.updateFlicker(dt);
@@ -2715,16 +2996,14 @@ class Hearth extends Phaser.Scene {
 
     // TASK 4c: boarding / disembarking boats or swimming at the water's edge
     if (this.z === 0) {
-      const onWater = this.tileAt(this.px, this.py) === T.WATER;
+      const onWater =
+        this.tileAt(this.px, this.py) === T.WATER &&
+        !this.bridgeAt((this.py | 0) * SIZE + (this.px | 0));
       if (onWater && !this.sailing && !this.swimming) {
         if (this.selectedVehicle && this.inv[this.selectedVehicle] > 0) {
           // sail with selected vehicle
           this.sailing = true;
           this.boatKind = this.selectedVehicle === "sboat" ? 2 : 1;
-          this.boatSpr = this.add
-            .image(p.x, p.y + 4, "boat")
-            .setOrigin(0.5, 0.6);
-          if (this.boatKind === 2) this.boatSpr.setTint(0x9ad4e8);
           showMsg(
             this.boatKind === 2
               ? "⛵ Sailing — your reinforced hull fears no ice."
@@ -2760,25 +3039,21 @@ class Hearth extends Phaser.Scene {
         this.sailing = false;
         this.swimming = false;
         this.boatKind = 0;
-        this.boatSpr?.destroy();
-        this.boatSpr = null;
       }
-      if (this.sailing && this.boatSpr) {
-        // gentle hull bob — purely visual y offset on the boat sprite, never on px/py
-        this.boatBobT += dt;
-        const bob = Math.sin(this.boatBobT * 3.2) * 3;
-        this.boatSpr.setPosition(p.x, p.y + 4 + bob).setDepth(p.y - 1);
-        if (dx || dy) {
-          this.wakeTimer -= dt;
-          if (this.wakeTimer <= 0) {
-            this.wakeTimer = 0.18;
-            this.spawnWake(this.boatSpr.x, this.boatSpr.y + 6);
-          }
+      // the rig draws the hull (and its bob); the wake trails from it
+      if (this.sailing && (dx || dy)) {
+        this.wakeTimer -= dt;
+        if (this.wakeTimer <= 0) {
+          this.wakeTimer = 0.18;
+          this.spawnWake(this.me.x, this.me.y + 10 + this.me.boatBob);
         }
       }
     }
     this.me.setSwim(this.z === 0 && this.swimming);
-    this.me.setSeated(this.z === 0 && this.sailing);   // braced legs + lean while boating
+    this.me.setBoat(this.z === 0 && this.sailing ? this.boatKind || 1 : 0);   // seated in the hull, rowing
+    this.me.setStatus(this.selfRigStatus());
+    this.me.setCloak(this.wornGear);
+    this.me.setArmor(this.armorOn);
 
     // see-through structures: fade anything standing in front of the player
     if (this.z === 0) {
@@ -2799,23 +3074,17 @@ class Hearth extends Phaser.Scene {
     // remote players: lerp + walk anim
     for (const o of this.others.values()) {
       const d = Math.hypot(o.tx - o.rig.x, o.ty - o.rig.y);
-      o.rig.moving = d > 2 && o.b === 0; // seated in a boat: no walk cycle
+      o.rig.moving = d > 2;   // in a boat the rig turns this into the paddle stroke
       // swim only when the server says they're not boating and they're on water
       o.rig.setSwim(
         o.z === 0 && o.b === 0 && this.tileAt(o.wx, o.wy) === T.WATER,
       );
-      o.rig.setSeated(o.z === 0 && o.b > 0);   // server-driven boat state
-      if (o.boat) {
-        // same hull-bob/wake treatment as the local boat, phase-offset per remote player
-        o.boatPhase += dt * 3.2;
-        const bob = Math.sin(o.boatPhase) * 3;
-        o.boat.setPosition(o.rig.x, o.rig.y + 4 + bob).setDepth(o.rig.depth - 1);
-        if (d > 0.5) {
-          o.wakeT -= dt;
-          if (o.wakeT <= 0) {
-            o.wakeT = 0.18;
-            this.spawnWake(o.boat.x, o.boat.y + 6);
-          }
+      o.rig.setBoat(o.z === 0 ? o.b : 0);   // server-driven boat state; the rig draws the hull
+      if (o.z === 0 && o.b > 0 && d > 0.5) {
+        o.wakeT -= dt;
+        if (o.wakeT <= 0) {
+          o.wakeT = 0.18;
+          this.spawnWake(o.rig.x, o.rig.y + 10 + o.rig.boatBob);
         }
       }
       if (d > 0.5) {
@@ -2847,8 +3116,9 @@ class Hearth extends Phaser.Scene {
       s.setData("gvx", vx).setData("gvy", vy).setData("gpvx", vx).setData("gpvy", vy);
       const near = Math.hypot(vx - this.me.x, vy - this.me.y) < 130;
       this.creatureGaitTick(s, s.getData("ctype"), dt, moving, near);
+      const lift = this.creatureJumpTick(s, s.getData("ctype"), dt, near, vx, vy);
       s.x = vx;
-      s.y = vy + (s.getData("gHoverY") || 0);
+      s.y = vy + (s.getData("gHoverY") || 0) - lift;
       s.setDepth(vy);
     }
     // animals: plain lerp (gait not in scope here — only the listed creature types)
@@ -2861,8 +3131,42 @@ class Hearth extends Phaser.Scene {
         s.setDepth(s.y);
       }
     }
-    // ghost placement preview
-    if (this.ghost) {
+
+    // ghost placement preview — modular first: it uses slot geometry, not recipes
+    if (this.ghost && this.placingMod) {
+      const wp = this.cameras.main.getWorldPoint(
+        this.input.activePointer.x,
+        this.input.activePointer.y,
+      );
+      const g = this.unIso(wp.x, wp.y);
+      const slot = this.modSlotFor(this.placingMod);
+      const pl = this.modPlacement(slot, g.x, g.y);
+      this.ghost.setPosition(pl.x, pl.y).setOrigin(pl.ox, pl.oy);
+      const gi = g.y * SIZE + g.x;
+      // mirror of the server's refusal list — advisory, the server still decides
+      const overWater = this.world.tiles[gi] === T.WATER;
+      const isBridge = (MODULES as any)[this.placingMod]?.water === true;
+      // a bridge segment is the one piece allowed over water, and only when a
+      // neighbour is land or another segment (the server walks the whole span)
+      const anchored =
+        !overWater ||
+        (isBridge &&
+          [gi - 1, gi + 1, gi - SIZE, gi + SIZE].some(
+            (n) =>
+              n >= 0 && n < SIZE * SIZE &&
+              (this.world.tiles[n] !== T.WATER || this.bridgeAt(n)),
+          ));
+      const free =
+        g.x >= 0 && g.y >= 0 && g.x < SIZE && g.y < SIZE &&
+        !this.modSpr.has(`${gi}:${slot}`) &&
+        this.modSupported(gi, slot) &&
+        !this.structSpr.has(gi) &&
+        anchored &&
+        !LANDMARK_BLOCK.has(gi);
+      const ok =
+        this.z === 0 && free && Math.hypot(g.x - this.px, g.y - this.py) <= 6;
+      this.ghost.setTint(ok ? 0x88ff88 : 0xff6666);
+    } else if (this.ghost) {
       const wp = this.cameras.main.getWorldPoint(
         this.input.activePointer.x,
         this.input.activePointer.y,
@@ -2886,7 +3190,7 @@ class Hearth extends Phaser.Scene {
       const ok =
         (stackOk ||
           (!this.blockedAt(g.x, g.y) &&
-            (this.z === 2 || mineOk || !this.nodeSpr.has(gi)))) &&
+            (mineOk || !this.nodeSpr.has(gi)))) &&
         Math.hypot(g.x - this.px, g.y - this.py) <= 6;
       this.ghost.setTint(ok ? 0x88ff88 : 0xff6666);
     }
@@ -2980,7 +3284,7 @@ class Hearth extends Phaser.Scene {
       zone === "snow",
     );
     this.audio.update(dt, night);
-    if (this.me.moving) {
+    if (this.me.moving && !this.sailing) {
       this.stepTimer -= dt;
       if (this.stepTimer <= 0) {
         this.stepTimer = 0.32;
@@ -3017,7 +3321,7 @@ class Hearth extends Phaser.Scene {
         }
       }
     } else {
-      // hide birds when underground / in shelter
+      // hide birds when underground
       for (const bird of this.birds) bird.spr.setVisible(false);
     }
 
@@ -3037,6 +3341,7 @@ class Hearth extends Phaser.Scene {
       gear: this.gear,
       equipped: this.equipped,
       wornGear: this.wornGear,
+      armorOn: this.armorOn,
       selectedVehicle: this.selectedVehicle,
       inWater: this.swimming || this.sailing,
       mono: this.mono,
@@ -3142,6 +3447,7 @@ function getUiApi(): ReturnType<typeof initUI> {
     (medicId, offerId) =>
       activeScene?.send({ t: "medic", medicId, action: "accept", offerId }),
     (medicId) => activeScene?.send({ t: "medic", medicId, action: "decline" }),
+    (kind) => activeScene?.setPlacingMod(kind),
   );
   return uiApiSingleton;
 }
