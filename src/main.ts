@@ -44,8 +44,8 @@ const MONO_NAMES = [
 const DEV_OFF_MSG =
   "Dev tools are not enabled for this session. Run `npm run start:dev` to grant them on " +
   "this machine, or allowlist a named account with HEARTH_DEV_TOKS.";
-const STORY_OFF: Record<string, number> = { wall: 25, shelter: 52 };
-const MAX_LVL: Record<string, number> = { wall: 2, shelter: 3 };
+const STORY_OFF: Record<string, number> = { wall: 25 };
+const MAX_LVL: Record<string, number> = { wall: 2 };
 
 /** A medic and its hut, exactly as the Go server sends them in `init` (§3). */
 type Medic = {
@@ -324,9 +324,6 @@ class Hearth extends Phaser.Scene {
   torchSpr = new Map<number, Phaser.GameObjects.Image>();
   darkRT!: Phaser.GameObjects.RenderTexture;
   notes: { x: number; y: number; text: string }[] = [];
-  shelterAnchor = -1;
-  shelterLvl = 1;
-  intFloor: Phaser.GameObjects.Image[] = [];
   furnSpr = new Map<number, Phaser.GameObjects.Image>();
   exitSpr = new Map<number, Phaser.GameObjects.Image>();
   keys!: any;
@@ -1141,24 +1138,14 @@ class Hearth extends Phaser.Scene {
     }
   }
 
-  // FIX 1: furniture visibility gate — only show furn tiles belonging to THIS shelter or THIS mine tunnel
-  // furniture is only visible on the LAYER it was placed on (tile indices are shared
-  // between layers — a mine tunnel can run directly under a shelter's floor)
+  // furniture lives in the mines only, and only shows on its own carved tile
   furnVisible(i: number, fz: number): boolean {
     if (fz !== this.z) return false;
-    if (this.z === 2) {
-      const ax = this.shelterAnchor % SIZE,
-        ay = (this.shelterAnchor / SIZE) | 0;
-      return (
-        Math.max(Math.abs((i % SIZE) - ax), Math.abs(((i / SIZE) | 0) - ay)) <=
-        this.shelterLvl + 2
-      );
-    }
     if (this.z === 1) return this.digs.has(i);
     return false;
   }
 
-  addFurn(i: number, kind: string, fz = 2) {
+  addFurn(i: number, kind: string, fz = 1) {
     if (this.furnSpr.has(i)) return;
     const p = this.iso(i % SIZE, (i / SIZE) | 0);
     const tex = DECOR_TEX[kind] || kind;
@@ -1213,29 +1200,10 @@ class Hearth extends Phaser.Scene {
     this.z = z;
     const surfA = z !== 0 ? 0.15 : 1;
     // FEATURE 1: camera zoom per layer (clamped so the view area never grows)
-    this.baseZoom = z === 2 || z === 1 ? 1.02 : 1;
+    this.baseZoom = z === 1 ? 1.02 : 1;
     this.applyViewClamp(400);
-    // shelter interior floor — FEATURE 1: room half-width = shelterLvl + 2
-    this.intFloor.forEach((s) => s.destroy());
-    this.intFloor = [];
-    if (z === 2 && this.shelterAnchor >= 0) {
-      const ax = this.shelterAnchor % SIZE,
-        ay = (this.shelterAnchor / SIZE) | 0,
-        r = this.shelterLvl + 2;
-      for (let dy = -r; dy <= r; dy++)
-        for (let dx = -r; dx <= r; dx++) {
-          const p = this.iso(ax + dx, ay + dy);
-          this.intFloor.push(
-            this.add
-              .image(p.x, p.y, "cavefloor")
-              .setOrigin(0.5, 0)
-              .setTint(0xb8865a)
-              .setDepth(-0.4),
-          );
-        }
-    }
     for (const rt of this.chunks.values()) rt.setAlpha(surfA);
-    // nodes: fully hidden in mines (faded ghosts read as "inside the cave"), faded in shelters
+    // nodes: fully hidden in mines (faded ghosts would read as "inside the cave")
     for (const s of this.nodeSpr.values()) {
       s.setVisible(z !== 1);
       s.setAlpha(surfA);
@@ -1305,7 +1273,7 @@ class Hearth extends Phaser.Scene {
       const rotable = r?.rot || kind === "wall";
       if (rotable) this.ghost.setFlipX(this.placeDir === 1);
       showMsg(
-        `Placing ${NAMES[kind] || kind} — click a tile (ESC cancels${rotable ? ", R rotates" : ""}${kind === "wall" || kind === "shelter" ? ", click existing to stack" : ""})`,
+        `Placing ${NAMES[kind] || kind} — click a tile (ESC cancels${rotable ? ", R rotates" : ""}${kind === "wall" ? ", click existing to stack" : ""})`,
       );
     }
   }
@@ -1394,7 +1362,7 @@ class Hearth extends Phaser.Scene {
       .setOrigin(0.5, 1)
       .setDepth(p.y + 1);
     // new players join on the surface (z=0) — hide them unless WE are on the surface too,
-    // otherwise a player inside a shelter/mine sees the newcomer walking through their interior
+    // otherwise a player down a mine sees the newcomer walking through their interior
     rig.setVisible(this.z === 0);
     label.setVisible(this.showNames && this.z === 0);
     this.others.set(pid, {
@@ -1451,7 +1419,7 @@ class Hearth extends Phaser.Scene {
           this.addStruct(i, kind, hp, dir, l);
       for (const i of m.digs || []) this.addDug(i);
       for (const i of m.torches || []) this.addTorch(i);
-      for (const [i, kind, fz] of m.furn || []) this.addFurn(i, kind, fz ?? 2);
+      for (const [i, kind, fz] of m.furn || []) this.addFurn(i, kind, fz ?? 1);
       for (const [i, crop, stage] of m.farms || [])
         this.addCropOverlay(i, crop, stage);
       // §3: `players` is now an array of {id,x,y,z,name,b,eq} objects. The legacy
@@ -1644,7 +1612,7 @@ class Hearth extends Phaser.Scene {
       this.addTorch(m.i);
       this.audio.build();
     } else if (m.t === "furn") {
-      this.addFurn(m.i, m.kind, m.z ?? 2);
+      this.addFurn(m.i, m.kind, m.z ?? 1);
       this.audio.build();
     } else if (m.t === "boat") {
       this.sailing = false;
@@ -1822,7 +1790,7 @@ class Hearth extends Phaser.Scene {
         this.px = m.x;
         this.py = m.y;
         // a long-range teleport (e.g. dev fast-travel) always lands on the surface —
-        // never leave the player stranded on the mine/shelter layer of the new spot
+        // never leave the player stranded in the mine layer of the new spot
         if (this.z !== 0) this.setZ(0);
       }
       this.hp = m.hp;
@@ -2252,13 +2220,15 @@ class Hearth extends Phaser.Scene {
       .sprite(p.x, p.y + 20, tex)
       .setOrigin(0.5, 0.92)
       .setDepth(p.y + 20)
-      .setAlpha(this.z === 2 ? 0.15 : 1)
       .setAngle(0)
       .setVisible(this.z !== 1);
     this.nodeSpr.set(i, s);
   }
 
   addStruct(i: number, kind: string, hp: number, dir = 0, lvl = 1) {
+    // a kind retired from the game (e.g. the old shelter) has no art any more:
+    // skip it rather than drawing Phaser's black missing-texture box
+    if (!this.textures.exists(DECOR_TEX[kind] || kind)) return;
     const existing = this.structSpr.get(i);
     if (existing && lvl > 1 && existing.kind === kind) {
       // stacked story on top
@@ -2347,7 +2317,7 @@ class Hearth extends Phaser.Scene {
       this.exitSpr.set(i, es);
     }
     if (kind === "engine") { this.engineI = i; this.engineHp = hp; }
-    // structures placed by OTHER players while we're in a shelter/mine must arrive faded
+    // structures placed by OTHER players while we're down a mine must arrive faded
     const sa = this.z !== 0 ? 0.15 : 1;
     entry.spr.setAlpha(sa);
     const glowA = this.z !== 0 ? 0.03 : 0.1;
@@ -2494,16 +2464,6 @@ class Hearth extends Phaser.Scene {
   blockedAt(x: number, y: number) {
     if (x < 0 || y < 0 || x >= SIZE || y >= SIZE) return true;
     if (this.z === 1) return !this.digs.has((y | 0) * SIZE + (x | 0)); // underground: only carved tunnels
-    if (this.z === 2) {
-      // shelter interior: stay in the room
-      const ax = this.shelterAnchor % SIZE,
-        ay = (this.shelterAnchor / SIZE) | 0;
-      // FEATURE 1: room half-width = shelterLvl + 2
-      return (
-        Math.max(Math.abs((x | 0) - ax), Math.abs((y | 0) - ay)) >
-        this.shelterLvl + 2
-      );
-    }
     // Terrain that has not streamed in is impassable — the player must never walk off the
     // edge of the loaded world into a hole (§4, unloaded state).
     if (!this.world.loadedAt(x, y)) return true;
@@ -2513,10 +2473,9 @@ class Hearth extends Phaser.Scene {
     // you can always drop DOWN a cliff (fall damage applies) — only climbing is limited
     if (this.elevAt(x, y) - this.elevAt(this.px, this.py) > climb) return true;
     const st = this.structSpr.get((y | 0) * SIZE + (x | 0));
-    // shelters are enterable; non-blocking decor and farmplots are walkable
+    // non-blocking decor and farmplots are walkable
     if (
       st &&
-      st.kind !== "shelter" &&
       !DECOR_NONBLOCKING.has(st.kind) &&
       st.kind !== "farmplot"
     )
@@ -2547,32 +2506,6 @@ class Hearth extends Phaser.Scene {
     if (now - this.lastGather < 300) return;
     this.lastGather = now;
 
-    if (this.z === 2) {
-      // FIX 3: chest check BEFORE shelter-exit — radius raised to 1.8
-      for (const [i, s] of this.furnSpr)
-        if (
-          s.texture.key === "chest" &&
-          s.getData("fz") === 2 &&
-          Math.hypot((i % SIZE) - this.px, ((i / SIZE) | 0) - this.py) < 1.8
-        ) {
-          this.chestReqI = i;
-          this.send({ t: "chest_open", i });
-          return;
-        }
-      // close chest panel if E pressed while not near chest
-      if (this.uiApi?.isChestOpen()) {
-        this.uiApi.closeChest();
-        return;
-      }
-      if (now - this.zToggleAt > 900) {
-        this.zToggleAt = now;
-        // always step out at THIS shelter's door — overlapping rooms must not teleport you elsewhere
-        this.px = (this.shelterAnchor % SIZE) + 0.5;
-        this.py = ((this.shelterAnchor / SIZE) | 0) + 1.5;
-        this.setZ(0);
-      }
-      return;
-    }
     if (this.z === 1) {
       // FEATURE 2: chest check in mine before shaft-exit and dig logic
       for (const [i, s] of this.furnSpr)
@@ -2639,24 +2572,6 @@ class Hearth extends Phaser.Scene {
       this.setZ(1);
       return;
     }
-    // a shelter? step inside
-    if (now - this.zToggleAt > 900)
-      for (const [i, s] of this.structSpr)
-        if (
-          s.kind === "shelter" &&
-          Math.hypot((i % SIZE) - this.px, ((i / SIZE) | 0) - this.py) < 1.6
-        ) {
-          this.zToggleAt = now;
-          this.shelterAnchor = i;
-          this.shelterLvl = s.lvl || 1;
-          this.px = (i % SIZE) + 0.5;
-          this.py = ((i / SIZE) | 0) + 0.5;
-          this.setZ(2);
-          showMsg(
-            "🏠 Home. Place a Bed (respawn), Chest and Torches here. E to step outside.",
-          );
-          return;
-        }
     // farmplot? plant or harvest
     for (const [i, s] of this.structSpr) {
       if (s.kind !== "farmplot") continue;
@@ -3275,7 +3190,7 @@ class Hearth extends Phaser.Scene {
       const ok =
         (stackOk ||
           (!this.blockedAt(g.x, g.y) &&
-            (this.z === 2 || mineOk || !this.nodeSpr.has(gi)))) &&
+            (mineOk || !this.nodeSpr.has(gi)))) &&
         Math.hypot(g.x - this.px, g.y - this.py) <= 6;
       this.ghost.setTint(ok ? 0x88ff88 : 0xff6666);
     }
@@ -3406,7 +3321,7 @@ class Hearth extends Phaser.Scene {
         }
       }
     } else {
-      // hide birds when underground / in shelter
+      // hide birds when underground
       for (const bird of this.birds) bird.spr.setVisible(false);
     }
 

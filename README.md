@@ -41,8 +41,8 @@ the first time.
 - **SPACE** — jump (clears higher ledges)
 - **F** — attack
 - **R** — rotate a placeable before confirming
-- **T** — light a torch (mines only; torches can also be built inside shelters; craft with
-  2 wood + 1 fiber)
+- **T** — light a torch (mines only; craft with 2 wood + 1 fiber). Keepers have no houses —
+  the mines are the safe place: no weather, no creatures, and the only place furniture stands
 - **1–5** — equip a tool/weapon from the hotbar (Wooden Axe, Wooden Pickaxe, Stone Pickaxe,
   Stone Sword, Iron Sword)
 - **C** — crafting menu

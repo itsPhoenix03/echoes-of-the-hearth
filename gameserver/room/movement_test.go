@@ -582,3 +582,20 @@ func TestSlowClientIsDroppedNotBlocking(t *testing.T) {
 	}
 	t.Fatal("a client that never drains was not dropped")
 }
+
+// Keepers have no houses: the old shelter interior (z=2) is gone, so no layer
+// change can reach it — not even standing on a structure that used to be one.
+func TestNoShelterLayer(t *testing.T) {
+	f := newFixture(t)
+	sx, sy := f.p.X, f.p.Y
+	f.r.structures[ti(sx+1, sy)] = &Structure{Kind: "shelter", HP: 40, Lvl: 1}
+
+	f.now += ZCooldownMS
+	f.pos(map[string]any{"t": "pos", "x": sx + 1, "y": sy, "z": 2.0})
+	if !f.gotFix() || f.p.Z != 0 {
+		t.Fatalf("stepped into a retired shelter interior: z = %d", f.p.Z)
+	}
+	if _, ok := f.r.defs.Recipes["shelter"]; ok {
+		t.Fatal("shelter is still craftable")
+	}
+}

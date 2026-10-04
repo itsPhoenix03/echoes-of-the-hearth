@@ -44,7 +44,7 @@ const icon = (k: string) =>
   ({ wood: '🪵', stone: '🪨', fiber: '🌿', crystal: '💎', essence: '🟣', water: '💧', meat: '🥩',
      cookedmeat: '🍖', wall: '🧱', campfire: '🔥', workbench: '🛠', forge: '⚙', core: '🔮',
      engine: '💠', axe: '🪓', pick: '⛏', spick: '⛏', sword: '🗡', heatcloak: '🧥', furcloak: '🧣',
-     iron: '🔩', diamond: '🔷', mineshaft: '🕳', shelter: '🏠', isword: '⚔',
+     iron: '🔩', diamond: '🔷', mineshaft: '🕳', isword: '⚔',
      starmetal: '✨', boat: '🛶', sboat: '🚤', torch: '🕯', chest: '📦', bed: '🛏',
      banner: '🚩', stone_path: '🪨', lantern: '🏮', reed_vase: '🌾', rug: '🟫', trophy_antler: '🦌',
      fence: '🪵', farmplot: '🌱', grain: '🌾', glowcap: '✨', bread: '🍞', medicine: '🧪',
@@ -256,12 +256,12 @@ export function initUI(
           html += `<span class="slot">${icon(k)} ${NAMES[k]} ×${st.inv[k]}${k === 'torch' ? ' [T]' : ''}</span>`;
         }
       }
-      for (const k of ['wall', 'campfire', 'workbench', 'forge', 'mineshaft', 'shelter', 'chest', 'bed', 'core', 'engine',
+      for (const k of ['wall', 'campfire', 'workbench', 'forge', 'mineshaft', 'chest', 'bed', 'core', 'engine',
                         'banner', 'stone_path', 'lantern', 'reed_vase', 'rug', 'trophy_antler', 'fence', 'farmplot']) {
         if (!st.inv[k]) continue;
         const r = (RECIPES as any)[k];
         // hide (not grey) placeables that cannot go in the current zone:
-        // interiors (shelter/mine) accept only chest/bed and indoor-eligible decor;
+        // the mines accept only chest/bed and indoor-eligible decor;
         // the surface hides indoor-only decor.
         if (r?.place) {
           const interiorOk = k === 'chest' || k === 'bed' || (r.decor && (r.zone === 'in' || r.zone === 'both'));

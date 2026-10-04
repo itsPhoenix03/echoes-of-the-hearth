@@ -135,9 +135,9 @@ func TestBuildModRefusals(t *testing.T) {
 	}
 	delete(f.r.structures, i)
 
-	// indoors is not a modular building site in this pass
+	// the mines are not a modular building site
 	f.reset()
-	f.p.Z = 2
+	f.p.Z = 1
 	f.r.handleBuildMod(f.p, map[string]any{"t": "buildmod", "seq": float64(6), "i": float64(i), "kind": "mod_floor_wood", "slot": "floor"})
 	if m := f.lastOfType("modfail"); m == nil || m["why"] != "outdoors-only" {
 		t.Fatalf("expected outdoors-only, got %v", m)

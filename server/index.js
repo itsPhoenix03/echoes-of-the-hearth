@@ -49,7 +49,7 @@ let weather = { kind: null, until: 0 };
 const infected = new Map();          // tile -> cure timestamp (wisp-spread corruption)
 const digs = new Set();              // underground tiles carved out by players
 const torches = new Set();           // torch-lit underground tiles
-const furn = new Map();              // shelter furniture: tile -> {kind, owner}
+const furn = new Map();              // mine furniture: tile -> {kind, owner}
 const brokenBergs = new Set();       // icebergs smashed by reinforced boats
 let nextCre = 1, nextAni = 1, time = 0.3, day = 1, won = false, tickN = 0;
 let wave = null;                     // {until, engineI}
@@ -126,7 +126,7 @@ const blocked = (x, y) => {
 const MAX_SPEED = 6.2;        // fastest world-space speed in the game: sailing (src/main.ts:2371)
 const SPEED_SLACK = 1.6;      // headroom for lag, jitter and frame batching
 const POS_SLACK = 1.0;        // flat allowance absorbing the client's 100ms send-throttle boundary
-const Z_NEAR = 3.0;           // a layer change must land next to its mineshaft/shelter anchor
+const Z_NEAR = 3.0;           // a layer change must land next to its mineshaft anchor
 const Z_COOLDOWN_MS = 500;    // minimum gap between accepted layer changes
 const FIX_MS = 250;           // at most one snapback per player per window — never flood a desynced client
 const WARP_GRACE_MS = 1000;   // after a server-side teleport, forgive in-flight 'pos' from the old spot
@@ -137,14 +137,13 @@ function posBlocked(x, y, z, fromX, fromY) {
   if (!(x >= 0 && y >= 0 && x < SIZE && y < SIZE)) return true;
   const i = ti(x, y);
   if (z === 1) return !digs.has(i);                    // underground: only carved tunnels
-  if (z === 2) return false;                           // shelter interior: server has no shelterAnchor (see report)
   if (world.tiles[i] === T.WATER) return false;        // swim / sail
   // the permissive jump bound: the server cannot observe the client's jumpT, so allow the jump case
   if (world.elev[i] - world.elev[ti(fromX, fromY)] > 2) return true;
   if (medicTiles.has(i) || LANDMARK_BLOCK.has(i)) return true;
   const s = structures.get(i);
-  // shelters are enterable; non-blocking decor and farmplots are walkable
-  if (s && s.kind !== 'shelter' && !DECOR_NONBLOCKING.has(s.kind) && s.kind !== 'farmplot') return true;
+  // non-blocking decor and farmplots are walkable
+  if (s && !DECOR_NONBLOCKING.has(s.kind) && s.kind !== 'farmplot') return true;
   return false;
 }
 // after ANY server-side reposition — otherwise the client's already-in-flight pos from the
@@ -162,7 +161,7 @@ const nearStruct = (p, kind, r = 4) => {
 };
 // A legit layer change happens at ONE structure: the player stands next to it and lands on
 // its anchor, so origin AND destination are both within ~2 tiles of that same structure.
-// Checking the destination alone would let a client 'transition' to any mineshaft or shelter
+// Checking the destination alone would let a client 'transition' to any mineshaft
 // on the map — an unbounded teleport, since the z branch skips the distance check.
 const zAnchor = (kind, ax, ay, bx, by) => {
   for (const [i, s] of structures) {
@@ -274,7 +273,7 @@ wss.on('connection', (ws) => {
       Object.assign(p.inv, {
         wood: 500, stone: 500, fiber: 200, crystal: 100, iron: 100, diamond: 50, starmetal: 50,
         essence: 100, water: 10, meat: 5, cookedmeat: 10, wall: 50, campfire: 5, workbench: 3,
-        forge: 2, mineshaft: 3, shelter: 9, engine: 1, core: 4, boat: 2, sboat: 1, torch: 30
+        forge: 2, mineshaft: 3, engine: 1, core: 4, boat: 2, sboat: 1, torch: 30
       });
       ['axe', 'pick', 'spick', 'sword', 'isword'].forEach((t) => p.tools.add(t));
       ['heatcloak', 'furcloak'].forEach((g) => p.gear.add(g));
@@ -293,14 +292,13 @@ wss.on('connection', (ws) => {
         if (now - p.lastFixAt >= FIX_MS) { p.lastFixAt = now; send(ws, { t: 'fix', x: p.x, y: p.y, z: p.z, b: p.b }); }
       };
       if (!Number.isFinite(nx) || !Number.isFinite(ny) || nx < 0 || ny < 0 || nx >= SIZE || ny >= SIZE
-        || nz < 0 || nz > 2 || nb < 0 || nb > 2) return snapback();
+        || nz < 0 || nz > 1 || nb < 0 || nb > 2) return snapback();
       const zChange = nz !== p.z;
       if (zChange) {
-        // every legit layer change is a scripted teleport onto a mineshaft/shelter anchor
-        // (src/main.ts:1995-2081), so travelled distance is meaningless — a single shared
-        // structure bounding BOTH endpoints is the gate
-        if ((nz === 1 || p.z === 1) && !zAnchor('mineshaft', p.x, p.y, nx, ny)) return snapback();
-        if ((nz === 2 || p.z === 2) && !zAnchor('shelter', p.x, p.y, nx, ny)) return snapback();
+        // every legit layer change is a scripted teleport onto a mineshaft anchor, so
+        // travelled distance is meaningless — a single shared mineshaft bounding BOTH
+        // endpoints is the gate. The mines are the only other layer (no houses).
+        if (!zAnchor('mineshaft', p.x, p.y, nx, ny)) return snapback();
         if (now - p.lastZAt < Z_COOLDOWN_MS) return snapback();
       } else if (now >= p.warpUntil) {
         // dt is clamped to 1s: a client that goes quiet for 30s must not bank a 190-tile jump
@@ -379,13 +377,7 @@ wss.on('connection', (ws) => {
       if (!isFurni || !p.inv[kind] || furn.has(i)) return;
       if (r && r.zone === 'out') return;  // extra safety: zone:out decor never inside
       const x = i % SIZE, y = (i / SIZE) | 0;
-      if (p.z === 2) {
-        // SHELTER interior: Chebyshev <= lvl + 2 (FIX 1 + FEATURE 1 room expansion)
-        let room = false;
-        for (const [si, s] of structures)
-          if (s.kind === 'shelter' && Math.max(Math.abs((si % SIZE) - x), Math.abs(((si / SIZE) | 0) - y)) <= (s.lvl || 1) + 2) { room = true; break; }
-        if (!room || Math.hypot(x - p.x, y - p.y) > 5) return;
-      } else if (p.z === 1) {
+      if (p.z === 1) {
         // FEATURE 2: furniture in mines — tile must be dug, no torch check (torches use own flow)
         if (!digs.has(i)) return;
         if (kind === 'torch') return;   // torches in mines use the 'torch' message
@@ -530,8 +522,8 @@ wss.on('connection', (ws) => {
       const x = i % SIZE, y = (i / SIZE) | 0;
       if (Math.hypot(x - p.x, y - p.y) > 6) return;
       const existing = structures.get(i);
-      if (existing) {                 // stack: walls to 2, shelters to 3 stories
-        const maxLvl = kind === 'wall' ? 2 : kind === 'shelter' ? 3 : 0;
+      if (existing) {                 // stack: walls to 2 stories; nothing else stacks
+        const maxLvl = kind === 'wall' ? 2 : 0;
         if (kind !== existing.kind || (existing.lvl || 1) >= maxLvl) return;
         p.inv[kind]--;
         existing.lvl = (existing.lvl || 1) + 1;
@@ -552,10 +544,6 @@ wss.on('connection', (ws) => {
       }
       if (kind === 'mineshaft' && !DIGGABLE(world, i))
         return send(ws, { t: 'msg', s: 'Mines can only be dug in the Woods, Dunes or Spire.' });
-      if (kind === 'shelter')                     // rooms are (lvl+2)-radius: keep them from overlapping
-        for (const [si, s2] of structures)
-          if (s2.kind === 'shelter' && Math.max(Math.abs((si % SIZE) - x), Math.abs(((si / SIZE) | 0) - y)) <= 10)
-            return send(ws, { t: 'msg', s: 'Too close to another shelter — their rooms would overlap.' });
       if (kind === 'engine' && i !== ACTIVATION_I)
         return send(ws, { t: 'msg', s: 'The World Engine must be built on the activation dais at the temple heart.' });
       if (kind === 'engine' && !mono.every(Boolean))
@@ -1517,7 +1505,7 @@ setInterval(() => {
         } else { q.thermN = 0; }
       } else { q.thermN = 0; }
       let delta = 0;
-      if (q.z !== 0) { /* underground or indoors: sheltered from weather */ }
+      if (q.z !== 0) { /* underground: sheltered from weather */ }
       else if (weather.kind === 'sandstorm' && t === T.SAND && !nearAnyStruct(q, 2)) { delta = -1; send(q.ws, { t: 'msg', s: 'The sandstorm flays you — shelter beside a structure!' }); }
       else if (weather.kind === 'snowstorm' && t === T.SNOW && !nearStruct(q, 'campfire', 6)) { delta = -1; send(q.ws, { t: 'msg', s: 'The blizzard freezes you — get to a campfire!' }); }
       else if (t === T.SAND && !isNight() && q.wornGear !== 'heatcloak') { delta = -1; send(q.ws, { t: 'msg', s: 'The desert heat sears you! Craft a Heat Cloak.' }); }

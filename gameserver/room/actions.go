@@ -189,13 +189,10 @@ func (r *Room) handleBuild(p *Player, m map[string]any) {
 		return
 	}
 	if existing, occupied := r.structures[i]; occupied {
-		// stack: walls to 2, shelters to 3 stories
+		// stack: walls to 2 stories; nothing else stacks
 		maxLvl := 0
-		switch kind {
-		case "wall":
+		if kind == "wall" {
 			maxLvl = 2
-		case "shelter":
-			maxLvl = 3
 		}
 		if kind != existing.Kind || existing.lvlOr1() >= maxLvl {
 			return
@@ -228,18 +225,6 @@ func (r *Room) handleBuild(p *Player, m map[string]any) {
 	if kind == "mineshaft" && !r.diggable(i) {
 		r.send(p, map[string]any{"t": "msg", "s": "Mines can only be dug in the Woods, Dunes or Spire."})
 		return
-	}
-	if kind == "shelter" {
-		// rooms are (lvl+2)-radius: keep them from overlapping
-		for si, s2 := range r.structures {
-			if s2.Kind != "shelter" {
-				continue
-			}
-			if maxAbs(float64(si%world.SIZE)-x, float64(si/world.SIZE)-y) <= 10 {
-				r.send(p, map[string]any{"t": "msg", "s": "Too close to another shelter — their rooms would overlap."})
-				return
-			}
-		}
 	}
 	if kind == "engine" && i != world.ACTIVATION_I {
 		r.send(p, map[string]any{"t": "msg", "s": "The World Engine must be built on the activation dais at the temple heart."})
@@ -476,21 +461,6 @@ func (r *Room) handleFurn(p *Player, m map[string]any) {
 	}
 	x, y := float64(i%world.SIZE), float64(i/world.SIZE)
 	switch p.Z {
-	case 2:
-		// SHELTER interior: Chebyshev <= lvl + 2
-		inRoom := false
-		for si, s := range r.structures {
-			if s.Kind != "shelter" {
-				continue
-			}
-			if maxAbs(float64(si%world.SIZE)-x, float64(si/world.SIZE)-y) <= float64(s.lvlOr1()+2) {
-				inRoom = true
-				break
-			}
-		}
-		if !inRoom || math.Hypot(x-p.X, y-p.Y) > 5 {
-			return
-		}
 	case 1:
 		// furniture in mines: the tile must be dug; torches use their own flow
 		if !r.digs[i] || kind == "torch" {

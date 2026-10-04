@@ -21,7 +21,6 @@ export const STRUCT_SPR: Record<string, [number, number]> = {
   forge:     [52,  60],
   engine:    [64,  84],
   mineshaft: [52,  48],
-  shelter:   [104, 100],
 };
 
 const _manifest: [string, string, number, number][] = [];

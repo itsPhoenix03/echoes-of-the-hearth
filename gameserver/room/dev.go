@@ -68,7 +68,7 @@ var devKitInv = map[string]int{
 	"wood": 500, "stone": 500, "fiber": 200, "crystal": 100, "iron": 100,
 	"diamond": 50, "starmetal": 50, "essence": 100, "water": 10, "meat": 5,
 	"cookedmeat": 10, "wall": 50, "campfire": 5, "workbench": 3, "forge": 2,
-	"mineshaft": 3, "shelter": 9, "engine": 1, "core": 4, "boat": 2,
+	"mineshaft": 3, "engine": 1, "core": 4, "boat": 2,
 	"sboat": 1, "torch": 30,
 }
 

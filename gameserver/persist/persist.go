@@ -48,7 +48,7 @@ type Struct struct {
 	Lvl   int    `json:"lvl"`
 }
 
-// Furn is one piece of shelter/mine furniture.
+// Furn is one piece of mine furniture.
 type Furn struct {
 	Kind  string `json:"kind"`
 	Owner string `json:"owner,omitempty"`

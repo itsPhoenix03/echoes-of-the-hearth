@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"hearth/gameserver/defs"
+	"hearth/gameserver/persist"
 	"hearth/gameserver/world"
 )
 
@@ -332,8 +333,8 @@ func TestHarvestRefusedUntilRipe(t *testing.T) {
 func TestChestTransferConservesResources(t *testing.T) {
 	f := newFixture(t)
 	i := ti(float64(f.r.spawn[0]), float64(f.r.spawn[1]))
-	f.stand(float64(f.r.spawn[0]), float64(f.r.spawn[1]), 2)
-	f.r.furn[i] = &Furniture{Kind: "chest", Owner: f.p.S.ID, Z: 2}
+	f.stand(float64(f.r.spawn[0]), float64(f.r.spawn[1]), 1) // a chest in the mines
+	f.r.furn[i] = &Furniture{Kind: "chest", Owner: f.p.S.ID, Z: 1}
 	f.p.Inv["wood"] = 10
 
 	total := func() int { return f.p.Inv["wood"] + f.r.chestInv[i]["wood"] }
@@ -375,13 +376,13 @@ func TestChestTransferConservesResources(t *testing.T) {
 func TestChestIsUnreachableFromAnotherLayer(t *testing.T) {
 	f := newFixture(t)
 	i := ti(float64(f.r.spawn[0]), float64(f.r.spawn[1]))
-	f.stand(float64(f.r.spawn[0]), float64(f.r.spawn[1]), 0) // chest is on z=2
-	f.r.furn[i] = &Furniture{Kind: "chest", Owner: f.p.S.ID, Z: 2}
+	f.stand(float64(f.r.spawn[0]), float64(f.r.spawn[1]), 0) // chest is down in the mines (z=1)
+	f.r.furn[i] = &Furniture{Kind: "chest", Owner: f.p.S.ID, Z: 1}
 	f.r.chestInv[i] = map[string]int{"wood": 5}
 	f.reset()
 	f.r.handleChestOpen(f.p, map[string]any{"t": "chest_open", "i": float64(i)})
 	if m := f.lastOfType("chest"); m != nil {
-		t.Fatal("a chest on the shelter layer was opened from the surface")
+		t.Fatal("a chest in the mines was opened from the surface")
 	}
 	f.r.handleChestMove(f.p, map[string]any{"t": "chest_move", "i": float64(i), "res": "wood", "n": float64(-5)})
 	if f.p.Inv["wood"] != 0 {
@@ -426,5 +427,38 @@ func TestDefsAreLoadedFromSharedJSON(t *testing.T) {
 	}
 	if len(d.EmptyInv()) != len(d.InvKeys) {
 		t.Error("EmptyInv did not produce one slot per INV_KEYS entry")
+	}
+}
+
+// memStore serves one fixed snapshot to loadSave.
+type memStore struct{ snap *persist.Snapshot }
+
+func (m memStore) Load() (*persist.Snapshot, error) { return m.snap, nil }
+func (memStore) Save(*persist.Snapshot) error       { return nil }
+
+// Saves from before the shelter was retired: its furniture (z=2) is dropped on
+// load, mine furniture (z=1) stays, and a saved shelter structure is skipped.
+func TestRetiredShelterLeavesOldSaves(t *testing.T) {
+	f := newFixture(t)
+	snap := &persist.Snapshot{
+		Version: world.WorldVersion, Seed: "hearth-1", Day: 1,
+		Structures: map[string]*persist.Struct{"100": {Kind: "shelter", HP: 40}},
+		Furn: map[string]*persist.Furn{
+			"200": {Kind: "chest", Z: 2},
+			"201": {Kind: "bed", Z: 1},
+		},
+	}
+	f.r.cfg.Store = memStore{snap}
+	if err := f.r.loadSave(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := f.r.structures[100]; ok {
+		t.Fatal("a saved shelter was restored")
+	}
+	if _, ok := f.r.furn[200]; ok {
+		t.Fatal("shelter-interior furniture was restored")
+	}
+	if fu, ok := f.r.furn[201]; !ok || fu.Kind != "bed" {
+		t.Fatal("mine furniture was lost on load")
 	}
 }

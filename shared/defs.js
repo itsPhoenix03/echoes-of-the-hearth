@@ -201,14 +201,6 @@ const D = {
       "station": "workbench",
       "place": true
     },
-    "shelter": {
-      "cost": {
-        "wood": 20,
-        "stone": 10
-      },
-      "station": "workbench",
-      "place": true
-    },
     "isword": {
       "cost": {
         "iron": 6,
@@ -421,7 +413,6 @@ const D = {
     "iron": "Iron",
     "diamond": "Diamond",
     "mineshaft": "Mine Entrance",
-    "shelter": "Shelter",
     "isword": "Iron Sword",
     "starmetal": "Starmetal",
     "boat": "Boat",
@@ -480,7 +471,6 @@ const D = {
     "forge": 30,
     "engine": 120,
     "mineshaft": 25,
-    "shelter": 40,
     "banner": 5,
     "stone_path": 5,
     "lantern": 5,
@@ -510,8 +500,7 @@ const D = {
     "workbench",
     "forge",
     "engine",
-    "mineshaft",
-    "shelter"
+    "mineshaft"
   ],
   "DECOR_NONBLOCKING": [
     "banner",
@@ -560,7 +549,6 @@ const D = {
     "engine",
     "core",
     "mineshaft",
-    "shelter",
     "boat",
     "sboat",
     "torch",

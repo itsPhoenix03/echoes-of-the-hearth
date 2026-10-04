@@ -200,7 +200,7 @@ server-authoritative movement work:
 
 - speed budget: `dt` (clamped to 1s) × `6.2` × `1.6` + `1.0` tiles
 - collision mirroring the client's rules, z-aware; water passable at `z=0`
-- layer changes gated by `zAnchor` — one mineshaft/shelter within 3.0 tiles of **both**
+- layer changes gated by `zAnchor` — one mineshaft within 3.0 tiles of **both**
   endpoints — plus a 500 ms cooldown
 - rejection → `{ t:'fix', x, y, z, b }`, throttled to one per 250 ms per player
 - every server-side reposition opens a 1 s grace window suppressing the distance check
@@ -246,7 +246,7 @@ the `init`/chunk work of Slice 1.
 | `build` | `i, kind, dir?` | range 6 |
 | `dig` | `i, seq?, dx?, dy?` | `z=1` only, range 2, needs pick/spick |
 | `plant` / `harvest` | `i, crop?` | range 2.5, on a `farmplot` |
-| `furn` | `i, kind` | `z=1` (carved tile) or `z=2` (shelter room) |
+| `furn` | `i, kind` | `z=1` (carved tile) — furniture lives in the mines only |
 | `torch` | — | `z=1`, on the player's own carved tile |
 | `eq` / `wear` | `k` (or `null`) | must own the tool / gear |
 | `use` | `k` | `medicine` throttled to one per 750 ms |
@@ -286,7 +286,7 @@ omitted array means empty.
   "removed": [localIdx, ...],                  // nodes harvested, awaiting respawn
   "brokenBergs": [localIdx, ...],              // icebergs smashed by a reinforced hull
   "structs": [[localIdx, kind, hp, dir, lvl], ...],
-  "furn":    [[localIdx, kind, z], ...],       // chests, beds, mine/shelter decor
+  "furn":    [[localIdx, kind, z], ...],       // chests, beds, mine decor
   "farms":   [[localIdx, crop, stage], ...],   // stage 0..2
   "mods":    [[localIdx, slot, kind, hp, dir], ...]  // modular building (§12)
 }
@@ -381,7 +381,7 @@ biome is who it hurts:
 - `snowstorm` (Spire) — 1 hp per 5 s on `SNOW` unless a **campfire** is within 6 tiles. A fur
   cloak does not help; that is what separates a blizzard from ordinary cold.
 
-Being underground or indoors (`z != 0`) shelters from all of it. "Blizzard" is the client's
+Being underground (`z != 0`) shelters from all of it. "Blizzard" is the client's
 name for `snowstorm`, and ambient snowfall is a permanent client-side particle layer in the
 Spire biome — neither is a distinct server state.
 
@@ -494,7 +494,7 @@ when a later one also applies:
 | `reason` | Cause |
 | --- | --- |
 | `unknown-medic` | `medicId` is not one of the world's medics |
-| `wrong-level` | the player is underground or inside a shelter (`z != 0`) |
+| `wrong-level` | the player is underground (`z != 0`) |
 | `too-far` | further than 2.5 tiles |
 | `in-combat` | took combat damage in the last 5 s |
 | `offer-mismatch` | `accept` with no offer, the wrong `offerId`, or the other medic's offer |
@@ -909,8 +909,13 @@ retired pieces (the `roof` slot and its three roofs, `mod_window`, `mod_arch`,
 Modules shape space: a ring of walls keeps creatures out (their steering tests
 the same tiles), a door lets you in and out, pillars and decor dress a floor, and
 bridges cross water. Roofs, and the shelter they gave, were retired with the
-roof slot — weather is escaped underground, in the z=2 shelter, or with the
-right cloak.
+roof slot — weather is escaped underground or with the right cloak.
+
+Keepers have no houses either: the `shelter` structure and its z=2 interior
+were retired. The layers are now the surface (z=0) and the mines (z=1) — the
+mines are the safe place (no weather, no creatures) and the only place furniture
+can stand. Old saves drop shelter structures and z=2 furniture on load, and a
+`pos` asking for z=2 is snapped back.
 
 ### 12.8 Starmetal Armor — `wear` with `starmetal_armor`
 

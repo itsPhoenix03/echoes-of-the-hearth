@@ -813,7 +813,8 @@ func (r *Room) loadSave() error {
 	}
 	for k, f := range snap.Furn {
 		i, err := strconv.Atoi(k)
-		if err != nil || !inWorld(i) || f == nil {
+		// z=2 was the retired shelter interior: its furniture has nowhere to stand
+		if err != nil || !inWorld(i) || f == nil || f.Z != 1 {
 			continue
 		}
 		r.furn[i] = &Furniture{Kind: f.Kind, Owner: f.Owner, Z: f.Z}
