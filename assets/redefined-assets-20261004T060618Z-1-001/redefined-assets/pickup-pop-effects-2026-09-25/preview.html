@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Pickup pop effects</title>
+<style>
+  body{margin:0;background:#182126;color:#e9e5d7;font:15px system-ui,sans-serif}
+  main{max-width:1000px;margin:24px auto;padding:0 18px}
+  h1{font-size:26px;margin-bottom:6px}
+  p{color:#b7c0ba}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:12px}
+  .card{background:#26332f;border:1px solid #44544b;border-radius:10px;padding:10px;text-align:center}
+  .stage{height:112px;display:grid;place-items:center;background:linear-gradient(#304b42 0 74%,#574b38 74%);border-radius:6px;margin:8px 0}
+  .stage img{width:80px;height:100px;image-rendering:auto}
+  .icon{width:30px;height:30px;vertical-align:middle;margin-right:6px}
+  .name{font-weight:650}
+</style>
+</head>
+<body><main><h1>Raw-item pickup pop</h1><p>Five aligned SVG frames per drop. Playback here is a mock-up; integration into the game comes later.</p><div class="grid" id="grid"></div></main>
+<script>
+const names=['wood','stone','meat','fiber','crystal','starmetal','iron','essence','diamond'];
+const durations=[45,65,75,70,95];
+const grid=document.getElementById('grid');
+for(const name of names){
+  const card=document.createElement('div');card.className='card';
+  card.innerHTML='<span class="name"><img class="icon" src="sprites/'+name+'.svg">'+name+'</span><div class="stage"><img alt="'+name+' pickup"></div>';
+  grid.appendChild(card);
+  const img=card.querySelector('.stage img');
+  let phase=0;
+  function tick(){
+    img.src='frames/'+name+'_pop_'+String(phase+1).padStart(2,'0')+'.svg';
+    const delay=durations[phase];
+    phase=(phase+1)%5;
+    setTimeout(tick,phase===0?delay+500:delay);
+  }
+  setTimeout(tick,names.indexOf(name)*80);
+}
+</script></body></html>
