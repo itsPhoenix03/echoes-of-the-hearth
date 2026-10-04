@@ -89,7 +89,8 @@ func (r *Room) handleGather(p *Player, m map[string]any) {
 		}
 		actA = "mine"
 	default:
-		actTool, actA = nil, "punch"
+		// bushes and loose stones are picked up by hand, not struck
+		actTool, actA = nil, "collect"
 	}
 	r.broadcast(map[string]any{
 		"t": "act", "id": p.S.ID, "seq": seq, "a": actA, "tool": actTool,
@@ -525,7 +526,7 @@ func (r *Room) handleTorch(p *Player) {
 	}
 	p.Inv["torch"]--
 	r.torches[i] = true
-	r.broadcast(map[string]any{"t": "torch", "i": i})
+	r.broadcast(map[string]any{"t": "torch", "i": i, "by": p.S.ID})
 	r.sendInv(p)
 }
 
@@ -554,6 +555,7 @@ func (r *Room) handleWear(p *Player, m map[string]any) {
 		// `k: null` runs the toggle with k === null: worn becomes null either way
 		p.Worn = ""
 		r.sendInv(p)
+		r.broadcastWorn(p)
 		r.send(p, map[string]any{"t": "msg", "s": "You remove your cloak."})
 		return
 	}
@@ -567,11 +569,18 @@ func (r *Room) handleWear(p *Player, m map[string]any) {
 		p.Worn = k
 	}
 	r.sendInv(p)
+	r.broadcastWorn(p)
 	if p.Worn != "" {
 		r.send(p, map[string]any{"t": "msg", "s": "You wrap yourself in the " + r.defs.Names[p.Worn] + "."})
 	} else {
 		r.send(p, map[string]any{"t": "msg", "s": "You remove your cloak."})
 	}
+}
+
+// broadcastWorn tells every client which cloak (if any) a player now wears, so
+// their rig can drape it — the inventory frame above only reaches the wearer.
+func (r *Room) broadcastWorn(p *Player) {
+	r.broadcast(map[string]any{"t": "worn", "id": p.S.ID, "k": nullable(p.Worn)})
 }
 
 // --- water and use --------------------------------------------------------

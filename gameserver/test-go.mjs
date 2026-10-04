@@ -899,7 +899,7 @@ A.msgs = A.msgs.filter((m) => m.t !== 'act');
 A.send({ t: 'gather', seq: 9002, i: g2i, dx: 1, dy: 0, a: 'slash', tool: 'sword' });   // lie about the action
 const g2act = await A.wait('act');
 if (g2act.seq !== 9002) fail('G2: act seq mismatch: ' + g2act.seq);
-if (g2act.a !== 'punch' || g2act.tool !== null) fail(`G2: server trusted the client's claim: a=${g2act.a} tool=${g2act.tool}`);
+if (g2act.a !== 'collect' || g2act.tool !== null) fail(`G2: server trusted the client's claim: a=${g2act.a} tool=${g2act.tool}`);
 console.log('G2 seq echo + server-derived action OK:', g2act.a, g2act.tool);
 
 // G3: dig derives pick vs spick from the tool actually validated, not from any client claim

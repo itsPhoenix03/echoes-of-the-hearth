@@ -559,7 +559,7 @@ func (r *Room) onJoin(s *Session) {
 			continue
 		}
 		others = append(others, map[string]any{
-			"id": id, "x": q.X, "y": q.Y, "z": q.Z, "name": q.Name, "b": q.B, "eq": q.Equip,
+			"id": id, "x": q.X, "y": q.Y, "z": q.Z, "name": q.Name, "b": q.B, "eq": q.Equip, "worn": nullable(q.Worn),
 		})
 	}
 	r.send(p, map[string]any{
@@ -592,7 +592,7 @@ func (r *Room) onJoin(s *Session) {
 		"dev": r.devAllowed(p),
 	})
 	r.pushChunks(p)
-	r.broadcast(map[string]any{"t": "pj", "id": s.ID, "x": p.X, "y": p.Y, "name": p.Name})
+	r.broadcast(map[string]any{"t": "pj", "id": s.ID, "x": p.X, "y": p.Y, "name": p.Name, "worn": nullable(p.Worn)})
 	r.cfg.Logger.Printf("[hearth] %s (%s) joined (%d online)", s.ID, p.Name, len(r.players))
 }
 

@@ -128,7 +128,7 @@ func TestGatherDerivesActionFromWorldStateNotTheClient(t *testing.T) {
 		{"pick on a boulder mines", boulder, []string{"pick"}, "mine", "pick"},
 		{"spick outranks pick on a boulder", boulder, []string{"pick", "spick"}, "mine", "spick"},
 		{"spick alone still mines a boulder", boulder, []string{"spick"}, "mine", "spick"},
-		{"a bush is always hand-gathered", bush, []string{"axe", "spick", "sword"}, "punch", nil},
+		{"a bush is always hand-gathered", bush, []string{"axe", "spick", "sword"}, "collect", nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
