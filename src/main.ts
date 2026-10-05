@@ -397,6 +397,9 @@ class Hearth extends Phaser.Scene {
 
   create() {
     activeScene = this;
+    // dev server only (stripped from production builds): lets tools/media/capture.mjs
+    // drive a scripted session for the README clips
+    if ((import.meta as any).env?.DEV) (window as any).__hearth = this;
     this.quitting = false;
     this.makeWeatherFx();
     this.makeGlowTextures();
