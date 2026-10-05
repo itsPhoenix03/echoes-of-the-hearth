@@ -167,6 +167,18 @@ type Room struct {
 	// memoised for the duration of one tick, keyed by tickN.
 	structIdx     []int
 	structIdxTick int64
+	// campfire tiles, memoised per tick the same way (creature fire fear)
+	fireIdx     []int
+	fireIdxTick int64
+	// bridged water tiles, memoised per tick and dropped whenever a module is
+	// added or removed (creatures cross water only on these)
+	bridges     map[int]bool
+	bridgeTick  int64
+	bridgeValid bool
+
+	// Island camps and their folk (folk.go). folk is ordered by camp roster.
+	camps []world.FolkCamp
+	folk  []*Folk
 
 	// Animals. aniOrder is the same insertion-order mirror as creOrder.
 	animals  map[string]*Animal
@@ -299,6 +311,8 @@ func New(cfg Config) (*Room, error) {
 	if err := r.loadSave(); err != nil {
 		cfg.Logger.Printf("[hearth] failed to load save: %v", err)
 	}
+	r.setupCamps()
+	r.clearBuiltOverNodes()
 	return r, nil
 }
 
@@ -583,6 +597,10 @@ func (r *Room) onJoin(s *Session) {
 		// into its own medicBlockTiles() helper — the hut tiles it must block
 		// are derivable from hutX/hutY and need no second representation.
 		"medics": r.medicsWire(),
+		// The island camps (folk.go): hut + fire tiles, which the client
+		// blocks exactly like the medic huts. The folk themselves move and
+		// ride the per-tick `cre` frame as `f`.
+		"camps": r.campsWire(),
 		// Whether this session may use `dev` / `devcmd` (dev.go). The client
 		// used to open its F10 tester panel unconditionally and discover the
 		// answer only from the refusal toast a button produced; with this it

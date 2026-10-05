@@ -1,4 +1,5 @@
-// Medic huts: round, primitive healer's huts instead of plank cabins.
+// Medic huts: round, primitive healer's huts instead of plank cabins — and the
+// island camps' huts (gameserver/world/folk.go), drawn from the same frame.
 //
 //   node tools/art/medic-huts.mjs
 //
@@ -7,6 +8,10 @@
 //   medic_hut.svg       woven wattle walls, conical thatch, herbs drying under the eaves
 //   medic_hut_snow.svg  hide-wrapped walls, snow-capped thatch, icicles and drifts
 // Both keep the healer's sign — the green cross — on a hide hung from a post.
+// Camp huts drop the sign and carry their camp's trade instead:
+//   folk_hut.svg        Woods — thatch and wattle, a split-log woodpile
+//   folk_hut_dunes.svg  Dunes — sun-bleached hide wrap, dye bands, a hide rack
+//   folk_hut_marsh.svg  Marsh — reed walls, dark reed roof, a bone totem
 
 import { writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
@@ -23,7 +28,7 @@ const ROOF_RX = 34, ROOF_RY = 11.5, APEX = [48, 11];
 /** Point on an ellipse (angle 0 = right, 90 = front/bottom). */
 const at = (rx, ry, cy, deg) => [CX + rx * Math.cos((deg * Math.PI) / 180), cy + ry * Math.sin((deg * Math.PI) / 180)];
 
-function hut({ wall, wallDark, weave, roof, roofDark, roofLine, snow }) {
+function hut({ wall, wallDark, weave, roof, roofDark, roofLine, snow, sign = true, decor = '', bands = '' }) {
   const out = [];
   out.push(`<ellipse cx="49" cy="80" rx="38" ry="6" fill="#1b2623" opacity=".25"/>`);
   // wall: front half of the cylinder
@@ -39,6 +44,10 @@ function hut({ wall, wallDark, weave, roof, roofDark, roofLine, snow }) {
   out.push(`<path d="${stakes}" stroke="${weave}" stroke-width=".8" opacity=".75"/>`);
   for (const h of [5, 10, 15]) {
     out.push(`<path d="M${CX - WRX} ${GY - h}A${WRX} ${WRY} 0 0 0 ${CX + WRX} ${GY - h}" fill="none" stroke="${weave}" stroke-width="1.1" opacity=".6"/>`);
+  }
+  // dye bands round the drum (the Dunes hide wrap)
+  if (bands) for (const h of [7.5, 12.5]) {
+    out.push(`<path d="M${CX - WRX} ${GY - h}A${WRX} ${WRY} 0 0 0 ${CX + WRX} ${GY - h}" fill="none" stroke="${bands}" stroke-width="1.8" opacity=".8"/>`);
   }
   // ring of stones at the base
   for (let d = 10; d <= 170; d += 16) {
@@ -85,7 +94,7 @@ function hut({ wall, wallDark, weave, roof, roofDark, roofLine, snow }) {
     out.push(`<path d="${ice}" fill="#dff1fa" stroke="#9fc1d3" stroke-width=".35"/>`);
     out.push(`<path d="M16 ${GY + 4}Q24 ${GY - 2} 32 ${GY + 3}Q28 ${GY + 8} 18 ${GY + 7}Z" fill="#eef6fa" stroke="#bcd2de" stroke-width=".5"/>`);
     out.push(`<path d="M64 ${GY + 4}Q72 ${GY - 3} 82 ${GY + 2}Q78 ${GY + 8} 66 ${GY + 8}Z" fill="#eef6fa" stroke="#bcd2de" stroke-width=".5"/>`);
-  } else {
+  } else if (sign) {
     // herbs drying under the eave
     for (const [x, y] of [[61, 57.5], [67.5, 55.6], [30.5, 56.8]]) {
       out.push(`<path d="M${x} ${y - 3}V${y}" stroke="#5e4128" stroke-width=".5"/>` +
@@ -93,11 +102,12 @@ function hut({ wall, wallDark, weave, roof, roofDark, roofLine, snow }) {
     }
   }
 
+  if (decor) out.push(decor);
   // healer's sign: a hide stretched on a frame, green cross, on a leaning post
-  out.push(`<path d="M22 ${GY + 6}L24.5 46" stroke="#5e4128" stroke-width="1.8" stroke-linecap="round"/>`);
-  out.push(`<path d="M15.5 48.5Q21 46.6 27 48.5L26 60Q20.8 61.6 16 60Z" fill="#dcc79f" stroke="#6b4c30" stroke-width=".7"/>`);
-  out.push(`<path d="M19.6 51.5H22.6V54.1H25.2V57.1H22.6V59.6H19.6V57.1H17V54.1H19.6Z" fill="#3f8a6e" stroke="#25503f" stroke-width=".4"/>`);
-  out.push(`<path d="M15.5 48.5 14.6 46.6M27 48.5 28 46.6" stroke="#6b4c30" stroke-width=".6"/>`);
+  if (sign) out.push(`<path d="M22 ${GY + 6}L24.5 46" stroke="#5e4128" stroke-width="1.8" stroke-linecap="round"/>`);
+  if (sign) out.push(`<path d="M15.5 48.5Q21 46.6 27 48.5L26 60Q20.8 61.6 16 60Z" fill="#dcc79f" stroke="#6b4c30" stroke-width=".7"/>`);
+  if (sign) out.push(`<path d="M19.6 51.5H22.6V54.1H25.2V57.1H22.6V59.6H19.6V57.1H17V54.1H19.6Z" fill="#3f8a6e" stroke="#25503f" stroke-width=".4"/>`);
+  if (sign) out.push(`<path d="M15.5 48.5 14.6 46.6M27 48.5 28 46.6" stroke="#6b4c30" stroke-width=".6"/>`);
   return `<svg xmlns="http://www.w3.org/2000/svg" width="96" height="88" viewBox="0 0 96 88">\n${out.join('\n')}\n</svg>\n`;
 }
 
@@ -109,4 +119,53 @@ writeFileSync(`${SPR}/medic_hut_snow.svg`, hut({
   wall: '#8d7458', wallDark: '#4b3b2c', weave: '#5c4836',
   roof: '#b89b62', roofDark: '#6e5a36', roofLine: '#806a40', snow: true,
 }));
-console.log('medic huts written');
+
+// --- camp huts -------------------------------------------------------------
+
+// split logs stacked against the drum, end grain showing
+const woodpile = [
+  `<path d="M8 80L30 77.5 31 71 9 73.5Z" fill="#6e4d2d" stroke="#3d2c1f" stroke-width=".5"/>`,
+  ...[[11, 76.4], [16.5, 75.8], [22, 75.2], [27, 74.6], [13.8, 71.6], [19.3, 71], [24.6, 70.4]].map(([x, y]) =>
+    `<ellipse cx="${x}" cy="${y}" rx="2.7" ry="2.5" fill="#c9a36b" stroke="#5c4128" stroke-width=".5"/>` +
+    `<circle cx="${x}" cy="${y}" r=".9" fill="none" stroke="#9c7a48" stroke-width=".35"/>`),
+  // the axe left in the chopping block
+  `<path d="M76 81.5Q80 83 84 81.5V77Q80 75.6 76 77Z" fill="#7d5a36" stroke="#3d2c1f" stroke-width=".5"/>`,
+  `<path d="M80 77L84 66" stroke="#6b4c30" stroke-width="1.2" stroke-linecap="round"/>`,
+  `<path d="M82.2 69.5 86.6 70.2 85.6 66.4Z" fill="#8f9aa0" stroke="#3d4448" stroke-width=".4"/>`,
+].join('');
+
+// a frame of poles with a hide stretched on it, and a water jar
+const hideRack = [
+  `<path d="M9 82 12 56M27 80 24.5 55M10.5 60H26" stroke="#6b4c30" stroke-width="1.4" stroke-linecap="round"/>`,
+  `<path d="M12.6 61Q18.2 59.4 23.6 61L22.8 74Q18 76 13.2 74Z" fill="#d9b98a" stroke="#7a5634" stroke-width=".6"/>`,
+  `<path d="M14 64Q18 66 22.4 64M14.4 68.5Q18 70.4 22 68.5" fill="none" stroke="#a8572f" stroke-width=".9"/>`,
+  `<path d="M74 82Q72 76 75.6 72.6H80.4Q84 76 82 82Q78 84 74 82Z" fill="#b5713f" stroke="#5e3a20" stroke-width=".6"/>`,
+  `<path d="M75.4 74.6H80.6" stroke="#e0b07a" stroke-width=".7"/>`,
+].join('');
+
+// a bone totem and a string of drying fish
+const totem = [
+  `<path d="M14 84V50" stroke="#5a4a36" stroke-width="2.2" stroke-linecap="round"/>`,
+  `<path d="M9.2 52.6Q14 49 18.8 52.6L17.6 58Q14 60 10.4 58Z" fill="#e6dcc4" stroke="#6d6250" stroke-width=".6"/>`,
+  `<circle cx="12.3" cy="54.6" r="1" fill="#2c2620"/><circle cx="15.7" cy="54.6" r="1" fill="#2c2620"/>`,
+  `<path d="M12.4 57.4H15.6" stroke="#2c2620" stroke-width=".6"/>`,
+  `<path d="M9 63Q14 61 19 63M10 67Q14 65.5 18 67" fill="none" stroke="#e6dcc4" stroke-width="1.4" stroke-linecap="round"/>`,
+  `<path d="M66 57.5Q73 60.5 80 57" fill="none" stroke="#4d3a20" stroke-width=".5"/>`,
+  ...[[68.4, 58.6], [72.6, 59.4], [76.8, 58.6]].map(([x, y]) =>
+    `<path d="M${x} ${y}Q${x + 1.6} ${y + 3} ${x} ${y + 6.2}Q${x - 1.6} ${y + 3} ${x} ${y}Z" fill="#8c9a8a" stroke="#4b5649" stroke-width=".4"/>` +
+    `<path d="M${x - 1.2} ${y + 7.4}L${x} ${y + 6}L${x + 1.2} ${y + 7.4}" fill="#6d7a6b"/>`),
+].join('');
+
+writeFileSync(`${SPR}/folk_hut.svg`, hut({
+  wall: '#a8814f', wallDark: '#5c4128', weave: '#6e4d2d',
+  roof: '#c2a05c', roofDark: '#7a5e2e', roofLine: '#8a6c36', sign: false, decor: woodpile,
+}));
+writeFileSync(`${SPR}/folk_hut_dunes.svg`, hut({
+  wall: '#cfae7c', wallDark: '#7a5a38', weave: '#a07e52', bands: '#a8572f',
+  roof: '#d8bf86', roofDark: '#8e7444', roofLine: '#a88c58', sign: false, decor: hideRack,
+}));
+writeFileSync(`${SPR}/folk_hut_marsh.svg`, hut({
+  wall: '#7c7a4e', wallDark: '#3f3f28', weave: '#56553a',
+  roof: '#6f6a3e', roofDark: '#3d3a22', roofLine: '#4f4b2c', sign: false, decor: totem,
+}));
+console.log('medic + camp huts written');

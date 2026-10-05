@@ -40,6 +40,11 @@ type Player struct {
 
 	LastLandX, LastLandY float64
 
+	// AI sampling: where the player stood last sim tick and the per-tick
+	// velocity that implies, so hunters can lead a moving target (creature_ai.go).
+	PrevX, PrevY, VX, VY float64
+	velSeeded            bool
+
 	// Movement validation clocks, all in ms since the Unix epoch, mirroring the
 	// legacy server's Date.now() fields one for one.
 	LastPosAt    int64

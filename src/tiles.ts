@@ -72,6 +72,15 @@ export interface ChunkMsg {
   structs?: any[][];
   /** [localIdx, slot, kind, hp, dir] — modular building; several entries per tile. */
   mods?: any[][];
+  // §8.3 overlays: the live state layered on the generated chunk
+  removed?: number[];
+  mud?: number[];
+  torches?: number[];
+  brokenBergs?: number[];
+  /** [localIdx, kind, z] */
+  furn?: any[][];
+  /** [localIdx, crop, stage] */
+  farms?: any[][];
 }
 
 /** Everything a freshly applied chunk introduced, in WORLD tile indices. */
@@ -84,6 +93,13 @@ export interface ChunkDelta {
   digs: number[];
   structs: { i: number; kind: string; hp: number; dir: number; lvl: number }[];
   mods: { i: number; slot: string; kind: string; hp: number; dir: number }[];
+  /** nodes in this chunk currently harvested (awaiting respawn) */
+  removed: number[];
+  mud: number[];
+  torches: number[];
+  brokenBergs: number[];
+  furn: { i: number; kind: string; z: number }[];
+  farms: { i: number; crop: string; stage: number }[];
 }
 
 export class TileStore {
@@ -214,6 +230,12 @@ export class TileStore {
       digs: [],
       structs: [],
       mods: [],
+      removed: [],
+      mud: [],
+      torches: [],
+      brokenBergs: [],
+      furn: [],
+      farms: [],
     };
     for (const e of m.nodes || []) {
       if (!Array.isArray(e) || !inRange(e[0])) continue;
@@ -262,6 +284,22 @@ export class TileStore {
         hp: hp | 0,
         dir: dir | 0,
       });
+    }
+
+    for (const [list, out] of [
+      [m.removed, delta.removed],
+      [m.mud, delta.mud],
+      [m.torches, delta.torches],
+      [m.brokenBergs, delta.brokenBergs],
+    ] as [number[] | undefined, number[]][])
+      for (const local of list || []) if (inRange(local)) out.push(world(local));
+    for (const e of m.furn || []) {
+      if (!Array.isArray(e) || !inRange(e[0])) continue;
+      delta.furn.push({ i: world(e[0]), kind: String(e[1]), z: (e[2] ?? 1) | 0 });
+    }
+    for (const e of m.farms || []) {
+      if (!Array.isArray(e) || !inRange(e[0])) continue;
+      delta.farms.push({ i: world(e[0]), crop: String(e[1]), stage: Math.max(0, Math.min(2, e[2] | 0)) });
     }
 
     this.loaded.add(key);

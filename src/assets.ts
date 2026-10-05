@@ -71,14 +71,14 @@ _manifest.push(
 // --- new sprites (Task 1b) ---
 _manifest.push(
   // individual sprites
-  ['ashmark_hunter',   '/sprites/ashmark_hunter.svg',   36, 54],
+  ['ashmark_hunter',   '/sprites/ashmark_hunter.svg',   32, 48],
   ['autumn_tree',      '/sprites/autumn_tree.svg',       58, 68],
   ['blight_armor',     '/sprites/blight_armor.svg',      42, 50],
   ['blight_spore',     '/sprites/blight_spore.svg',      46, 46],
   ['bone_totem',       '/sprites/bone_totem.svg',        42, 58],
   ['cactus_bloom',     '/sprites/cactus_bloom.svg',      44, 58],
   ['desert_palm',      '/sprites/desert_palm.svg',       56, 72],
-  ['elder_yvenne',     '/sprites/elder_yvenne.svg',      38, 56],
+  ['elder_yvenne',     '/sprites/elder_yvenne.svg',      32, 48],
   ['fur_cloak',        '/sprites/fur_cloak.svg',         38, 46],
   ['glow_mushroom',    '/sprites/glow_mushroom.svg',     44, 42],
   ['heat_cloak',       '/sprites/heat_cloak.svg',        38, 46],
@@ -145,6 +145,7 @@ _manifest.push(
   // --- decor & farming sprites ---
   ['farmplot',       '/sprites/farmplot.svg',                          64, 40],
   ['crop',           '/sprites/crop.svg',                              30, 34],
+  ['crop_sprout',    '/sprites/crop_sprout.svg',                       30, 34],
   ['mod_banner_blank','/sprites/building_materials/mod_banner_blank.svg', 34, 54],
   ['mod_floor_stone', '/sprites/building_materials/mod_floor_stone.svg',  64, 40],
   ['mod_railing',    '/sprites/building_materials/mod_railing.svg',    64, 38],
@@ -174,11 +175,14 @@ _manifest.push(
 );
 // --- Medicine + Medic feature ---
 _manifest.push(
-  ['medic',      '/sprites/medic.svg',      42, 58],
-  ['medic_snow', '/sprites/medic_snow.svg', 42, 58],
+  ['medic',      '/sprites/medic.svg',      32, 48],
+  ['medic_snow', '/sprites/medic_snow.svg', 32, 48],
   ['medicine',   '/sprites/medicine.svg',   28, 28],
   ['medic_hut',      '/sprites/medic_hut.svg',      96, 88],
   ['medic_hut_snow', '/sprites/medic_hut_snow.svg', 96, 88],
+  ['folk_hut',       '/sprites/folk_hut.svg',       96, 88],
+  ['folk_hut_dunes', '/sprites/folk_hut_dunes.svg', 96, 88],
+  ['folk_hut_marsh', '/sprites/folk_hut_marsh.svg', 96, 88],
 );
 
 const _BM: [string, number, number][] = [
@@ -222,7 +226,7 @@ const _HUMAN_WIDE = new Set([
   'keeper_slash', 'keeper_islash', 'keeper_punch', 'keeper_chop', 'keeper_mine', 'keeper_spick', 'keeper_row',
 ]);
 const _HUMAN_SIZE: Record<string, [number, number]> = {
-  keeper: [32, 48], villager: [32, 48], villager2: [32, 48], medic: [42, 58], medic_snow: [42, 58],
+  keeper: [32, 48], villager: [32, 48], villager2: [32, 48], medic: [32, 48], medic_snow: [32, 48],   // adults share the keeper's scale
 };
 export const humanFrame = (char: string, action: string, i: number) =>
   `${char}_${action}_${String(i).padStart(2, '0')}`;
@@ -239,5 +243,28 @@ for (const r of POP_RES)
     const k = `${r}_pop_0${i}`;
     _manifest.push([k, `/sprites/pickup/${k}.svg`, 32, 40]);
   }
+
+// --- enemies: the pack's own art for the three variants, and every enemy's
+// three-frame motion set (sprites/enemy_motion), played by src/creatureGait.ts ---
+_manifest.push(
+  ['husk_wolf',    '/sprites/husk_wolf.svg',    58, 42],
+  ['bog_shambler', '/sprites/bog_shambler.svg', 40, 36],
+  ['frost_wraith', '/sprites/frost_wraith.svg', 32, 40],
+);
+/** base texture -> [motion file stem, w, h]; frames share the base art's canvas */
+export const ENEMY_MOTION: Record<string, [string, number, number]> = {
+  creature:      ['blight-creature_crawl', 40, 36],
+  stalker:       ['stalker_prowl',         44, 30],
+  brute:         ['brute_lunge',           56, 54],
+  drowned:       ['drowned_swim',          42, 38],
+  blight_lancer: ['blight_lancer_charge',  52, 72],
+  wisp:          ['wisp_pulse',            32, 40],
+  husk_wolf:     ['husk_wolf_prowl',       58, 42],
+  bog_shambler:  ['bog_shambler_crawl',    40, 36],
+  frost_wraith:  ['frost_wraith_pulse',    32, 40],
+};
+export const enemyFrame = (tex: string, i: number) => `${tex}_m${i}`;
+for (const [tex, [stem, w, h]] of Object.entries(ENEMY_MOTION))
+  for (let i = 1; i <= 3; i++) _manifest.push([enemyFrame(tex, i), `/sprites/enemy_motion/${stem}_0${i}.svg`, w, h]);
 
 export const ASSET_MANIFEST: [string, string, number, number][] = _manifest;

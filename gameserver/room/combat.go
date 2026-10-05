@@ -35,7 +35,7 @@ func (r *Room) hitAnimal(p *Player, a *Animal, dmg int, seq any) {
 		kny := a.Y + math.Sin(atkAng)*0.9
 		kni := ti(knx, kny)
 		_, occupied := r.structures[kni]
-		if inBounds(kni) && r.world.Tiles[kni] != world.TWater && !occupied {
+		if inBounds(kni) && r.creFooting(kni) && !occupied {
 			a.X, a.Y = knx, kny
 		}
 		r.broadcast(map[string]any{"t": "chit", "id": a.ID, "ang": atkAng, "by": p.S.ID, "seq": seq})
@@ -110,6 +110,7 @@ func (r *Room) creatureDied(p *Player, c *Creature, now int64) {
 		r.send(p, map[string]any{"t": "msg", "s": fmt.Sprintf("+%d Blight Essence", drop)})
 	}
 	r.packEnrage(c)
+	r.alertPack(c, p)
 	r.sendInv(p)
 }
 
@@ -125,7 +126,7 @@ func (r *Room) creatureSurvived(p *Player, c *Creature, atkAng float64, seq any,
 	kny := c.Y + math.Sin(atkAng)*kb
 	kni := ti(knx, kny)
 	_, occupied := r.structures[kni]
-	if inBounds(kni) && r.world.Tiles[kni] != world.TWater && !occupied {
+	if inBounds(kni) && r.creFooting(kni) && !occupied {
 		c.X, c.Y = knx, kny
 	}
 	c.Stun = 3
@@ -142,6 +143,7 @@ func (r *Room) creatureSurvived(p *Player, c *Creature, atkAng float64, seq any,
 		}
 	}
 	r.packEnrage(c)
+	r.alertPack(c, p)
 	r.broadcast(map[string]any{"t": "chit", "id": c.ID, "ang": atkAng, "by": p.S.ID, "seq": seq})
 }
 

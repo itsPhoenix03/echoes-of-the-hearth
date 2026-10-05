@@ -97,6 +97,12 @@ const STATUS_CLIP: Record<string, string> = { cold: 'shiver', hot: 'sweat', inju
 // the seated keeper drops so the frame's hip line (y 34) meets the boat floor.
 const BOAT_Y = 4, BOAT_SEAT = 16.5, BOAT_BOB = 3, ROW_SPF = .1;
 const FEET_OY = 45.5 / 48;              // drawn ground shadow centre in the 32×48 canvas
+// In water, everything below the waist shows through the surface at the same
+// strength the swim clip's baked mask uses (#6e6e6e ≈ .43). The swim frames
+// carry it themselves; any other clip played while swimming (an attack, a
+// gather) gets it here, by drawing the frame twice: top crisp, bottom faded.
+const WAIST_Y = 34;                      // waterline row in the 48px-tall frames
+const UNDERWATER_A = 0.43;
 // Jump shapes: frame start times (fraction of the clip), the airborne window and
 // peak height. Standing: a real crouch before, a tall hop. Running: the stride
 // carries straight into a lower, longer leap with no wind-up.
@@ -116,6 +122,9 @@ export class Rig extends Phaser.GameObjects.Container {
   bodyRoot: Phaser.GameObjects.Container;
   spr: Phaser.GameObjects.Image;
   shadow: Phaser.GameObjects.Ellipse;
+  private sprLow: Phaser.GameObjects.Image;      // the faded below-water half (wet only)
+  private waterline: Phaser.GameObjects.Graphics;
+  private wet = false;
 
   // ── public contract fields (main.ts reads/writes these) ──
   phase = 0; moving = false; acting = 0; holdKind: string | null = null; swim = false;
@@ -161,7 +170,17 @@ export class Rig extends Phaser.GameObjects.Container {
     this.shadow = scene.add.ellipse(0, -2.5, 20, 4, 0x16151a, 0.25).setVisible(false);
     this.spr = scene.add.image(0, 0, 'keeper').setOrigin(0.5, FEET_OY);
     this.tex = 'keeper';
-    this.bodyRoot = scene.add.container(0, 0, [this.spr]);
+    this.sprLow = scene.add.image(0, 0, 'keeper').setOrigin(0.5, FEET_OY).setAlpha(UNDERWATER_A).setVisible(false);
+    // the swim art's waterline (M5 34.2 Q… T27 34.2), in sprite-local space
+    const wl = scene.add.graphics().setVisible(false);
+    wl.lineStyle(0.7, 0xe3f6ff, 0.75).beginPath();
+    for (let i = 0; i <= 22; i++) {
+      const x = -11 + i, y = WAIST_Y + 0.2 - 45.5 - Math.sin((i / 11) * Math.PI) * 0.65;
+      if (i === 0) wl.moveTo(x, y); else wl.lineTo(x, y);
+    }
+    wl.strokePath();
+    this.waterline = wl;
+    this.bodyRoot = scene.add.container(0, 0, [this.spr, this.sprLow, wl]);
     this.add([this.shadow, this.bodyRoot]);
     scene.add.existing(this);
   }
@@ -269,7 +288,8 @@ export class Rig extends Phaser.GameObjects.Container {
 
   private setFlash(on: boolean) {
     this.flashOn = on;
-    if (on) this.spr.setTintFill(0xff6666); else this.spr.clearTint();
+    if (on) { this.spr.setTintFill(0xff6666); this.sprLow.setTintFill(0xff6666); }
+    else { this.spr.clearTint(); this.sprLow.clearTint(); }
   }
 
   /** Hard reset to rest — safe to call on z-change, teleport, respawn. */
@@ -382,8 +402,21 @@ export class Rig extends Phaser.GameObjects.Container {
     }
 
     // 3. apply exactly once.
+    // in water, any frame but the swim loop's own gets the underwater split
+    const wet = this.swim && !tex.startsWith('keeper_swim');
     tex = skinKey(tex, this.skin);
-    if (tex !== this.tex) { this.spr.setTexture(tex); this.tex = tex; }
+    if (tex !== this.tex || wet !== this.wet) {
+      if (tex !== this.tex) this.spr.setTexture(tex);
+      if (wet) {
+        const f = this.spr.frame, w = f.realWidth, h = f.realHeight, cut = Math.round((h * WAIST_Y) / 48);
+        this.spr.setCrop(0, 0, w, cut);
+        this.sprLow.setTexture(tex).setCrop(0, cut, w, h - cut);
+      } else if (this.wet) this.spr.setCrop();
+      this.sprLow.setVisible(wet);
+      this.waterline.setVisible(wet);
+      this.tex = tex;
+      this.wet = wet;
+    }
     const jumping = this.actOn && !!this.clip?.jump;
     if (this.shadow.visible !== jumping) this.shadow.setVisible(jumping);
     if (jumping) this.shadow.setScale(1 - lift / 40).setAlpha(1 - lift / 30);
@@ -398,5 +431,6 @@ export class Rig extends Phaser.GameObjects.Container {
     }
     this.bodyRoot.x = bx; this.bodyRoot.y = by; this.bodyRoot.rotation = brot;
     this.spr.scaleY = sy;
+    if (this.wet) this.sprLow.scaleY = sy;
   }
 }

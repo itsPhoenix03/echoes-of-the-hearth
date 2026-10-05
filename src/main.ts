@@ -26,6 +26,8 @@ import { Rig, type RigStatus } from "./rig.ts";
 import { shirtFor } from "./keeperSkins.ts";
 import { initUI, showMsg, reset as resetUI, UIState } from "./ui.ts";
 import { GameAudio } from "./audio.ts";
+import { FolkView, type FolkHost } from "./folk.ts";
+import { sampleCreature, tickCreatureGait } from "./creatureGait.ts";
 import { getSetting } from "./settings.ts";
 import { ASSET_MANIFEST, HUMAN_CLIPS, NODE_SPR, POP_FRAME_MS, POP_RES, STRUCT_SPR, humanFrame } from "./assets.ts";
 import { TileStore, UNLOADED, CHUNK, type ChunkMsg } from "./tiles.ts";
@@ -64,9 +66,9 @@ const CRE_TEX: Record<string, string> = {
   stalker: "stalker",
   brute: "brute",
   wisp: "wisp",
-  husk_wolf: "wolf",
-  bog_shambler: "creature",
-  frost_wraith: "wisp",
+  husk_wolf: "husk_wolf",
+  bog_shambler: "bog_shambler",
+  frost_wraith: "frost_wraith",
   drowned: "drowned",
   blight_lancer: "blight_lancer",
 };
@@ -103,6 +105,7 @@ const MODFAIL_MSG: Record<string, string> = {
   water: "You cannot build on water yet.",
   blocked: "Something already occupies that ground.",
   "tile-occupied": "A structure already stands on that tile.",
+  node: "Clear the tree or rock there first.",
   "slot-occupied": "That slot is already filled.",
   unsupported: "Nothing there to hold it up — build a floor or a wall first.",
   "no-anchor": "A bridge must reach back to land or to another segment.",
@@ -307,6 +310,9 @@ class Hearth extends Phaser.Scene {
   medicSpr = new Map<string, Phaser.GameObjects.Sprite>();
   medicHutSpr = new Map<string, Phaser.GameObjects.Image>();
   medicBlock = new Set<number>();
+  // island camps and their folk (server: gameserver/room/folk.go)
+  folk = new FolkView(this as unknown as FolkHost);
+  folkTalkAt = 0;
   medicToggleAt = 0;   // own cooldown — separate from zToggleAt (Guide: un-cooldowned E-toggles flip-flop)
   medicOffer: { medicId: string; offerId: string; resource: string; amount: number; expiresAt: number } | null = null;
   chestReqI = -1;   // chest we asked to open — broadcasts for other chests must not pop our panel
@@ -1053,31 +1059,55 @@ class Hearth extends Phaser.Scene {
   setTileMut(i: number, key: string | null) {
     if (key) this.mutTiles.set(i, key);
     else this.mutTiles.delete(i);
-    const x = i % SIZE,
-      y = (i / SIZE) | 0;
-    const list = [
-      [x, y],
-      [x + 1, y],
-      [x, y + 1],
-      [x + 1, y + 1],
-    ].filter(([a, b]) => a < SIZE && b < SIZE);
-    for (const [k, rt] of this.chunks) {
-      const [ccx, ccy] = k.split(",").map(Number);
-      rt.beginDraw();
-      for (const [tx2, ty2] of list) {
-        const p = this.iso(tx2, ty2);
-        const lx = p.x - TW / 2 - ccx * CHW,
-          ly = p.y - ccy * CHH;
-        if (lx < -110 || lx > CHW + 110 || ly < -110 || ly > CHH + 110)
+    this.repaintTileBox(i % SIZE, (i / SIZE) | 0);
+  }
+
+  /**
+   * Repaint the screen box a tile's stack covers, and nothing else. Every tile
+   * that overlaps the box is redrawn into a scratch texture in the same
+   * back-to-front order drawChunk uses, so the box comes out exactly as a full
+   * repaint would. That box is then stamped over each cached chunk it touches.
+   * Stamping the tile's own stack straight onto a chunk would paint its cliff
+   * skirt over the fronts of the tiles ahead of it, which drawChunk had drawn
+   * after it: chopped or corrupted ground grew stray extra cliff bands.
+   */
+  private repaintTileBox(x: number, y: number) {
+    if (!this.chunks.size) return;
+    const TILE_H = 40; // tile art is 64x40: a 32px diamond over its skirt
+    const p0 = this.iso(x, y);
+    const e0 = Math.max(1, this.world.elev[y * SIZE + x] || 1);
+    const bx = Math.floor(p0.x - TW / 2),
+      by = Math.floor(p0.y - (e0 - 1) * 10),
+      bw = TW,
+      bh = Math.ceil(p0.y + TILE_H - by);
+    const scratch = this.make.renderTexture({ width: bw, height: bh }, false).setOrigin(0); // stamped by its top-left corner
+    scratch.beginDraw();
+    // a tile stack reaches at most ~8 levels: 6 tiles either way covers every overlap
+    for (let ty = y - 6; ty <= y + 6; ty++)
+      for (let tx = x - 6; tx <= x + 6; tx++) {
+        const p = this.iso(tx, ty);
+        const left = p.x - TW / 2;
+        if (left >= bx + bw || left + TW <= bx) continue;
+        if (tx < 0 || tx >= SIZE || ty < 0 || ty >= SIZE) {
+          if (p.y < by + bh && p.y + TILE_H > by) scratch.batchDraw("water", left - bx, p.y - by);
           continue;
-        const ii = ty2 * SIZE + tx2;
+        }
+        const ii = ty * SIZE + tx;
         const kk = this.tileKey(ii);
         if (!kk) continue;
         const e = Math.max(1, this.world.elev[ii]);
-        for (let l = 0; l < e; l++) rt.batchDraw(kk, lx, ly - l * 10);
+        if (p.y - (e - 1) * 10 >= by + bh || p.y + TILE_H <= by) continue;
+        for (let l = 0; l < e; l++) scratch.batchDraw(kk, left - bx, p.y - l * 10 - by);
       }
-      rt.endDraw();
+    scratch.endDraw();
+    for (const [k, rt] of this.chunks) {
+      const [ccx, ccy] = k.split(",").map(Number);
+      const lx = bx - ccx * CHW,
+        ly = by - ccy * CHH;
+      if (lx >= CHW || ly >= CHH || lx + bw <= 0 || ly + bh <= 0) continue;
+      rt.draw(scratch, lx, ly);
     }
+    scratch.destroy();
   }
 
   jump() {
@@ -1164,17 +1194,18 @@ class Hearth extends Phaser.Scene {
   }
 
   addCropOverlay(i: number, crop: string, stage: number) {
-    // stage 0 = nothing visible yet
-    if (stage === 0) return;
+    // Every planted plot shows something: stage 0 is fresh sprouts. (It used to
+    // draw nothing, which left the plot looking empty for the whole first third
+    // of the grow time — and with no sprite, E tried to plant it again.)
     const existing = this.cropSpr.get(i);
     if (existing) {
       existing.destroy();
       this.cropSpr.delete(i);
     }
     const p = this.isoE(i % SIZE, (i / SIZE) | 0);
-    // pick texture: glowcap uses glow_mushroom, wheat uses crop
-    const tex = crop === "glowcap" ? "glow_mushroom" : "crop";
-    const scale = stage === 1 ? 0.55 : 1.0;
+    // sprouts, then the crop half-grown (wheat still green), then ripe
+    const tex = stage === 0 ? "crop_sprout" : crop === "glowcap" ? "glow_mushroom" : "crop";
+    const scale = stage === 1 ? 0.6 : 1.0;
     // FIX 2: crop overlay alpha driven entirely by z — underground/indoors show ghost-faint
     const baseAlpha = stage === 1 ? 0.8 : 1.0;
     const alpha = this.z === 0 ? baseAlpha : 0.15;
@@ -1184,6 +1215,8 @@ class Hearth extends Phaser.Scene {
       .setDepth(p.y + 21)
       .setScale(scale * 1.3)
       .setAlpha(alpha);
+    if (stage === 0 && crop === "glowcap") s.setTint(0x7fd6c8); // glowcap shoots are pale teal
+    if (stage === 1 && crop !== "glowcap") s.setTint(0xa9d27f); // unripe wheat is green
     // crop growth pop: brief scale pulse settling into the target stage scale
     this.tweens.add({
       targets: s,
@@ -1224,6 +1257,7 @@ class Hearth extends Phaser.Scene {
     for (const s of this.aniSpr.values()) s.setVisible(z === 0);
     for (const s of this.medicSpr.values()) s.setVisible(z === 0);
     for (const s of this.medicHutSpr.values()) s.setVisible(z === 0);
+    this.folk.setVisible(z);
     for (const s of this.ugFloor.values()) s.setVisible(z === 1);
     for (const s of this.ugRock.values()) s.setVisible(z === 1);
     for (const s of this.ugOre.values()) s.setVisible(z === 1);
@@ -1414,6 +1448,9 @@ class Hearth extends Phaser.Scene {
       // set here (the legacy path derives the same spawns locally instead).
       this.medics = Array.isArray(m.medics) ? m.medics : [];
       this.buildWorld(m.seed, m.removed, m.mud, m.infected, m.brokenBergs);
+      // camps after buildWorld: it rebuilds medicBlock, and their hut + fire tiles join it
+      this.folk.setCamps(m.camps);
+      for (const i of this.folk.blockTiles(SIZE)) this.medicBlock.add(i);
       for (const [i, kind, hp, dir, lvl] of m.structures || [])
         for (let l = 1; l <= (lvl || 1); l++)
           this.addStruct(i, kind, hp, dir, l);
@@ -1823,6 +1860,19 @@ class Hearth extends Phaser.Scene {
         // scene-owned timer: dies with the scene, so it can never touch a sprite freed by a quit
         this.time.delayedCall(900, () => bs.clearTint());
       }
+    } else if (m.t === "calert") {
+      // a creature has spotted its prey: a "!" pops over it
+      const cs = this.creSpr.get(m.id);
+      if (cs && cs.visible) {
+        const t = this.add
+          .text(cs.x, cs.y - cs.displayHeight - 2, "!", {
+            fontFamily: "Georgia, serif", fontSize: "18px", fontStyle: "bold",
+            color: "#ff5a3c", stroke: "#2a0d08", strokeThickness: 4,
+          })
+          .setOrigin(0.5, 1)
+          .setDepth(cs.depth + 2);
+        this.tweens.add({ targets: t, y: t.y - 10, duration: 160, yoyo: true, hold: 380, onComplete: () => t.destroy() });
+      }
     } else if (m.t === "stat") {
       this.hunger = m.hunger;
       this.thirst = m.thirst;
@@ -1868,10 +1918,10 @@ class Hearth extends Phaser.Scene {
       this.audio.whoosh();
       const s = this.creSpr.get(m.id) || this.aniSpr.get(m.id);
       if (s) {
-        s.setTintFill(0xffffff);
-        // restore any base tint (shambler/wraith) — clearTint alone would revert them to base art
+        s.setTintFill(0xffffff).setData("flashing", true); // the gait's tint glow waits
+        // restore any base tint — clearTint alone would revert to the bare art
         const baseTint = s.getData("baseTint");
-        this.time.delayedCall(80, () => { s.clearTint(); if (baseTint) s.setTint(baseTint); });
+        this.time.delayedCall(80, () => { s.clearTint().setData("flashing", false); if (baseTint) s.setTint(baseTint); });
         // tween toward pushed position over 90ms with Back.easeOut (Guide §2.2)
         if (m.ang !== undefined) {
           const tx2 = s.getData("tx"),
@@ -1905,21 +1955,14 @@ class Hearth extends Phaser.Scene {
             .setOrigin(0.5, 0.9)
             .setVisible(this.z === 0);
           this.creSpr.set(cid, s);
-          // per-creature gait is driven per-frame from the position-lerp loop in update()
-          // (see creatureGaitTick) instead of one infinite tween per spawned creature —
-          // this also removes the old conflict where the wisp/frost_wraith hover tween and
-          // the lerp loop both wrote sprite.y every frame.
+          // per-creature gait (walk / sprint, src/creatureGait.ts) is driven per-frame
+          // from the position-lerp loop in update(), not by tweens.
           let base = 1;
           if (type === "brute") base = 1.15;
           if (type === "blight_lancer") base = 1.1;
-          if (type === "bog_shambler") {
-            s.setTint(0x557755).setData("baseTint", 0x557755);
-            base = 1.3;
-          }
-          // drowned has its own art — no tint, so the hit flash can't wipe its colour
-          if (type === "frost_wraith") {
-            s.setTint(0xbfe8ff).setData("baseTint", 0xbfe8ff);
-          }
+          if (type === "bog_shambler") base = 1.3;
+          // every type has its own art now (shambler / wraith / husk wolf included),
+          // so none carries a base tint for the hit flash to restore
           if (type === "wisp" || type === "frost_wraith")
             s.setAlpha(type === "frost_wraith" ? 0.8 : 0.85);
           s.setScale(base);
@@ -1927,6 +1970,7 @@ class Hearth extends Phaser.Scene {
             .setData("gBase", base)
             .setData("gPhase", Math.random() * 10);
         }
+        sampleCreature(s, x, y, this.time.now); // ground speed + facing, before cx/cy move on
         s.setData("tx", p.x).setData("ty", p.y).setData("cx", x).setData("cy", y);
       }
       for (const [cid, s] of this.creSpr)
@@ -1984,6 +2028,7 @@ class Hearth extends Phaser.Scene {
         else if (p.x > s.x + 0.5) s.setFlipX(false);
         s.setData("tx", p.x).setData("ty", p.y).setData("cx", x).setData("cy", y);
       }
+      this.folk.sync(m.f);
       for (const [aid, s] of this.aniSpr)
         if (!aseen.has(aid)) {
           if (this.me && Math.hypot(s.x - this.me.x, s.y - this.me.y) < 200)
@@ -2187,6 +2232,27 @@ class Hearth extends Phaser.Scene {
   applyChunkMsg(m: ChunkMsg) {
     const d = this.world.applyChunk(m);
     if (!d) return;
+    // §8.3 overlays first, so nothing below draws what is already gone. The
+    // chunk is the whole truth for its nodes: harvested ones stay hidden (a felled
+    // tree must not reappear on rejoin — or on top of what was built there since),
+    // and any this client thought harvested but the server has regrown come back.
+    const gone = new Set(d.removed);
+    for (const i of d.nodes) {
+      if (gone.has(i)) {
+        this.removedNodes.add(i);
+        this.nodeSpr.get(i)?.destroy();
+        this.nodeSpr.delete(i);
+      } else this.removedNodes.delete(i);
+    }
+    for (const i of d.brokenBergs) {
+      this.brokenBergs.add(i);
+      this.bergSpr.get(i)?.destroy();
+      this.bergSpr.delete(i);
+    }
+    for (const i of d.mud) {
+      this.mud.add(i);
+      this.mutTiles.set(i, "mud"); // painted by the repaint this chunk triggers
+    }
     for (const i of d.nodes) this.spawnNode(i);
     for (const [i, key] of d.decor) this.addDecor(i, key);
     for (const i of d.bergs) this.addBerg(i);
@@ -2195,10 +2261,14 @@ class Hearth extends Phaser.Scene {
       for (let l = 1; l <= (st.lvl || 1); l++)
         this.addStruct(st.i, st.kind, st.hp, st.dir, l);
     for (const md of d.mods) this.addModule(md.i, md.slot, md.kind, md.hp, md.dir);
+    for (const i of d.torches) this.addTorch(i);
+    for (const f of d.furn) this.addFurn(f.i, f.kind, f.z);
+    for (const f of d.farms) this.addCropOverlay(f.i, f.crop, f.stage);
     // Repainting is coalesced to one pass per frame: a join delivers 25 chunks at once.
     this.terrainDirty = true;
     this.placePendingNotes();
     this.placePendingMedics();
+    this.folk.placePending();
   }
 
   spawnNode(i: number) {
@@ -2612,6 +2682,11 @@ class Hearth extends Phaser.Scene {
         }
       }
     }
+    // one of the camp folk? they say their piece
+    if (now - this.folkTalkAt > 700 && this.folk.talk()) {
+      this.folkTalkAt = now;
+      return;
+    }
     // nearest live node in reach
     let best = -1,
       bd = 2.4;
@@ -2704,64 +2779,6 @@ class Hearth extends Phaser.Scene {
   // position-lerp loop in update(). Reads/writes only sprite-local data (setData), so no
   // extra timers or tweens are needed and state is naturally cleared when the sprite is
   // destroyed via the existing death/removal path.
-  creatureGaitTick(
-    s: Phaser.GameObjects.Sprite,
-    type: string,
-    dt: number,
-    moving: boolean,
-    near: boolean,
-  ) {
-    const base = s.getData("gBase") ?? 1;
-    let phase = s.getData("gPhase") ?? 0;
-    if (type === "crawler" || type === "drowned") {
-      // low, fast squash-stretch bob + a slight forward pitch while moving
-      phase += dt * (moving ? 13 : 4);
-      const bob = Math.sin(phase);
-      s.setScale(base * (1 - bob * 0.06), base * (1 + bob * 0.1));
-      s.setRotation(moving ? Math.sin(phase * 0.5) * 0.06 * (s.flipX ? -1 : 1) : 0);
-    } else if (type === "stalker" || type === "husk_wolf") {
-      // smooth low prowl, faster bob, small crouch when close to the local player
-      phase += dt * (moving ? 9 : 3);
-      const bob = Math.sin(phase);
-      const crouch = near ? 0.86 : 1;
-      s.setScale(base * (1 + bob * 0.02), base * crouch * (1 - Math.abs(bob) * 0.05));
-    } else if (type === "brute" || type === "bog_shambler") {
-      // heavy 2-beat stomp cadence with a footfall dust puff
-      phase += dt * (moving ? 3.2 : 0.5);
-      const beat = Math.abs(Math.sin(phase));
-      s.setScale(base * (1 + (1 - beat) * 0.05), base * (1 - (1 - beat) * 0.13));
-      const footDown = beat < 0.12 ? 1 : 0;
-      if (moving && footDown && !s.getData("gFoot")) this.spawnDust(s.x, s.y + 2);
-      s.setData("gFoot", footDown);
-    } else if (type === "wisp" || type === "frost_wraith") {
-      // continuous hover (additive visual offset only — never written to the lerp base)
-      // plus a slow alpha/scale pulse
-      phase += dt * 1.4;
-      s.setData("gHoverY", Math.sin(phase) * 6);
-      const pulse = (Math.sin(phase * 0.6) + 1) / 2;
-      s.setAlpha((type === "frost_wraith" ? 0.72 : 0.78) + pulse * 0.16);
-      s.setScale(base * (1 + pulse * 0.06));
-    } else if (type === "blight_lancer") {
-      // slow sway + a gentle constant charge-up pulse (no server telegraph exists for this
-      // type — 'ctel' only fires for brute/bog_shambler — so this is the cosmetic fallback)
-      phase += dt;
-      s.setRotation(Math.sin(phase) * 0.05);
-      const pulse = (Math.sin(phase * 1.6) + 1) / 2;
-      const charge = Math.pow(pulse, 3);
-      s.setScale(base * (1 + charge * 0.06));
-      if (charge > 0.05) {
-        const c = Phaser.Display.Color.Interpolate.ColorWithColor(
-          Phaser.Display.Color.IntegerToColor(0xffffff),
-          Phaser.Display.Color.IntegerToColor(0xffb3ff),
-          100,
-          Math.min(100, charge * 100),
-        );
-        s.setTint(Phaser.Display.Color.GetColor(c.r, c.g, c.b));
-      } else s.clearTint();
-    }
-    s.setData("gPhase", phase);
-  }
-
   /** Begin a leap on a creature sprite (no-op mid-leap or for types that never jump). */
   startCreatureJump(s: Phaser.GameObjects.Sprite, spec?: { dur: number; h: number }) {
     if (!spec || (s.getData("jT") ?? -1) >= 0) return;
@@ -2770,7 +2787,7 @@ class Hearth extends Phaser.Scene {
 
   // Leap layer on top of the gait: anticipation crouch → stretched arc → landing squash
   // with a dust puff, plus a ground shadow that stays put while the body rises. Runs after
-  // creatureGaitTick in the same frame, so it multiplies the gait's scale for this frame
+  // tickCreatureGait in the same frame, so it multiplies the gait's scale for this frame
   // and returns the y lift; like the gait it is client-local and purely cosmetic.
   creatureJumpTick(
     s: Phaser.GameObjects.Sprite,
@@ -3110,17 +3127,16 @@ class Hearth extends Phaser.Scene {
       if (vy === undefined) vy = s.y;
       vx += (tx - vx) * 0.15;
       vy += (ty - vy) * 0.15;
-      const pvx = s.getData("gpvx") ?? vx,
-        pvy = s.getData("gpvy") ?? vy;
-      const moving = Math.hypot(vx - pvx, vy - pvy) > 0.12;
-      s.setData("gvx", vx).setData("gvy", vy).setData("gpvx", vx).setData("gpvy", vy);
+      s.setData("gvx", vx).setData("gvy", vy);
       const near = Math.hypot(vx - this.me.x, vy - this.me.y) < 130;
-      this.creatureGaitTick(s, s.getData("ctype"), dt, moving, near);
+      tickCreatureGait(this, s, s.getData("ctype"), dt, near, this.me.x,
+        this.tileAt(s.getData("cx") ?? 0, s.getData("cy") ?? 0) === T.WATER);
       const lift = this.creatureJumpTick(s, s.getData("ctype"), dt, near, vx, vy);
       s.x = vx;
       s.y = vy + (s.getData("gHoverY") || 0) - lift;
       s.setDepth(vy);
     }
+    this.folk.tick(dt);
     // animals: plain lerp (gait not in scope here — only the listed creature types)
     for (const s of this.aniSpr.values()) {
       const tx = s.getData("tx"),

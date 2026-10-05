@@ -78,6 +78,29 @@ type Creature struct {
 	DX, DY  float64
 	FleeTk  int
 	FleeAng float64
+
+	// Hunting brain (creature_ai.go): spawn hp for the wounded check, last
+	// known prey position and how long it is remembered, hit-and-run retreat,
+	// the cached detour path, and the idle amble.
+	MaxHP        int
+	LastX, LastY float64
+	Memory       int
+	Hunting      bool
+	Retreat      int
+	Path         []int
+	PathGoal     int
+	PathAt       int
+	PathFailAt   int
+	WanderTk     int
+	WDX, WDY     float64
+	Orbit        float64 // +1 / -1: which way a lancer strafes
+	Fled         bool    // the wounded break-off has been spent
+	// a bridge the creature is making for to cross water: ViaI is its tile,
+	// ViaAt the tick it was chosen (0 = none)
+	ViaI  int
+	ViaAt int64
+	// the shore a stranded non-swimmer is floundering toward (-1 = not chosen)
+	AshoreI int
 }
 
 // addCreature registers a creature in both the map and the ordered slice.
@@ -390,7 +413,10 @@ func (r *Room) newCreature(x, y float64, hp int, typ string, homeI int, hasHome 
 	r.nextCre++
 	c := &Creature{
 		ID: "c" + itoa(r.nextCre), X: x, Y: y, HP: hp, Type: typ,
-		HomeI: homeI, HasHome: hasHome,
+		HomeI: homeI, HasHome: hasHome, MaxHP: hp, Orbit: 1, AshoreI: -1,
+	}
+	if r.nextCre%2 == 1 { // alternate strafe sides without touching the RNG stream
+		c.Orbit = -1
 	}
 	r.addCreature(c)
 	return c
@@ -413,6 +439,7 @@ func (r *Room) creatureTick(strength int, nowMs int64) {
 		}
 	}
 
+	r.sampleVelocities()
 	for _, c := range append([]*Creature(nil), r.creOrder...) {
 		if _, alive := r.creatures[c.ID]; !alive {
 			continue // died or despawned earlier in this same pass
@@ -473,7 +500,7 @@ func (r *Room) stepCreature(c *Creature, strength int, nowMs int64) {
 				stifw := ti(nxfw, nyfw)
 				// medicTiles must block the dart, exactly as it blocks steering
 				// and the leash walk-home. This is a fixed bug — do not drop it.
-				if inBounds(stifw) && r.world.Tiles[stifw] != world.TWater &&
+				if inBounds(stifw) && r.creFooting(stifw) &&
 					!r.medicTiles[stifw] && r.structures[stifw] == nil {
 					c.X, c.Y = nxfw, nyfw
 				}
@@ -544,6 +571,12 @@ func (r *Room) stepCreature(c *Creature, strength int, nowMs int64) {
 		}
 	}
 
+	// --- stranded: a bridge went out from under it ---
+	if !canSwim[typ] && !r.creFooting(ti(c.X, c.Y)) {
+		r.wadeAshore(c, baseSp)
+		return
+	}
+
 	// --- leash: walk home if too far and no player near ---
 	if c.HasHome {
 		homeX := float64(c.HomeI % world.SIZE)
@@ -559,7 +592,7 @@ func (r *Room) stepCreature(c *Creature, strength int, nowMs int64) {
 			nhy := c.Y + ((homeY-c.Y)/dhw)*sphw
 			nhI := ti(nhx, nhy)
 			// medicTiles blocks the walk-home too (medic-hut fix).
-			if inBounds(nhI) && r.world.Tiles[nhI] != world.TWater &&
+			if inBounds(nhI) && r.creFooting(nhI) &&
 				!r.medicTiles[nhI] && r.structures[nhI] == nil {
 				c.X, c.Y = nhx, nhy
 			}
@@ -581,6 +614,8 @@ func (r *Room) stepCreature(c *Creature, strength int, nowMs int64) {
 	}
 
 	// --- target selection ---
+	var prey *Player // the player being hunted, when the target is one
+	mode := aiHunt
 	if r.wave != nil {
 		tx = float64(r.wave.engineI % world.SIZE)
 		ty = float64(r.wave.engineI / world.SIZE)
@@ -628,7 +663,7 @@ func (r *Room) stepCreature(c *Creature, strength int, nowMs int64) {
 					if d := math.Hypot(q.X-c.X, q.Y-c.Y); d < bd {
 						bd = d
 						tx, ty = q.X, q.Y
-						haveTarget = true
+						haveTarget, prey = true, q
 					}
 				}
 			}
@@ -639,7 +674,7 @@ func (r *Room) stepCreature(c *Creature, strength int, nowMs int64) {
 				if d := math.Hypot(q.X-c.X, q.Y-c.Y); d < bd {
 					bd = d
 					tx, ty = q.X, q.Y
-					haveTarget = true
+					haveTarget, prey = true, q
 				}
 			}
 		}
@@ -658,10 +693,10 @@ func (r *Room) stepCreature(c *Creature, strength int, nowMs int64) {
 			}
 		}
 		if nearP != nil {
-			haveTarget = true
+			haveTarget, prey = true, nearP
 			if nearD <= 8 {
 				toPlayer := math.Atan2(nearP.Y-c.Y, nearP.X-c.X)
-				orbitAng := toPlayer + math.Pi/2
+				orbitAng := toPlayer + math.Pi/2*c.Orbit
 				c.OrbitTicks++
 				if c.OrbitTicks >= 3 {
 					tx, ty = nearP.X, nearP.Y // dart straight at 1.25x
@@ -688,7 +723,7 @@ func (r *Room) stepCreature(c *Creature, strength int, nowMs int64) {
 			if d < math.Min(bd, rad) {
 				bd = d
 				tx, ty = q.X, q.Y
-				haveTarget = true
+				haveTarget, prey = true, q
 			}
 		}
 		// husk_wolf pack-link: inherit a pack-mate's enrage within 12 tiles
@@ -708,44 +743,111 @@ func (r *Room) stepCreature(c *Creature, strength int, nowMs int64) {
 	}
 
 	if !haveTarget {
+		tx, ty, mode, haveTarget = r.creatureIdle(c, typ)
+	}
+	if !haveTarget {
 		return
+	}
+
+	spMult := 1.0
+	if typ == "stalker" && c.OrbitTicks == 0 && mode == aiHunt {
+		spMult = 1.25
+	}
+	switch mode {
+	case aiSearch:
+		spMult = 0.8
+	case aiFolk:
+		spMult = 0.9
+	case aiWander:
+		spMult = 0.4
+	}
+	rawSp := (baseSp*(1+enrageBonus) + float64(strength)*0.03) * spMult
+	if prey != nil {
+		r.creatureSawPrey(c, prey)
+		tx, ty = r.creatureTactics(c, typ, prey, tx, ty, rawSp)
 	}
 
 	distT := math.Hypot(tx-c.X, ty-c.Y)
 	if distT == 0 {
 		distT = 0.001
 	}
-	spMult := 1.0
-	if typ == "stalker" && c.OrbitTicks == 0 {
-		spMult = 1.25
+	swims := canSwim[typ]
+	// where the feet head: the target itself, or a bridge on the way to it
+	gx, gy := tx, ty
+	if vx, vy, ok := r.viaGoal(c); ok && mode != aiWander && !swims {
+		gx, gy = vx, vy
 	}
-	sp := math.Min((baseSp*(1+enrageBonus)+float64(strength)*0.03)*spMult, distT)
-	moveAng := math.Atan2(ty-c.Y, tx-c.X)
+	sp := math.Min(rawSp, math.Max(math.Hypot(gx-c.X, gy-c.Y), 0.001))
+	fear := r.fearsFire(c, typ)
+	blocked := func(i int, x, y float64) bool {
+		return r.creStepBlocked(i, swims) || (fear && r.fireBlocks(c, x, y))
+	}
+
+	// a cached detour leads the way while it still points at this target
+	aimX, aimY := gx, gy
+	if wx, wy, ok := r.followPath(c, gx, gy); ok {
+		aimX, aimY = wx, wy
+	}
+	moveAng := math.Atan2(aimY-c.Y, aimX-c.X)
 
 	// water/obstacle steering: try +/-35 degrees if blocked. medicTiles blocks
 	// creature steering — the medic-hut fix.
 	nx := c.X + math.Cos(moveAng)*sp
 	ny := c.Y + math.Sin(moveAng)*sp
 	ni := ti(nx, ny)
-	swims := canSwim[typ]
-	_, occupied := r.structures[ni]
-	if !inBounds(ni) || (r.tileAt(ni) == world.TWater && !swims) || r.medicTiles[ni] ||
-		(occupied && r.creBlocked(ni)) || r.wallBlocks(ni) {
+	if blocked(ni, nx, ny) {
 		moved := false
 		for _, rot := range [2]float64{35 * math.Pi / 180, -35 * math.Pi / 180} {
 			tryAng := moveAng + rot
 			tnx := c.X + math.Cos(tryAng)*sp
 			tny := c.Y + math.Sin(tryAng)*sp
 			tni := ti(tnx, tny)
-			_, tOcc := r.structures[tni]
-			if inBounds(tni) && (r.tileAt(tni) != world.TWater || swims) && !r.medicTiles[tni] &&
-				(!tOcc || !r.creBlocked(tni)) && !r.wallBlocks(tni) {
+			if !blocked(tni, tnx, tny) {
 				nx, ny, ni = tnx, tny, tni
 				moved = true
 				break
 			}
 		}
+		if !moved && mode != aiWander {
+			// boxed in on the straight line: look for a way round before
+			// falling back to gnawing through
+			wx, wy, ok := r.planPath(c, gx, gy, swims, fear)
+			if !ok && !swims && c.ViaAt == 0 {
+				// water in the way and no short path: make for a keeper's bridge
+				if bi, found := r.pickBridge(c, tx, ty); found {
+					c.ViaI, c.ViaAt = bi, max(r.tickN, 1)
+					c.PathFailAt, c.Path = 0, nil
+					gx, gy = float64(bi%world.SIZE)+0.5, float64(bi/world.SIZE)+0.5
+					wx, wy, ok = r.planPath(c, gx, gy, swims, fear)
+					if !ok {
+						wx, wy, ok = gx, gy, true // out of the BFS window: head straight for it
+					}
+				}
+			}
+			if ok {
+				pa := math.Atan2(wy-c.Y, wx-c.X)
+				pnx, pny := c.X+math.Cos(pa)*sp, c.Y+math.Sin(pa)*sp
+				pni := ti(pnx, pny)
+				if blocked(pni, pnx, pny) {
+					// straight at a far bridge: slide along the shore
+					for _, rot := range [2]float64{35 * math.Pi / 180, -35 * math.Pi / 180} {
+						tnx, tny := c.X+math.Cos(pa+rot)*sp, c.Y+math.Sin(pa+rot)*sp
+						if tni := ti(tnx, tny); !blocked(tni, tnx, tny) {
+							pnx, pny, pni = tnx, tny, tni
+							break
+						}
+					}
+				}
+				if !blocked(pni, pnx, pny) {
+					nx, ny, ni = pnx, pny, pni
+					moved = true
+				}
+			}
+		}
 		if !moved {
+			if mode == aiWander {
+				c.WanderTk = 0 // pick a new heading next tick
+			}
 			nx, ny = c.X, c.Y // stop this tick
 		}
 	}
@@ -755,8 +857,8 @@ func (r *Room) stepCreature(c *Creature, strength int, nowMs int64) {
 	case s != nil && r.defs.DecorNonBlk[s.Kind]:
 		// creatures walk over non-blocking decor
 		c.X, c.Y = nx, ny
-	case s != nil && distT > 1.2 && typ != "bog_shambler":
-		// bog_shambler ignores structures
+	case s != nil && distT > 1.2 && typ != "bog_shambler" && mode == aiHunt:
+		// bog_shambler ignores structures; only a hunt gnaws through
 		if r.tickN%5 == 0 {
 			dmg := 1
 			if typ == "brute" {
@@ -775,7 +877,15 @@ func (r *Room) stepCreature(c *Creature, strength int, nowMs int64) {
 				r.broadcast(map[string]any{"t": "sd", "i": ni, "hp": s.HP})
 			}
 		}
+	case s != nil && r.creBlocked(ni):
+		// searching / chasing folk / ambling: never walk into a structure
 	default:
+		// keep a little room from the pack, if that room is open ground
+		if snx, sny := r.separate(c, nx, ny); snx != nx || sny != ny {
+			if si := ti(snx, sny); !blocked(si, snx, sny) {
+				nx, ny = snx, sny
+			}
+		}
 		c.X, c.Y = nx, ny
 	}
 
@@ -798,6 +908,7 @@ func (r *Room) stepCreature(c *Creature, strength int, nowMs int64) {
 					continue
 				}
 				r.hitPlayer(q, c, cdmg, nowMs, false)
+				struckRetreat(c, typ)
 			}
 		}
 	}
@@ -918,7 +1029,8 @@ func (r *Room) bruteBolt(c *Creature, nowMs int64) {
 	}
 	for _, q := range r.playerOrder {
 		d := math.Hypot(q.X-c.X, q.Y-c.Y)
-		if q.Z == 0 && d > 1.5 && d < 7 && r.tileAtXY(q.X, q.Y) == world.TWater {
+		// a player on a bridge is within reach on foot: no bolt
+		if q.Z == 0 && d > 1.5 && d < 7 && !r.creFooting(ti(q.X, q.Y)) {
 			c.ShotCd = 3 // one bolt every ~3s
 			q.LastDamageAt = nowMs
 			q.HP -= r.creatureDamage(q, 1)
