@@ -67,6 +67,10 @@ deliberately NOT used in Slice 1 — debuggability over the last few percent of 
       "x": 190, "y": 172, "hutSprite": "medic_hut", "hutX": 190, "hutY": 170 },
     { "id": "medic-spire", "islandId": "spire", "sprite": "medic_snow",
       "x": 189, "y": 1107, "hutSprite": "medic_hut_snow", "hutX": 189, "hutY": 1105 }
+  ],
+  "camps": [                   // §13 — the island camps (folk huts + fires)
+    { "id": "camp-woods", "islandId": "woods", "hutSprite": "folk_hut",
+      "hutX": 172, "hutY": 187, "fireX": 174, "fireY": 190 }
   ]
 }
 ```
@@ -294,7 +298,14 @@ omitted array means empty.
 
 `removed` lists tiles that still appear in the chunk's `nodes` array but are
 currently harvested; the client must not draw them until a `{t:'node', hp:-1}`
-respawn arrives.
+respawn arrives. A chunk is the whole truth for its nodes: a node it lists but
+does not mark `removed` is standing.
+
+A harvested node does not respawn while its tile is built on (a structure, a
+farm, any module slot, or a reserved NPC tile). Its timer is pushed back 60 s at
+a time until the tile is clear. On load, a node standing on a built tile is
+felled the same way. Nothing may be placed over a standing node: `build`
+refuses it, as it always has, and `buildmod` answers `modfail` with `why: "node"`.
 
 ### 8.4 Rules data
 
@@ -343,6 +354,7 @@ Broadcast once per tick whenever at least one player is connected:
   "t": "cre",
   "c": [ ["c12", 640.25, 641.00, "crawler"] ],   // id, x, y, type
   "a": [ ["a3", 182.50, 179.75, "deer"] ],       // id, x, y, species
+  "f": [ ["camp-woods-0", 174.12, 188.40, "villager", "walk"] ], // §13 — id, x, y, kind, act
   "time": 0.3141, "day": 2
 }
 ```
@@ -363,6 +375,7 @@ Wildlife species: `deer`, `boar` (Woods), `lizard`, `crab` (Dunes), `fox`, `hare
 | `hp` | to one player | Gains an `ang` field when the damage came from a creature: the direction to shove the player. |
 | `slow` | to one player | `{ ticks: 30 }` — the frost wraith's chilling touch. |
 | `ctel` | broadcast | `{ id }` — a brute or bog shambler has begun its 8-tick telegraph windup. |
+| `calert` | broadcast | `{ id }` — a creature has just locked on to a player (§13.3). Once per hunt, not per tick. |
 | `shot` | broadcast | `{ fx, fy, tx, ty }` for the brute's blight bolt, plus `kind: "lance"` for the blight lancer's beam. Coordinates rounded to 1 decimal. |
 | `sd` | broadcast | Already in Slice 2; creatures now also drive it by gnawing structures. |
 
@@ -837,7 +850,7 @@ tiles and refunds half its materials, mirroring structure demolition.
 
 `modfail` echoes the request's `seq` so the client clears that exact preview
 instead of guessing. `why` is one of `unknown-module`, `bad-slot`, `bad-tile`,
-`outdoors-only`, `too-far`, `water`, `blocked`, `tile-occupied`,
+`outdoors-only`, `too-far`, `water`, `blocked`, `node`, `tile-occupied`,
 `slot-occupied`, `unsupported`, `occupied`, `no-anchor`, `cost`. It is advisory text for the UI — the authoritative fact
 is simply that no `mod` broadcast followed.
 
@@ -933,3 +946,66 @@ The worn state rides `armor: bool` on `init`, `inv`, each `players` entry,
 `pj`, and the `worn` broadcast (`{t:"worn", id, k, armor}`), and is saved in the
 profile (gated on owning the gear when restored).
 
+## 13. Island folk and the hunting brain
+
+### 13.1 Camps
+
+Three camps — Woods (`folk_hut`), Dunes (`folk_hut_dunes`), Marsh
+(`folk_hut_marsh`) — are placed by `world.FindFolkCamps` near each island's
+centre. Placement is deterministic for a world, except that no camp tile may
+overlap the spawn, a medic, or a structure already in the save. A camp's **hut
+and fire tiles** join the medic block set: nothing may build on, walk through or
+path through them, on the server or in client prediction. The door tile in front
+of the hut stays open. `camps` rides `init` (§3) whole, like `medics`.
+
+### 13.2 Folk
+
+Each camp has a fixed roster (Woods: `villager`, `villager2`, `woods_child`;
+Dunes: `ashmark_hunter`, `villager2`; Marsh: `elder_yvenne`, `villager`). Folk are
+server-simulated, cannot be attacked, and ride every `cre` frame as
+`f: [id, x, y, kind, act]` (positions are tile-centre floats, 2 dp). `act` is one
+of `idle`, `walk`, `run`, `talk`, `sit`, `collect`, `build`, `craft`, `hide`:
+
+- By day they wander the yard, work, sit at the fire, and stop and `talk` to a
+  surface player within 2.4 tiles. What they say is client-side flavour.
+- A creature within 7 tiles sends them running (`run`) to the hut door; inside
+  they are `hide` and invisible to creatures. They come back out once nothing is
+  within 10 tiles for 15 ticks.
+- At night everyone but the camp's watcher (the hunter, the elder) turns in
+  (`hide`); the watcher sits by the fire until something comes for it.
+
+### 13.3 Creature AI on top of the legacy port
+
+The Slice 3 rules (§9) still pick targets, ranges and damage. Layered on top:
+
+- **Memory.** Prey that leaves aggro range is searched for at its last known
+  position for 30 ticks. A struck creature rouses every non-wisp creature within
+  10 tiles toward the attacker.
+- **`calert`.** Sent once when a creature first locks on to a player.
+- **Detours.** When the direct step and the ±35° turns are all blocked, a bounded
+  BFS (22-tile window) finds a way round. If the target is beyond the window or
+  unreachable inside it, the creature heads for the reachable tile nearest the
+  target, as long as that tile is at least one tile closer. Only a hunt that
+  can't get any closer gnaws through structures, as before, so a fully enclosed
+  base is still besieged.
+- **Bridges.** Bridged water (`mod_bridge_segment` floor modules) is solid
+  ground for every creature, and for folk. When water blocks a non-swimmer and
+  no short path exists, it picks a bridge within 45 tiles. It weighs the walk
+  to the bridge against how close the bridge gets it to the target, so it
+  prefers the far end. It heads there for up to 150 ticks, or until it arrives
+  or the bridge is destroyed. Brutes no longer fire their water bolt at a
+  player standing on a bridge, since they can walk out to them.
+- **Cut bridges.** Removing a bridge segment drops every creature's cached route
+  and bridge plan. A non-swimmer left in open water flounders toward the nearest
+  land at half speed and cannot deal damage until it's ashore. With no land
+  within 12 tiles, it drowns and is simply dropped from the `cre` frame.
+- **Tactics.** Chasers lead a moving player. Husk wolves spread out around their
+  prey. Stalkers, drowned and wolves fall back after landing a hit. Crawlers,
+  stalkers, drowned and wolves break off once when under a third of their HP.
+  Blight lancers back off inside 4.5 tiles and strafe between 4.5 and 8 tiles.
+- **Fire.** At night, crawlers and husk wolves (unless enraged) will not step
+  deeper into a 2.6-tile ring around a campfire.
+- **Spacing.** Creatures push apart inside 0.75 tiles.
+- **Idle.** With no prey, crawlers, stalkers, wolves and drowned chase folk within
+  12 tiles (folk are never damaged). Every other idle creature ambles near home
+  at 40% speed. Searching, folk-chasing and ambling creatures never gnaw.

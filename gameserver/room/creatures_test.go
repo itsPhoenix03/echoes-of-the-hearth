@@ -501,8 +501,14 @@ func TestLeashOnlyBeyond60(t *testing.T) {
 	c.HomeI, c.HasHome = ti(gx-59, gy), true // 59 tiles: inside the leash
 	f.r.tickN++
 	f.r.stepCreature(c, 1, f.now)
-	if c.X != gx || c.Y != gy {
-		t.Fatalf("a creature 59 tiles from home walked home: moved to %.4f,%.4f", c.X, c.Y)
+	// With no prey it may amble (creature_ai.go), but never at the leash's
+	// half-speed beeline home.
+	moved := math.Hypot(c.X-gx, c.Y-gy)
+	if math.Abs((gx-c.X)-0.22) < 1e-9 && c.Y == gy {
+		t.Fatalf("a creature 59 tiles from home took the leash walk-home step: moved to %.4f,%.4f", c.X, c.Y)
+	}
+	if amble := 0.4 * (0.44 + 0.03); moved > amble+1e-9 {
+		t.Fatalf("idle creature moved %.4f tiles, more than an amble (%.4f)", moved, amble)
 	}
 }
 

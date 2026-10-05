@@ -121,6 +121,43 @@ func (r *Room) handleGather(p *Player, m map[string]any) {
 // removedAt reports whether a node is currently harvested (awaiting respawn).
 func (r *Room) removedAt(i int) bool { _, ok := r.removed[i]; return ok }
 
+// nodeRetryMs: a harvested node whose tile has been built on checks again this
+// often, and regrows once the tile is clear.
+const nodeRetryMs = 60000
+
+// tileBuiltOn: a structure, a farm, any module slot or a reserved NPC tile
+// covers tile i, so a node must not regrow there.
+func (r *Room) tileBuiltOn(i int) bool {
+	if _, ok := r.structures[i]; ok {
+		return true
+	}
+	if _, ok := r.farms[i]; ok {
+		return true
+	}
+	if r.medicTiles[i] {
+		return true
+	}
+	for _, slot := range r.defs.ModuleSlots {
+		if _, ok := r.moduleAt(i, slot); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// clearBuiltOverNodes fells, for good while the ground stays built on, every
+// node standing on a built tile. Saves from before nodes respected buildings
+// have trees grown up through floors and fences; this clears them on load.
+func (r *Room) clearBuiltOverNodes() {
+	now := r.now()
+	for i := range r.world.Nodes {
+		if !r.removedAt(i) && r.tileBuiltOn(i) {
+			delete(r.nodeHP, i)
+			r.removed[i] = now + nodeRetryMs
+		}
+	}
+}
+
 // chopEcosystem is the legacy tree reaction: every 8th tree felled in a 16x16
 // sector turns a few grass tiles to mud.
 func (r *Room) chopEcosystem(x, y int) {

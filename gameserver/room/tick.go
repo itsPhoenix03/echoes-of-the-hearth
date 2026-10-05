@@ -23,10 +23,17 @@ func (r *Room) onSimTick() {
 	// --- node respawns (every 5s) ---
 	if r.tickN%25 == 0 {
 		for i, at := range r.removed {
-			if now > at {
-				delete(r.removed, i)
-				r.broadcast(map[string]any{"t": "node", "i": i, "hp": -1})
+			if now <= at {
+				continue
 			}
+			// nothing regrows through what has been built on its tile: try
+			// again later, so it returns once the ground is clear
+			if r.tileBuiltOn(i) {
+				r.removed[i] = now + nodeRetryMs
+				continue
+			}
+			delete(r.removed, i)
+			r.broadcast(map[string]any{"t": "node", "i": i, "hp": -1})
 		}
 	}
 
@@ -46,6 +53,9 @@ func (r *Room) onSimTick() {
 	// --- wildlife ---
 	r.animalSpawnTick()
 	r.animalTick()
+
+	// --- island folk: daily round, fleeing to their huts ---
+	r.folkTick()
 
 	// --- environmental damage, hunger/thirst, campfire regen (every 5s) ---
 	if r.tickN%25 == 0 {
@@ -103,7 +113,7 @@ func (r *Room) broadcastCre() {
 		a = append(a, []any{an.ID, toFixed(an.X, 2), toFixed(an.Y, 2), an.Type})
 	}
 	r.broadcast(map[string]any{
-		"t": "cre", "c": c, "a": a,
+		"t": "cre", "c": c, "a": a, "f": r.folkWire(),
 		"time": toFixed(r.time, 4), "day": r.day,
 	})
 }

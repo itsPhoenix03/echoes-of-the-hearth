@@ -66,6 +66,7 @@ func (r *Room) addModule(m *Module) {
 	}
 	r.modules[k] = m
 	r.modOrder = append(r.modOrder, k)
+	r.bridgeValid = false
 }
 
 func (r *Room) removeModule(i int, slot string) {
@@ -73,6 +74,10 @@ func (r *Room) removeModule(i int, slot string) {
 	if _, ok := r.modules[k]; !ok {
 		return
 	}
+	if r.isBridge(i) {
+		r.bridgeGone()
+	}
+	r.bridgeValid = false
 	delete(r.modules, k)
 	for n, key := range r.modOrder {
 		if key == k {
@@ -146,6 +151,11 @@ func (r *Room) handleBuildMod(p *Player, m map[string]any) {
 	}
 	if r.medicTiles[i] || world.LandmarkBlock[i] {
 		r.modFail(p, seq, "blocked")
+		return
+	}
+	// a standing tree or rock must be cleared first, exactly as for structures
+	if _, isNode := r.world.Nodes[i]; isNode && !r.removedAt(i) {
+		r.modFail(p, seq, "node")
 		return
 	}
 	// legacy structures own their whole tile — do not mix the two systems.

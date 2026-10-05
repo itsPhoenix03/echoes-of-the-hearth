@@ -26,6 +26,9 @@ func modTile(t *testing.T, f *fixture, nth int) int {
 			if _, taken := f.r.structures[i]; taken {
 				continue
 			}
+			if _, isNode := f.r.world.Nodes[i]; isNode && !f.r.removedAt(i) {
+				continue // modules may not go on a standing tree or rock
+			}
 			if found == nth {
 				return i
 			}
